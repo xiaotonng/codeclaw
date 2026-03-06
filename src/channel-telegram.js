@@ -945,8 +945,8 @@ export class TelegramChannel {
         }
         text = arg;
       } else {
-        await this._sendMessage(chatId, 'Unknown command. /help for usage.', { replyTo: messageId });
-        return;
+        // Pass through unrecognized commands to the engine (e.g. /commit, /simplify, /compact)
+        text = `/${cmd}` + (arg ? ` ${arg}` : '');
       }
     }
 
@@ -957,6 +957,32 @@ export class TelegramChannel {
   // -------------------------------------------------------------------
   // Startup notice
   // -------------------------------------------------------------------
+
+  async _registerBotCommands() {
+    const commands = [
+      // codeclaw native commands
+      { command: 'ask', description: 'Ask the AI agent' },
+      { command: 'engine', description: 'Show or switch engine (codex/claude)' },
+      { command: 'battle', description: 'Run both engines and compare' },
+      { command: 'new', description: 'Reset session (optionally with prompt)' },
+      { command: 'stop', description: 'Clear session thread' },
+      { command: 'status', description: 'Session / engine / thread info' },
+      { command: 'session', description: 'Multi-session: list|use|new|del' },
+      { command: 'clear', description: 'Delete bot messages (default 50)' },
+      { command: 'help', description: 'Show help' },
+      // Engine passthrough commands (claude / codex)
+      { command: 'compact', description: '[engine] Compact conversation context' },
+      { command: 'commit', description: '[engine] Generate a git commit' },
+      { command: 'simplify', description: '[engine] Review and simplify changed code' },
+      { command: 'pr_comments', description: '[engine] Address PR review comments' },
+    ];
+    try {
+      await this._apiCall('setMyCommands', { commands });
+      this.core._log(`registered ${commands.length} bot commands`);
+    } catch (exc) {
+      this.core._log(`setMyCommands failed: ${exc}`, { err: true });
+    }
+  }
 
   async _sendStartupNotice() {
     const { execSync } = await import('node:child_process');
@@ -1001,6 +1027,7 @@ export class TelegramChannel {
   // -------------------------------------------------------------------
 
   async run() {
+    await this._registerBotCommands();
     await this._sendStartupNotice();
     this.core._log(`polling started (mention_required=${this.core.requireMention})`);
 
