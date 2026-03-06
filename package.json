@@ -1,0 +1,40 @@
+{
+  "name": "codeclaw",
+  "version": "0.1.0",
+  "description": "The best IM-driven remote coding experience. Bridge AI coding agents to any IM.",
+  "type": "module",
+  "bin": {
+    "codeclaw": "bin/codeclaw.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "telegram",
+    "ai",
+    "coding",
+    "claude",
+    "codex",
+    "bridge",
+    "cli"
+  ],
+  "author": "xiaotonng",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaotonng/codeclaw.git"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

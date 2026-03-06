@@ -1,9 +1,5 @@
-__pycache__/
-*.pyc
-*.pyo
-dist/
-build/
-*.spec
+node_modules/
 .env
-*.egg-info/
 .DS_Store
+dist/
+*.tgz

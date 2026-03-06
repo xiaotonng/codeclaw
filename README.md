@@ -7,8 +7,9 @@
 IM 交互体验最好的远程编程工具。没有之一。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org)
+[![Node.js 18+](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-0-brightgreen.svg)]()
+[![npm](https://img.shields.io/npm/v/codeclaw)](https://www.npmjs.com/package/codeclaw)
 
 [English](#english) | [中文](#中文)
 
@@ -24,10 +25,10 @@ Most "AI + IM" bridges just forward messages. codeclaw is built from scratch for
 
 - **Real-time streaming** — token-by-token output via Telegram message edits; you see the AI thinking live, not a wall of text after 2 minutes
 - **System-level keep-alive** — triggers OS-level power assertions to prevent your laptop from sleeping, so long-running tasks finish even when you walk away
-- **Dual engine hot-switch** — Claude Code + Codex CLI in one binary, switch with a single command
+- **Dual engine hot-switch** — Claude Code + Codex CLI, switch with a single command
 - **Battle mode** — run both engines in parallel on the same prompt, compare side-by-side
 - **True multi-session** — named sessions with persistent thread IDs; restart codeclaw, resume exactly where you left off
-- **Zero dependencies, single binary** — pure Python stdlib, ~7 MB, runs anywhere Python runs
+- **Zero dependencies, one command** — pure Node.js stdlib, `npx codeclaw` and you're running
 
 ```
 Telegram (your phone / desktop)
@@ -53,8 +54,8 @@ No server. No Docker. No config files. Just one process bridging Telegram to you
 | Multi-session management | **Yes** | Yes | No | No | Partial (tmux) | No |
 | Session persistence (resume after restart) | **Yes** | Yes | No | No | Partial | No |
 | Keep-alive (prevent system sleep) | **Yes** | No | No | No | No | No |
-| Zero dependencies | **Yes** | No (Node.js) | No | No | No (tmux) | No |
-| Single binary distribution | **Yes** | No | No | No | No | No |
+| Zero dependencies | **Yes** | No | No | No | No (tmux) | No |
+| npx one-command start | **Yes** | No | No | No | No | No |
 | Image/photo input support | **Yes** | Partial | No | No | No | No |
 | Paginated long output | **Yes** | No | No | No | N/A | No |
 | Access control (user/chat whitelist) | **Yes** | Partial | No | No | No | No |
@@ -69,7 +70,6 @@ No server. No Docker. No config files. Just one process bridging Telegram to you
 | Battle mode | **Yes** | No | No | No | No |
 | Keep-alive (prevent sleep) | **Yes** | No | No | No | No |
 | Zero dependencies | **Yes** | No | No | No | No |
-| Single binary (~7 MB) | **Yes** | No | No | No | No |
 | Setup time | **~10 seconds** | Minutes | Minutes | Minutes | Minutes |
 | Config files needed | **0** | YAML | YAML + plugins | Config | Config |
 
@@ -93,7 +93,7 @@ This is a critical feature for remote coding — you send a task from your phone
 - **Multi-session** — per-chat session management with named sessions and thread resume
 - **Keep-alive** — OS-level sleep prevention ensures long tasks complete uninterrupted
 - **Full access / safe mode** — let the agent run freely, or lock it down
-- **Zero dependencies** — pure Python stdlib, single file, single binary (~7 MB)
+- **Zero dependencies** — pure Node.js stdlib, no npm install needed
 - **Image input** — send photos to the bot for visual context (screenshots, diagrams)
 - **Paginated output** — long responses are split into navigable pages with inline buttons
 - **Auto-start notice** — sends online status to all known chats on startup
@@ -101,34 +101,22 @@ This is a critical feature for remote coding — you send a task from your phone
 
 ## Quick Start
 
-### From binary (recommended)
-
-Download the binary for your platform from [Releases](https://github.com/xiaotonng/codeclaw/releases):
-
-```bash
-# macOS (Apple Silicon)
-curl -fsSL https://github.com/xiaotonng/codeclaw/releases/latest/download/codeclaw-darwin-arm64 -o codeclaw
-
-# macOS (Intel)
-curl -fsSL https://github.com/xiaotonng/codeclaw/releases/latest/download/codeclaw-darwin-x86_64 -o codeclaw
-
-# Linux (x86_64)
-curl -fsSL https://github.com/xiaotonng/codeclaw/releases/latest/download/codeclaw-linux-x86_64 -o codeclaw
-
-# Then:
-chmod +x codeclaw
-cd your-project/
-./codeclaw -t YOUR_BOT_TOKEN
-```
-
-### From source
+### Using npx (recommended)
 
 ```bash
 cd your-project/
-python3 codeclaw.py -t YOUR_BOT_TOKEN
+npx codeclaw -t YOUR_BOT_TOKEN
 ```
 
-> **Prerequisites:** Python 3.10+, `claude` CLI and/or `codex` CLI in PATH, a Telegram Bot Token from [@BotFather](https://t.me/BotFather).
+### Global install
+
+```bash
+npm install -g codeclaw
+cd your-project/
+codeclaw -t YOUR_BOT_TOKEN
+```
+
+> **Prerequisites:** Node.js 18+, `claude` CLI and/or `codex` CLI in PATH, a Telegram Bot Token from [@BotFather](https://t.me/BotFather).
 
 ## CLI Options
 
@@ -170,16 +158,16 @@ codeclaw [options]
 
 ```bash
 # Basic: Telegram + Claude Code, full access
-codeclaw -t $BOT_TOKEN
+npx codeclaw -t $BOT_TOKEN
 
 # Codex engine, safe mode, restricted users
-codeclaw -t $BOT_TOKEN -e codex --safe-mode --allowed-ids 123456,789012
+npx codeclaw -t $BOT_TOKEN -e codex --safe-mode --allowed-ids 123456,789012
 
 # Custom model, custom working directory
-codeclaw -t $BOT_TOKEN -m sonnet -w ~/projects/my-app
+npx codeclaw -t $BOT_TOKEN -m sonnet -w ~/projects/my-app
 
 # Validate setup without starting
-codeclaw -t $BOT_TOKEN --self-check
+npx codeclaw -t $BOT_TOKEN --self-check
 ```
 
 ## Bot Commands
@@ -197,15 +185,6 @@ codeclaw -t $BOT_TOKEN --self-check
 | `/help` | Show all commands |
 
 > In private/DM chats, just send text directly — no command prefix needed.
-
-## Build
-
-```bash
-pip install pyinstaller
-./build.sh          # outputs dist/codeclaw (~7 MB)
-```
-
-For cross-platform builds, see [build-all.sh](build-all.sh).
 
 ## License
 
@@ -229,10 +208,10 @@ For cross-platform builds, see [build-all.sh](build-all.sh).
 
 - **实时流式输出** — 通过 Telegram 消息编辑逐 token 推送；你能实时看到 AI 的思考过程，而不是等 2 分钟后收到一大段文字
 - **系统级保活** — 触发操作系统级电源断言，防止笔记本休眠，确保长时间任务在你离开后依然完整执行
-- **双引擎热切换** — Claude Code + Codex CLI 集于一个二进制文件，一条命令即可切换
+- **双引擎热切换** — Claude Code + Codex CLI，一条命令即可切换
 - **对战模式** — 同一个 prompt 同时跑两个引擎，结果并排对比
 - **真正的多会话** — 命名会话 + 持久化线程 ID；重启 codeclaw 后可以无缝恢复之前的对话
-- **零依赖、单二进制** — 纯 Python 标准库，~7 MB，有 Python 的地方就能跑
+- **零依赖、一条命令** — 纯 Node.js 标准库，`npx codeclaw` 即可运行
 
 ```
 Telegram（手机 / 桌面端）
@@ -259,7 +238,7 @@ claude / codex CLI
 | 会话持久化（重启恢复） | **支持** | 支持 | 不支持 | 不支持 | 部分 | 不支持 |
 | 保活（防止系统休眠） | **支持** | 不支持 | 不支持 | 不支持 | 不支持 | 不支持 |
 | 零依赖 | **是** | 否（Node.js） | 否 | 否 | 否（tmux） | 否 |
-| 单二进制分发 | **是** | 否 | 否 | 否 | 否 | 否 |
+| npx 一键启动 | **是** | 否 | 否 | 否 | 否 | 否 |
 | 图片输入支持 | **支持** | 部分 | 不支持 | 不支持 | 不支持 | 不支持 |
 | 长文本分页 | **支持** | 不支持 | 不支持 | 不支持 | N/A | 不支持 |
 | 访问控制（白名单） | **支持** | 部分 | 不支持 | 不支持 | 不支持 | 不支持 |
@@ -274,7 +253,6 @@ claude / codex CLI
 | 对战模式 | **支持** | 不支持 | 不支持 | 不支持 | 不支持 |
 | 保活（防休眠） | **支持** | 不支持 | 不支持 | 不支持 | 不支持 |
 | 零依赖 | **是** | 否 | 否 | 否 | 否 |
-| 单二进制（~7 MB） | **是** | 否 | 否 | 否 | 否 |
 | 部署时间 | **约 10 秒** | 数分钟 | 数分钟 | 数分钟 | 数分钟 |
 | 需要配置文件 | **0 个** | YAML | YAML + 插件 | 配置文件 | 配置文件 |
 
@@ -298,7 +276,7 @@ codeclaw 运行时会触发 **操作系统级电源断言**，防止你的机器
 - **多会话** — 每个聊天支持命名会话管理和线程恢复
 - **系统保活** — 操作系统级防休眠，确保长任务不中断
 - **完全访问 / 安全模式** — 让 AI 自由运行，或限制危险操作需确认
-- **零依赖** — 纯 Python 标准库，单文件，单二进制（~7 MB）
+- **零依赖** — 纯 Node.js 标准库，无需 npm install
 - **图片输入** — 向机器人发送图片提供视觉上下文（截图、设计图）
 - **长文本分页** — 长回复自动分页，内联按钮翻页浏览
 - **启动通知** — 启动时向所有已知聊天发送在线状态
@@ -306,37 +284,22 @@ codeclaw 运行时会触发 **操作系统级电源断言**，防止你的机器
 
 ## 快速开始
 
-### 使用二进制文件（推荐）
-
-从 [Releases](https://github.com/xiaotonng/codeclaw/releases) 下载对应平台的二进制文件：
-
-```bash
-# macOS (Apple Silicon)
-curl -fsSL https://github.com/xiaotonng/codeclaw/releases/latest/download/codeclaw-darwin-arm64 -o codeclaw
-
-# macOS (Intel)
-curl -fsSL https://github.com/xiaotonng/codeclaw/releases/latest/download/codeclaw-darwin-x86_64 -o codeclaw
-
-# Linux (x86_64)
-curl -fsSL https://github.com/xiaotonng/codeclaw/releases/latest/download/codeclaw-linux-x86_64 -o codeclaw
-
-# Windows (x86_64)
-# 下载 codeclaw-windows-x86_64.exe
-
-# 然后：
-chmod +x codeclaw
-cd your-project/
-./codeclaw -t 你的BOT_TOKEN
-```
-
-### 从源码运行
+### 使用 npx（推荐）
 
 ```bash
 cd your-project/
-python3 codeclaw.py -t 你的BOT_TOKEN
+npx codeclaw -t YOUR_BOT_TOKEN
 ```
 
-> **前置条件：** Python 3.10+，`claude` CLI 和/或 `codex` CLI 在 PATH 中，从 [@BotFather](https://t.me/BotFather) 获取 Telegram Bot Token。
+### 全局安装
+
+```bash
+npm install -g codeclaw
+cd your-project/
+codeclaw -t YOUR_BOT_TOKEN
+```
+
+> **前置条件：** Node.js 18+，`claude` CLI 和/或 `codex` CLI 在 PATH 中，从 [@BotFather](https://t.me/BotFather) 获取 Telegram Bot Token。
 
 ## 命令行选项
 
@@ -378,16 +341,16 @@ codeclaw [选项]
 
 ```bash
 # 基本用法：Telegram + Claude Code，完全访问
-codeclaw -t $BOT_TOKEN
+npx codeclaw -t $BOT_TOKEN
 
 # Codex 引擎，安全模式，限制用户
-codeclaw -t $BOT_TOKEN -e codex --safe-mode --allowed-ids 123456,789012
+npx codeclaw -t $BOT_TOKEN -e codex --safe-mode --allowed-ids 123456,789012
 
 # 自定义模型和工作目录
-codeclaw -t $BOT_TOKEN -m sonnet -w ~/projects/my-app
+npx codeclaw -t $BOT_TOKEN -m sonnet -w ~/projects/my-app
 
 # 验证配置（不启动）
-codeclaw -t $BOT_TOKEN --self-check
+npx codeclaw -t $BOT_TOKEN --self-check
 ```
 
 ## 机器人命令
@@ -405,15 +368,6 @@ codeclaw -t $BOT_TOKEN --self-check
 | `/help` | 显示所有命令 |
 
 > 在私聊中直接发送文字即可，无需命令前缀。
-
-## 构建
-
-```bash
-pip install pyinstaller
-./build.sh          # 输出 dist/codeclaw (~7 MB)
-```
-
-跨平台构建见 [build-all.sh](build-all.sh)。
 
 ## 许可证
 
