@@ -15,16 +15,20 @@ jobs:
         include:
           - os: macos-latest
             arch: arm64
-            artifact: codeclaw-darwin-arm64
+            binary: codeclaw
+            release_name: codeclaw-darwin-arm64
           - os: macos-15
             arch: x86_64
-            artifact: codeclaw-darwin-x86_64
+            binary: codeclaw
+            release_name: codeclaw-darwin-x86_64
           - os: ubuntu-latest
             arch: x86_64
-            artifact: codeclaw-linux-x86_64
+            binary: codeclaw
+            release_name: codeclaw-linux-x86_64
           - os: windows-latest
             arch: x86_64
-            artifact: codeclaw-windows-x86_64.exe
+            binary: codeclaw.exe
+            release_name: codeclaw-windows-x86_64.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -40,13 +44,17 @@ jobs:
 
       - name: Build binary
         run: |
-          pyinstaller --onefile --name ${{ matrix.artifact }} --clean --noconfirm codeclaw.py
+          pyinstaller --onefile --name codeclaw --clean --noconfirm codeclaw.py
+
+      - name: Rename for release
+        run: mv dist/${{ matrix.binary }} dist/${{ matrix.release_name }}
+        shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          name: ${{ matrix.release_name }}
+          path: dist/${{ matrix.release_name }}
 
   release:
     needs: build
