@@ -1,0 +1,512 @@
+/**
+ * Telegram channel — Telegram Bot API comms with Telegram-specific hooks.
+ *
+ * ┌─ Lifecycle ─────────────────────────────────────────────────────────────┐
+ * │  connect()          — getMe, 获取 bot 信息 (id, username, displayName) │
+ * │  listen()           — 启动 long-polling 循环，持续接收更新              │
+ * │  disconnect()       — 停止 polling，中断进行中的请求                    │
+ * │  drain()            — 跳过所有积压的旧更新，返回跳过数量               │
+ * ├─ 发送 (bot → user) ────────────────────────────────────────────────────┤
+ * │  send(chatId, text, opts?)         — 发送文本，支持 HTML/Markdown、     │
+ * │                                      回复引用、inline keyboard，       │
+ * │                                      超长自动分片 (4096 上限)          │
+ * │  editMessage(chatId, msgId, text)  — 编辑已发送消息 (流式输出模拟)     │
+ * │  deleteMessage(chatId, msgId)      — 删除消息                          │
+ * │  sendPhoto(chatId, photo, opts?)   — 发送图片 (Buffer)，支持 caption   │
+ * │  sendDocument(chatId, content, filename, opts?) — 发送文件              │
+ * │  sendTyping(chatId)                — 发送"正在输入"状态                │
+ * │  answerCallback(callbackId, text?) — 响应 inline 按钮回调              │
+ * ├─ 菜单管理 ─────────────────────────────────────────────────────────────┤
+ * │  setMenu(commands)  — 注册底部菜单命令 (全局 + knownChats 级别)，      │
+ * │                       同时 setChatMenuButton 让菜单按钮可见            │
+ * │  clearMenu()        — 删除所有命令，重置菜单按钮为默认                 │
+ * ├─ 接收 (user → bot) — Hook 注册 ────────────────────────────────────────┤
+ * │  onCommand(handler)  — /command args，自动解析命令名和参数；            │
+ * │                        无 handler 时 fallthrough 到 onMessage          │
+ * │  onMessage(handler)  — 聚合消息 { text, files[] }；                    │
+ * │                        图片/文档自动下载到 workdir，提供本地路径        │
+ * │  onCallback(handler) — inline keyboard 按钮点击                        │
+ * │  onError(handler)    — polling / handler 错误                          │
+ * ├─ Handler Context (ctx) ────────────────────────────────────────────────┤
+ * │  chatId / messageId / from (id, username, firstName)                   │
+ * │  reply(text, opts)            — 直接回复当前消息                       │
+ * │  editReply(msgId, text, opts) — 编辑之前的消息                         │
+ * │  answerCallback(text?)        — 响应 callback query (仅 callback)      │
+ * │  channel                      — channel 实例，可调高级方法             │
+ * │  raw                          — 原始 Telegram update 对象              │
+ * ├─ 智能行为 ─────────────────────────────────────────────────────────────┤
+ * │  knownChats        — 自动记录所有交互过的 chatId，setMenu 自动遍历     │
+ * │  消息聚合           — photo/document 自动下载，统一为 { text, files[] } │
+ * │  群组过滤           — 群聊默认只响应 @mention / 回复 bot 的消息        │
+ * │  Chat 白名单        — allowedChatIds 限制只处理特定聊天                │
+ * │  解析失败降级       — HTML 解析失败自动去掉 parseMode 重试             │
+ * │  超长消息分片       — 超过 4096 字符按换行符自动分片发送               │
+ * └────────────────────────────────────────────────────────────────────────┘
+ *
+ * Standalone usage:
+ *   const ch = new TelegramChannel({ token: 'BOT_TOKEN', workdir: '/tmp' });
+ *   await ch.connect();
+ *   ch.onCommand((cmd, args, ctx) => ctx.reply(`Got /${cmd} ${args}`));
+ *   ch.onMessage((msg, ctx) => ctx.reply(`Echo: ${msg.text} (files: ${msg.files.length})`));
+ *   await ch.listen();
+ */
+
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { Channel, BotInfo, SendOpts, splitText, sleep } from './channel-base.js';
+
+export { TelegramChannel };
+
+// ---------------------------------------------------------------------------
+// Telegram-specific types
+// ---------------------------------------------------------------------------
+
+/** Aggregated message: text + downloaded file paths. */
+export interface TgMessage {
+  text: string;
+  files: string[];      // local file paths (auto-downloaded from photo/document)
+}
+
+/** Sender info. */
+export interface TgFrom {
+  id: number;
+  username?: string;
+  firstName?: string;
+}
+
+/** Context passed to every handler — provides reply helpers + metadata. */
+export interface TgContext {
+  chatId: number;
+  messageId: number;
+  from: TgFrom;
+  /** Send a reply to this message. Returns the sent message ID. */
+  reply: (text: string, opts?: SendOpts) => Promise<number | null>;
+  /** Edit a previous message (e.g. the placeholder). */
+  editReply: (msgId: number, text: string, opts?: SendOpts) => Promise<void>;
+  /** Answer a callback query. */
+  answerCallback: (text?: string) => Promise<void>;
+  /** The channel instance, for advanced ops (sendDocument, api, etc.). */
+  channel: TelegramChannel;
+  /** Raw Telegram update for escape-hatch access. */
+  raw: any;
+}
+
+/** Callback context — extends TgContext with callback-specific fields. */
+export interface TgCallbackContext extends TgContext {
+  callbackId: string;
+}
+
+export type CommandHandler  = (cmd: string, args: string, ctx: TgContext) => Promise<any> | any;
+export type MessageHandler  = (msg: TgMessage, ctx: TgContext) => Promise<any> | any;
+export type CallbackHandler = (data: string, ctx: TgCallbackContext) => Promise<any> | any;
+export type ErrorHandler    = (err: Error) => void;
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+export interface TelegramOpts {
+  token: string;
+  /** Working directory for temp file downloads. */
+  workdir?: string;
+  pollTimeout?: number;
+  apiTimeout?: number;
+  allowedChatIds?: Set<number>;
+  botUsername?: string;
+  requireMentionInGroup?: boolean;
+}
+
+const TG_MAX = 4096;
+
+// ---------------------------------------------------------------------------
+// TelegramChannel
+// ---------------------------------------------------------------------------
+
+class TelegramChannel extends Channel {
+  private token: string;
+  private base: string;
+  private workdir: string;
+  private pollTimeout: number;
+  private apiTimeout: number;
+  private allowedChatIds: Set<number>;
+  private requireMention: boolean;
+
+  private offset = 0;
+  private running = false;
+  private ac = new AbortController();
+
+  private _hCommand: CommandHandler | null = null;
+  private _hMessage: MessageHandler | null = null;
+  private _hCallback: CallbackHandler | null = null;
+  private _hError: ErrorHandler | null = null;
+
+  /** Chat IDs seen from incoming updates. */
+  readonly knownChats = new Set<number>();
+
+  /** Cached menu commands for applying to newly discovered chats. */
+  private _menuCommands: { command: string; description: string }[] | null = null;
+
+  constructor(opts: TelegramOpts) {
+    super();
+    this.token = opts.token;
+    this.base = `https://api.telegram.org/bot${opts.token}`;
+    this.workdir = opts.workdir ?? process.cwd();
+    this.pollTimeout = opts.pollTimeout ?? 45;
+    this.apiTimeout = opts.apiTimeout ?? 60;
+    this.allowedChatIds = opts.allowedChatIds ?? new Set();
+    this.requireMention = opts.requireMentionInGroup ?? true;
+    if (opts.botUsername) this.bot = { id: 0, username: opts.botUsername, displayName: '' };
+  }
+
+  // ---- Telegram-specific hook registration ----------------------------------
+
+  onCommand(h: CommandHandler)   { this._hCommand = h; }
+  onMessage(h: MessageHandler)   { this._hMessage = h; }
+  onCallback(h: CallbackHandler) { this._hCallback = h; }
+  onError(h: ErrorHandler)       { this._hError = h; }
+
+  // ========================================================================
+  // Lifecycle
+  // ========================================================================
+
+  async connect(): Promise<BotInfo> {
+    const data = await this.api('getMe');
+    const me = data.result;
+    this.bot = { id: me.id, username: me.username || '', displayName: me.first_name || '' };
+    return this.bot;
+  }
+
+  async listen(): Promise<void> {
+    this.running = true;
+    while (this.running) {
+      try {
+        const data = await this.api('getUpdates', {
+          offset: this.offset, timeout: this.pollTimeout,
+          allowed_updates: ['message', 'callback_query'],
+        });
+        for (const update of data.result || []) {
+          this.offset = update.update_id + 1;
+          this._dispatch(update).catch(e => this._hError?.(e));
+        }
+      } catch (e: any) {
+        if (!this.running || e.name === 'AbortError') break;
+        this._hError?.(e);
+        await sleep(3000);
+      }
+    }
+  }
+
+  disconnect() {
+    this.running = false;
+    this.ac.abort();
+  }
+
+  // ========================================================================
+  // Outgoing primitives (Channel interface)
+  // ========================================================================
+
+  async send(chatId: number | string, text: string, opts: SendOpts = {}): Promise<number | null> {
+    let msgId: number | null = null;
+    for (const chunk of splitText(text.trim() || '(empty)', TG_MAX - 200)) {
+      const p: any = { chat_id: chatId, text: chunk, disable_web_page_preview: true };
+      if (opts.parseMode) p.parse_mode = opts.parseMode;
+      if (opts.replyTo != null) p.reply_to_message_id = opts.replyTo;
+      if (opts.keyboard != null) p.reply_markup = opts.keyboard;
+      let res: any;
+      try { res = await this.api('sendMessage', p); } catch {
+        if (opts.parseMode) { delete p.parse_mode; res = await this.api('sendMessage', p); }
+        else throw new Error('sendMessage failed');
+      }
+      msgId ??= res?.result?.message_id ?? null;
+    }
+    return msgId;
+  }
+
+  async editMessage(chatId: number | string, msgId: number | string, text: string, opts: SendOpts = {}) {
+    if (!text.trim()) return;
+    const t = text.length > 4000 ? text.slice(0, 4000) + '\n...' : text;
+    const p: any = { chat_id: chatId, message_id: msgId, text: t, disable_web_page_preview: true };
+    if (opts.parseMode) p.parse_mode = opts.parseMode;
+    if (opts.keyboard != null) p.reply_markup = opts.keyboard;
+    try { await this.api('editMessageText', p); } catch (exc: any) {
+      const s = String(exc).toLowerCase();
+      if (s.includes('not modified') || s.includes("can't be edited")) return;
+      if (opts.parseMode && (s.includes("can't parse") || s.includes('bad request'))) {
+        delete p.parse_mode; try { await this.api('editMessageText', p); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  async deleteMessage(chatId: number | string, msgId: number | string) {
+    try { await this.api('deleteMessage', { chat_id: chatId, message_id: msgId }); } catch { /* ignore */ }
+  }
+
+  async sendTyping(chatId: number | string) {
+    await this.api('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  }
+
+  // ========================================================================
+  // Telegram-specific outgoing
+  // ========================================================================
+
+  async answerCallback(callbackId: string, text?: string) {
+    await this.api('answerCallbackQuery', { callback_query_id: callbackId, ...(text ? { text } : {}) }).catch(() => {});
+  }
+
+  async sendPhoto(chatId: number | string, photo: Buffer, opts: { caption?: string; replyTo?: number | string } = {}): Promise<number | null> {
+    const hash = crypto.createHash('md5').update(photo).digest('hex').slice(0, 16);
+    const boundary = `----codeclaw${hash}`;
+    const parts: Buffer[] = [];
+    const add = (s: string) => parts.push(Buffer.from(s, 'utf-8'));
+    add(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`);
+    if (opts.replyTo) add(`--${boundary}\r\nContent-Disposition: form-data; name="reply_to_message_id"\r\n\r\n${opts.replyTo}\r\n`);
+    if (opts.caption) add(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${opts.caption.slice(0, 1024)}\r\n`);
+    add(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`);
+    parts.push(photo);
+    add(`\r\n--${boundary}--\r\n`);
+    try {
+      const resp = await fetch(`${this.base}/sendPhoto`, {
+        method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` }, body: Buffer.concat(parts),
+      });
+      const data: any = await resp.json();
+      if (!data.ok) throw new Error(`Telegram API sendPhoto: ${JSON.stringify(data)}`);
+      return data?.result?.message_id ?? null;
+    } catch (e) { throw e; }
+  }
+
+  async sendDocument(chatId: number | string, content: string | Buffer, filename: string, opts: { caption?: string; replyTo?: number | string } = {}): Promise<number | null> {
+    const buf = typeof content === 'string' ? Buffer.from(content, 'utf-8') : content;
+    const hash = crypto.createHash('md5').update(buf).digest('hex').slice(0, 16);
+    const boundary = `----codeclaw${hash}`;
+    const parts: Buffer[] = [];
+    const add = (s: string) => parts.push(Buffer.from(s, 'utf-8'));
+    add(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`);
+    if (opts.replyTo) add(`--${boundary}\r\nContent-Disposition: form-data; name="reply_to_message_id"\r\n\r\n${opts.replyTo}\r\n`);
+    if (opts.caption) add(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${opts.caption.slice(0, 1024)}\r\n`);
+    add(`--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`);
+    parts.push(buf);
+    add(`\r\n--${boundary}--\r\n`);
+    try {
+      const resp = await fetch(`${this.base}/sendDocument`, {
+        method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` }, body: Buffer.concat(parts),
+      });
+      const data: any = await resp.json();
+      if (!data.ok) throw new Error(`Telegram API sendDocument: ${JSON.stringify(data)}`);
+      return data?.result?.message_id ?? null;
+    } catch (e) { throw e; }
+  }
+
+  /** Set bottom menu commands and ensure the menu button is visible.
+   *  Automatically applies to all known chats (from incoming updates). */
+  async setMenu(commands: { command: string; description: string }[]) {
+    this._menuCommands = commands;
+    await this.api('setMyCommands', { commands });
+    await this.api('setChatMenuButton', { menu_button: { type: 'commands' } });
+    for (const cid of this.knownChats) {
+      await this._applyMenuToChat(cid);
+    }
+  }
+
+  /** Track a chat ID; apply menu on first discovery. */
+  private _trackChat(chatId: number) {
+    if (this.knownChats.has(chatId)) return;
+    this.knownChats.add(chatId);
+    this._applyMenuToChat(chatId).catch(() => {});
+  }
+
+  /** Apply cached menu commands to a single chat. */
+  private async _applyMenuToChat(chatId: number) {
+    if (!this._menuCommands) return;
+    await this.api('setMyCommands', {
+      commands: this._menuCommands,
+      scope: { type: 'chat', chat_id: chatId },
+    }).catch(() => {});
+    await this.api('setChatMenuButton', {
+      chat_id: chatId,
+      menu_button: { type: 'commands' },
+    }).catch(() => {});
+  }
+
+  /** Remove all bot commands and reset menu button to default. */
+  async clearMenu() {
+    this._menuCommands = null;
+    await this.api('deleteMyCommands', {}).catch(() => {});
+    await this.api('setChatMenuButton', { menu_button: { type: 'default' } }).catch(() => {});
+    for (const cid of this.knownChats) {
+      await this.api('deleteMyCommands', { scope: { type: 'chat', chat_id: cid } }).catch(() => {});
+      await this.api('setChatMenuButton', { chat_id: cid, menu_button: { type: 'default' } }).catch(() => {});
+    }
+  }
+
+  /** Drain pending updates (call before listen to skip stale messages). */
+  async drain(): Promise<number> {
+    const data = await this.api('getUpdates', { offset: -1, timeout: 0 });
+    const results = data.result || [];
+    if (results.length) this.offset = results[results.length - 1].update_id + 1;
+    return results.length;
+  }
+
+  /** Get the chat ID from the most recent incoming message (useful for 1v1 bot setup). */
+  async getRecentChatId(): Promise<number | null> {
+    const data = await this.api('getUpdates', { offset: -1, timeout: 0 });
+    const results = data.result || [];
+    if (!results.length) return null;
+    const u = results[results.length - 1];
+    return u.message?.chat?.id ?? u.callback_query?.message?.chat?.id ?? null;
+  }
+
+  /** Download a Telegram file to a local path. Returns the local path. */
+  async downloadFile(fileId: string, destFilename?: string): Promise<string> {
+    const meta = await this.api('getFile', { file_id: fileId });
+    const filePath = meta.result.file_path;
+    const url = `https://api.telegram.org/file/bot${this.token}/${filePath}`;
+    const resp = await fetch(url);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const ext = path.extname(filePath) || '.bin';
+    const name = destFilename || `tg_${fileId.slice(-8)}${ext}`;
+    const localPath = path.join(this.workdir, name);
+    fs.writeFileSync(localPath, buf);
+    return localPath;
+  }
+
+  // ========================================================================
+  // Low-level API
+  // ========================================================================
+
+  async api(method: string, payload?: any): Promise<any> {
+    const timeout = method === 'getUpdates' ? (this.pollTimeout + 10) * 1000 : this.apiTimeout * 1000;
+    const signal = this.running
+      ? AbortSignal.any([AbortSignal.timeout(timeout), this.ac.signal])
+      : AbortSignal.timeout(timeout);
+    const resp = await fetch(`${this.base}/${method}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload ?? {}), signal,
+    });
+    const data = await resp.json();
+    if (!data.ok) throw new Error(`Telegram API ${method}: ${JSON.stringify(data)}`);
+    return data;
+  }
+
+  // ========================================================================
+  // Internal: dispatch
+  // ========================================================================
+
+  private async _dispatch(update: any) {
+    // callback query
+    if (update.callback_query) {
+      const cq = update.callback_query;
+      const chatId = cq.message?.chat?.id;
+      this._log(`[recv] callback_query id=${cq.id} chat=${chatId} from=${cq.from?.username || cq.from?.id} data="${cq.data}"`);
+      if (!chatId || !this._isAllowed(chatId)) { this._log(`[recv] callback blocked: chat=${chatId} not allowed`); return; }
+      this._trackChat(chatId);
+      if (!this._hCallback) return;
+      const ctx = this._makeCtx(chatId, cq.message?.message_id ?? 0, cq.from, cq) as TgCallbackContext;
+      ctx.callbackId = cq.id;
+      ctx.answerCallback = (text?: string) => this.answerCallback(cq.id, text);
+      await this._hCallback(cq.data || '', ctx);
+      return;
+    }
+
+    // message
+    const raw = update.message || update.edited_message;
+    if (!raw || !raw.chat?.id) return;
+    const chatId = raw.chat.id;
+    const fromUser = raw.from?.username || raw.from?.first_name || raw.from?.id || '?';
+    const msgPreview = (raw.text || raw.caption || '').slice(0, 120);
+    this._log(`[recv] message chat=${chatId} from=${fromUser} msg_id=${raw.message_id} text="${msgPreview}"${raw.photo ? ' +photo' : ''}${raw.document ? ` +doc(${raw.document?.file_name})` : ''}`);
+    if (!this._isAllowed(chatId)) { this._log(`[recv] blocked: chat=${chatId} not in allowlist`); return; }
+    this._trackChat(chatId);
+    if (!this._shouldHandle(raw)) { this._log(`[recv] skipped: not relevant (group mention/reply check)`); return; }
+
+    const from: TgFrom = { id: raw.from?.id, username: raw.from?.username, firstName: raw.from?.first_name };
+    const ctx = this._makeCtx(chatId, raw.message_id, from, raw);
+
+    // command — if no command handler registered, fall through to message handler
+    const entities = raw.entities || [];
+    const cmdEntity = entities.find((e: any) => e.type === 'bot_command' && e.offset === 0);
+    if (cmdEntity) {
+      const full = (raw.text || '').slice(cmdEntity.offset, cmdEntity.offset + cmdEntity.length);
+      const cmd = full.replace(/^\//, '').split('@')[0].toLowerCase();
+      const args = (raw.text || '').slice(cmdEntity.offset + cmdEntity.length).trim();
+      this._log(`[recv] command /${cmd} args="${args.slice(0, 80)}" chat=${chatId}`);
+      if (this._hCommand) {
+        await this._hCommand(cmd, args, ctx);
+        return;
+      }
+    }
+
+    // message (text + files aggregation)
+    if (!this._hMessage) return;
+    const text = this._cleanMention(raw.text || raw.caption || '');
+    const files: string[] = [];
+
+    // download photo
+    if (raw.photo?.length) {
+      const best = raw.photo[raw.photo.length - 1];
+      this._log(`[recv] downloading photo file_id=${best.file_id} size=${best.width}x${best.height}`);
+      try {
+        const localPath = await this.downloadFile(best.file_id, `_tg_photo_${raw.message_id}.jpg`);
+        files.push(localPath);
+        this._log(`[recv] photo saved: ${localPath}`);
+      } catch (e: any) { this._log(`[recv] photo download failed: ${e}`); this._hError?.(e); }
+    }
+
+    // download document
+    if (raw.document) {
+      const origName = raw.document.file_name || `doc_${raw.message_id}`;
+      this._log(`[recv] downloading document "${origName}" file_id=${raw.document.file_id}`);
+      try {
+        const localPath = await this.downloadFile(raw.document.file_id, `_tg_${origName}`);
+        files.push(localPath);
+        this._log(`[recv] document saved: ${localPath}`);
+      } catch (e: any) { this._log(`[recv] document download failed: ${e}`); this._hError?.(e); }
+    }
+
+    this._log(`[dispatch] -> onMessage text="${text.slice(0, 80)}" files=${files.length} chat=${chatId}`);
+    await this._hMessage({ text, files }, ctx);
+  }
+
+  // ========================================================================
+  // Internal: helpers
+  // ========================================================================
+
+  private _makeCtx(chatId: number, messageId: number, from: any, raw: any): TgContext {
+    return {
+      chatId, messageId,
+      from: { id: from?.id, username: from?.username, firstName: from?.first_name },
+      reply: (text: string, opts?: SendOpts) => this.send(chatId, text, { ...opts, replyTo: messageId }),
+      editReply: (msgId: number, text: string, opts?: SendOpts) => this.editMessage(chatId, msgId, text, opts),
+      answerCallback: () => Promise.resolve(),
+      channel: this,
+      raw,
+    };
+  }
+
+  private _isAllowed(chatId: number): boolean {
+    return this.allowedChatIds.size === 0 || this.allowedChatIds.has(chatId);
+  }
+
+  private _shouldHandle(raw: any): boolean {
+    const chatType = raw.chat?.type || '';
+    const text = (raw.text || raw.caption || '').trim();
+    const hasMedia = !!raw.photo || !!raw.document;
+    if (chatType === 'private') return !!(text || hasMedia);
+    if ((raw.entities || []).some((e: any) => e.type === 'bot_command' && e.offset === 0)) return true;
+    if (!this.requireMention) return !!(text || hasMedia);
+    const mention = this.bot?.username ? `@${(this.bot.username as string).toLowerCase()}` : '';
+    if (mention && text.toLowerCase().includes(mention)) return true;
+    if (raw.reply_to_message?.from?.id === (this.bot?.id ?? 0)) return true;
+    return false;
+  }
+
+  private _cleanMention(text: string): string {
+    if (this.bot?.username) text = text.replace(new RegExp(`@${this.bot.username}`, 'gi'), '');
+    return text.trim();
+  }
+
+  _log(msg: string) {
+    const ts = new Date().toTimeString().slice(0, 8);
+    process.stdout.write(`[telegram ${ts}] ${msg}\n`);
+  }
+}

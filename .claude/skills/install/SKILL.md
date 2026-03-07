@@ -24,7 +24,7 @@ Every time this skill is invoked, execute ALL steps below in order:
 
 ## 3. Git commit, tag & push
 
-1. Stage: `package.json`, `package-lock.json` (if changed), `src/bot.ts`, `.claude/skills/install/SKILL.md`.
+1. Stage **all** changed, deleted, and untracked project files (`git add -A`), excluding secrets and build artifacts.
 2. Commit with message: `chore: release v<new-version>`.
 3. Create a git tag: `git tag v<new-version>`.
 4. Push: `git push origin main --tags`.
