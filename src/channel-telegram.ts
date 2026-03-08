@@ -189,28 +189,42 @@ class TelegramChannel extends Channel {
   // ========================================================================
 
   async connect(): Promise<BotInfo> {
-    const data = await this.api('getMe');
-    const me = data.result;
-    this.bot = { id: me.id, username: me.username || '', displayName: me.first_name || '' };
-    return this.bot;
+    let delay = 2000;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const data = await this.api('getMe');
+        const me = data.result;
+        this.bot = { id: me.id, username: me.username || '', displayName: me.first_name || '' };
+        return this.bot;
+      } catch (e: any) {
+        if (attempt >= 10) throw e;
+        this._log(`[connect] attempt ${attempt} failed: ${e.message ?? e} — retrying in ${delay / 1000}s`);
+        await sleep(delay);
+        delay = Math.min(delay * 2, 60_000);
+      }
+    }
   }
 
   async listen(): Promise<void> {
     this.running = true;
+    let backoff = 3000;
     while (this.running) {
       try {
         const data = await this.api('getUpdates', {
           offset: this.offset, timeout: this.pollTimeout,
           allowed_updates: ['message', 'callback_query'],
         });
+        backoff = 3000; // reset on success
         for (const update of data.result || []) {
           this.offset = update.update_id + 1;
           this._dispatch(update).catch(e => this._hError?.(e));
         }
       } catch (e: any) {
         if (!this.running || e.name === 'AbortError') break;
+        this._log(`[poll] error: ${e.message ?? e} — retrying in ${backoff / 1000}s`);
         this._hError?.(e);
-        await sleep(3000);
+        await sleep(backoff);
+        backoff = Math.min(backoff * 2, 60_000);
       }
     }
   }
