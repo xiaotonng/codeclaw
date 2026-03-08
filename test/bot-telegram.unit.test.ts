@@ -1,4 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: vi.fn(() => ({ pid: 4321, unref: vi.fn() })),
+  };
+});
+
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +18,7 @@ function createBot() {
   const edits: Array<{ text: string; opts?: any }> = [];
   const sends: Array<{ text: string; opts?: any }> = [];
   const docs: Array<{ content: string | Buffer; filename: string; opts?: any }> = [];
+  const files: Array<{ filePath: string; opts?: any }> = [];
   const channel = {
     editMessage: vi.fn(async (_chatId: number, _msgId: number, text: string, opts?: any) => {
       edits.push({ text, opts });
@@ -21,6 +31,11 @@ function createBot() {
       docs.push({ content, filename, opts });
       return 778;
     }),
+    sendFile: vi.fn(async (_chatId: number, filePath: string, opts?: any) => {
+      files.push({ filePath, opts });
+      return 779;
+    }),
+    disconnect: vi.fn(),
   };
 
   const bot = new TelegramBot();
@@ -37,14 +52,17 @@ function createBot() {
     raw: {},
   };
 
-  return { bot, channel, ctx, edits, sends, docs };
+  return { bot, channel, ctx, edits, sends, docs, files };
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-unit-'));
   process.env.TELEGRAM_BOT_TOKEN = 'test-token';
   process.env.CODECLAW_WORKDIR = tmpDir;
   process.env.DEFAULT_AGENT = 'claude';
+  delete process.env.CODECLAW_RESTART_CMD;
+  delete process.env.npm_config_yes;
 });
 
 describe('TelegramBot.sendFinalReply', () => {
@@ -118,5 +136,155 @@ describe('TelegramBot.sendFinalReply', () => {
 
     expect(edits).toHaveLength(1);
     expect(edits[0].opts?.keyboard?.inline_keyboard).toHaveLength(1);
+  });
+});
+
+describe('TelegramBot.handleMessage artifacts', () => {
+  it('uploads returned artifacts and cleans up the turn directory', async () => {
+    const { bot, ctx, channel, files, edits } = createBot();
+    let artifactDir = '';
+
+    vi.spyOn(bot, 'runStream').mockImplementation(async (prompt: string) => {
+      const manifestMatch = prompt.match(/write this JSON manifest: (.+)\nFormat:/);
+      expect(manifestMatch?.[1]).toBeTruthy();
+      const manifestPath = manifestMatch![1];
+      artifactDir = path.dirname(manifestPath);
+
+      fs.writeFileSync(path.join(artifactDir, 'shot.png'), Buffer.from('png-bytes'));
+      fs.writeFileSync(path.join(artifactDir, 'notes.txt'), 'hello');
+      fs.writeFileSync(manifestPath, JSON.stringify({
+        files: [
+          { path: 'shot.png', kind: 'photo', caption: 'Screenshot' },
+          { path: 'notes.txt', kind: 'document', caption: 'Notes' },
+        ],
+      }));
+
+      return {
+        ok: true,
+        message: 'Artifacts ready.',
+        thinking: null,
+        sessionId: 'sess-artifacts',
+        model: 'claude-opus-4-6',
+        thinkingEffort: 'high',
+        elapsedS: 1.5,
+        inputTokens: 10,
+        outputTokens: 20,
+        cachedInputTokens: null,
+        error: null,
+        stopReason: null,
+        incomplete: false,
+      };
+    });
+
+    await (bot as any).handleMessage({ text: 'Take a screenshot', files: [] }, ctx);
+
+    expect(edits).toHaveLength(1);
+    expect(files).toHaveLength(2);
+    expect(files[0].filePath).toContain('shot.png');
+    expect(files[0].opts).toMatchObject({ caption: 'Screenshot', replyTo: 1, asPhoto: true });
+    expect(files[1].filePath).toContain('notes.txt');
+    expect(files[1].opts).toMatchObject({ caption: 'Notes', replyTo: 1, asPhoto: false });
+    expect(channel.sendFile).toHaveBeenCalledTimes(2);
+    expect(fs.existsSync(artifactDir)).toBe(false);
+  });
+
+  it('rejects manifest entries that escape the turn directory', async () => {
+    const { bot, ctx, channel, files } = createBot();
+    const leakedPath = path.join(process.env.CODECLAW_WORKDIR!, 'secret.txt');
+    fs.writeFileSync(leakedPath, 'do not leak');
+
+    vi.spyOn(bot, 'runStream').mockImplementation(async (prompt: string) => {
+      const manifestMatch = prompt.match(/write this JSON manifest: (.+)\nFormat:/);
+      const manifestPath = manifestMatch![1];
+      fs.writeFileSync(manifestPath, JSON.stringify({
+        files: [
+          { path: '../secret.txt', kind: 'document', caption: 'Leak' },
+        ],
+      }));
+
+      return {
+        ok: true,
+        message: 'Done.',
+        thinking: null,
+        sessionId: 'sess-no-leak',
+        model: 'claude-opus-4-6',
+        thinkingEffort: 'high',
+        elapsedS: 0.8,
+        inputTokens: 5,
+        outputTokens: 6,
+        cachedInputTokens: null,
+        error: null,
+        stopReason: null,
+        incomplete: false,
+      };
+    });
+
+    await (bot as any).handleMessage({ text: 'Try to leak a file', files: [] }, ctx);
+
+    expect(files).toHaveLength(0);
+    expect(channel.sendFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('TelegramBot.performRestart', () => {
+  it('uses a non-interactive default npx restart command', () => {
+    const { bot, channel } = createBot();
+    const spawnMock = vi.mocked(spawn);
+    const unref = vi.fn();
+    const oldArgv = process.argv;
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as any);
+    const stopKeepAliveSpy = vi.spyOn(bot as any, 'stopKeepAlive').mockImplementation(() => {});
+
+    spawnMock.mockReturnValue({ pid: 4321, unref } as any);
+    process.argv = ['node', 'codeclaw', '-c', 'telegram'];
+
+    try {
+      (bot as any).performRestart();
+
+      expect(channel.disconnect).toHaveBeenCalledTimes(1);
+      expect(stopKeepAliveSpy).toHaveBeenCalledTimes(1);
+      expect(spawnMock).toHaveBeenCalledWith(
+        'npx',
+        ['--yes', 'codeclaw@latest', '-c', 'telegram'],
+        expect.objectContaining({
+          stdio: 'inherit',
+          detached: true,
+          env: expect.objectContaining({ npm_config_yes: 'true' }),
+        }),
+      );
+      expect(unref).toHaveBeenCalledTimes(1);
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      process.argv = oldArgv;
+      exitSpy.mockRestore();
+      stopKeepAliveSpy.mockRestore();
+    }
+  });
+
+  it('injects --yes for custom npx restart commands too', () => {
+    const { bot } = createBot();
+    const spawnMock = vi.mocked(spawn);
+    const oldArgv = process.argv;
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as any);
+    const stopKeepAliveSpy = vi.spyOn(bot as any, 'stopKeepAlive').mockImplementation(() => {});
+
+    process.env.CODECLAW_RESTART_CMD = 'npx tsx src/cli.ts';
+    process.argv = ['node', 'codeclaw', '-c', 'telegram'];
+
+    try {
+      (bot as any).performRestart();
+
+      expect(spawnMock).toHaveBeenCalledWith(
+        'npx',
+        ['--yes', 'tsx', 'src/cli.ts', '-c', 'telegram'],
+        expect.objectContaining({
+          env: expect.objectContaining({ npm_config_yes: 'true' }),
+        }),
+      );
+    } finally {
+      process.argv = oldArgv;
+      exitSpy.mockRestore();
+      stopKeepAliveSpy.mockRestore();
+    }
   });
 });

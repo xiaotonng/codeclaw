@@ -9,12 +9,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
 import {
-  doStream, getSessions, listAgents,
-  type Agent, type StreamOpts, type StreamResult, type SessionInfo,
+  doStream, getSessions, getUsage, listAgents,
+  type Agent, type StreamOpts, type StreamResult, type SessionInfo, type UsageResult,
 } from './code-agent.js';
 
-export { type Agent, type StreamResult, type SessionInfo };
-export const VERSION = '0.2.3';
+export { type Agent, type StreamResult, type SessionInfo, type UsageResult };
+export const VERSION = '0.2.4';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -194,6 +194,7 @@ export class Bot {
       memRss: mem.rss, memHeap: mem.heapUsed, pid: process.pid,
       workdir: this.workdir, agent: cs.agent, model: this.modelForAgent(cs.agent), sessionId: cs.sessionId,
       running: this.activeTasks.get(chatId) ?? null, stats: this.stats,
+      usage: getUsage({ agent: cs.agent, model: this.modelForAgent(cs.agent) }),
     };
   }
 

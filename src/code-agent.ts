@@ -517,3 +517,320 @@ export function listAgents(): AgentListResult {
     ],
   };
 }
+
+// ---------------------------------------------------------------------------
+// Usage inspection
+// ---------------------------------------------------------------------------
+
+export interface UsageWindowInfo {
+  label: string;
+  usedPercent: number | null;
+  remainingPercent: number | null;
+  resetAt: string | null;
+  /**
+   * Remaining seconds as reported when the usage snapshot was captured.
+   * Combine with `capturedAt` to estimate the current remaining time.
+   */
+  resetAfterSeconds: number | null;
+  status: string | null;
+}
+
+export interface UsageResult {
+  ok: boolean;
+  agent: Agent;
+  source: string | null;
+  capturedAt: string | null;
+  status: string | null;
+  windows: UsageWindowInfo[];
+  error: string | null;
+}
+
+export interface UsageOpts {
+  agent: Agent;
+  model?: string | null;
+}
+
+function toIsoFromEpochSeconds(value: unknown): string | null {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return new Date(n * 1000).toISOString();
+}
+
+function roundPercent(value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(100, Math.round(n * 10) / 10));
+}
+
+function labelFromWindowMinutes(value: unknown, fallback: string): string {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || minutes <= 0) return fallback;
+  if (minutes === 300) return '5h';
+  if (minutes === 10080) return '7d';
+  if (minutes % 1440 === 0) return `${minutes / 1440}d`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${minutes}m`;
+}
+
+function usageWindowFromRateLimit(fallback: string, limit: any): UsageWindowInfo | null {
+  if (!limit || typeof limit !== 'object') return null;
+
+  const usedPercent = roundPercent(limit.used_percent);
+  const remainingPercent = usedPercent == null ? null : Math.max(0, Math.round((100 - usedPercent) * 10) / 10);
+  const resetAt = toIsoFromEpochSeconds(limit.reset_at ?? limit.resets_at);
+
+  let resetAfterSeconds: number | null = null;
+  const directResetAfter = Number(limit.reset_after_seconds);
+  if (Number.isFinite(directResetAfter) && directResetAfter >= 0) {
+    resetAfterSeconds = Math.round(directResetAfter);
+  } else if (resetAt) {
+    const resetAtMs = Date.parse(resetAt);
+    if (Number.isFinite(resetAtMs)) {
+      resetAfterSeconds = Math.max(0, Math.round((resetAtMs - Date.now()) / 1000));
+    }
+  }
+
+  return {
+    label: labelFromWindowMinutes(limit.window_minutes, fallback),
+    usedPercent,
+    remainingPercent,
+    resetAt,
+    resetAfterSeconds,
+    status: typeof limit.status === 'string' ? limit.status : null,
+  };
+}
+
+function parseJsonTail(raw: string): any | null {
+  const start = raw.indexOf('{');
+  if (start < 0) return null;
+  try { return JSON.parse(raw.slice(start)); } catch { return null; }
+}
+
+function modelFamily(model: string | null | undefined): string | null {
+  const lower = model?.toLowerCase() || '';
+  if (!lower) return null;
+  if (lower.includes('opus')) return 'opus';
+  if (lower.includes('sonnet')) return 'sonnet';
+  return null;
+}
+
+function emptyUsage(agent: Agent, error: string): UsageResult {
+  return {
+    ok: false,
+    agent,
+    source: null,
+    capturedAt: null,
+    status: null,
+    windows: [],
+    error,
+  };
+}
+
+function getCodexStateDbPath(home: string): string | null {
+  const root = path.join(home, '.codex');
+  if (!fs.existsSync(root)) return null;
+  try {
+    const files = fs.readdirSync(root)
+      .filter(name => /^state.*\.sqlite$/i.test(name))
+      .map(name => ({ name, full: path.join(root, name), mtime: fs.statSync(path.join(root, name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    return files[0]?.full || null;
+  } catch {
+    return null;
+  }
+}
+
+function codexUsageFromRateLimits(rateLimits: any, capturedAt: string | null, source: string): UsageResult | null {
+  if (!rateLimits || typeof rateLimits !== 'object') return null;
+
+  const windows = [
+    usageWindowFromRateLimit('Primary', rateLimits.primary),
+    usageWindowFromRateLimit('Secondary', rateLimits.secondary),
+  ].filter((v): v is UsageWindowInfo => !!v);
+
+  if (!windows.length) return null;
+
+  let status: string | null = null;
+  if (rateLimits.limit_reached === true) status = 'limit_reached';
+  else if (rateLimits.allowed === true) status = 'allowed';
+
+  return {
+    ok: true,
+    agent: 'codex',
+    source,
+    capturedAt,
+    status,
+    windows,
+    error: null,
+  };
+}
+
+function getCodexUsageFromStateDb(home: string): UsageResult | null {
+  const dbPath = getCodexStateDbPath(home);
+  if (!dbPath) return null;
+
+  try {
+    const query = "SELECT ts || '|' || message FROM logs WHERE message LIKE '%codex.rate_limits%' ORDER BY ts DESC LIMIT 1;";
+    const out = execSync(`sqlite3 -noheader ${Q(dbPath)} ${Q(query)}`, { encoding: 'utf-8', timeout: 3000 }).trim();
+    if (!out) return null;
+
+    const sep = out.indexOf('|');
+    const rawTs = sep >= 0 ? out.slice(0, sep) : '';
+    const rawMessage = sep >= 0 ? out.slice(sep + 1) : out;
+    const payload = parseJsonTail(rawMessage);
+    const capturedAt = toIsoFromEpochSeconds(rawTs);
+    return codexUsageFromRateLimits(payload?.rate_limits, capturedAt, 'state-db');
+  } catch {
+    return null;
+  }
+}
+
+function getCodexUsageFromSessions(home: string): UsageResult | null {
+  const sessionsRoot = path.join(home, '.codex', 'sessions');
+  if (!fs.existsSync(sessionsRoot)) return null;
+
+  const all: { path: string; mtime: number }[] = [];
+  try {
+    for (const year of fs.readdirSync(sessionsRoot)) {
+      const yp = path.join(sessionsRoot, year);
+      if (!fs.statSync(yp).isDirectory()) continue;
+      for (const month of fs.readdirSync(yp)) {
+        const mp = path.join(yp, month);
+        if (!fs.statSync(mp).isDirectory()) continue;
+        for (const day of fs.readdirSync(mp)) {
+          const dp = path.join(mp, day);
+          if (!fs.statSync(dp).isDirectory()) continue;
+          for (const f of fs.readdirSync(dp)) {
+            if (!f.endsWith('.jsonl')) continue;
+            const full = path.join(dp, f);
+            all.push({ path: full, mtime: fs.statSync(full).mtimeMs });
+          }
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  all.sort((a, b) => b.mtime - a.mtime);
+  for (const entry of all.slice(0, 30)) {
+    try {
+      const lines = fs.readFileSync(entry.path, 'utf-8').trim().split('\n');
+      for (let i = lines.length - 1; i >= 0 && i >= lines.length - 200; i--) {
+        const raw = lines[i];
+        if (!raw || raw[0] !== '{' || !raw.includes('rate_limits')) continue;
+        let ev: any;
+        try { ev = JSON.parse(raw); } catch { continue; }
+        const result = codexUsageFromRateLimits(
+          ev?.payload?.rate_limits,
+          typeof ev?.timestamp === 'string' ? ev.timestamp : null,
+          'session-history',
+        );
+        if (result) return result;
+      }
+    } catch {
+      // ignore malformed or unreadable session files
+    }
+  }
+
+  return null;
+}
+
+function getClaudeUsageFromTelemetry(home: string, model?: string | null): UsageResult | null {
+  const telemetryRoot = path.join(home, '.claude', 'telemetry');
+  if (!fs.existsSync(telemetryRoot)) return null;
+
+  const preferredFamily = modelFamily(model);
+  type ClaudeTelemetryCandidate = {
+    capturedAtMs: number;
+    capturedAt: string;
+    status: string | null;
+    hoursTillReset: number | null;
+    model: string | null;
+  };
+  let bestAny: ClaudeTelemetryCandidate | null = null;
+  let bestMatch: ClaudeTelemetryCandidate | null = null;
+
+  try {
+    const files = fs.readdirSync(telemetryRoot)
+      .filter(name => name.endsWith('.json'))
+      .map(name => ({ full: path.join(telemetryRoot, name), mtime: fs.statSync(path.join(telemetryRoot, name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, 50);
+
+    for (const file of files) {
+      const lines = fs.readFileSync(file.full, 'utf-8').trim().split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const raw = lines[i];
+        if (!raw || raw[0] !== '{' || !raw.includes('tengu_claudeai_limits_status_changed')) continue;
+
+        let parsed: any;
+        try { parsed = JSON.parse(raw); } catch { continue; }
+        const data = parsed?.event_data;
+        if (data?.event_name !== 'tengu_claudeai_limits_status_changed') continue;
+
+        const capturedAtMs = Date.parse(data.client_timestamp || '');
+        if (!Number.isFinite(capturedAtMs)) continue;
+
+        let meta = data.additional_metadata;
+        if (typeof meta === 'string') {
+          try { meta = JSON.parse(meta); } catch { meta = null; }
+        }
+
+        const hoursTillReset = Number(meta?.hoursTillReset);
+        const candidate = {
+          capturedAtMs,
+          capturedAt: new Date(capturedAtMs).toISOString(),
+          status: typeof meta?.status === 'string' ? meta.status : null,
+          hoursTillReset: Number.isFinite(hoursTillReset) ? hoursTillReset : null,
+          model: typeof data.model === 'string' ? data.model : null,
+        };
+
+        if (!bestAny || candidate.capturedAtMs > bestAny.capturedAtMs) bestAny = candidate;
+        if (preferredFamily && candidate.model?.toLowerCase().includes(preferredFamily)) {
+          if (!bestMatch || candidate.capturedAtMs > bestMatch.capturedAtMs) bestMatch = candidate;
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  const chosen = bestMatch || bestAny;
+  if (!chosen) return null;
+
+  const resetAfterSeconds = chosen.hoursTillReset == null ? null : Math.max(0, Math.round(chosen.hoursTillReset * 3600));
+  const resetAt = resetAfterSeconds == null ? null : new Date(chosen.capturedAtMs + resetAfterSeconds * 1000).toISOString();
+  const windows: UsageWindowInfo[] = [{
+    label: 'Current',
+    usedPercent: null,
+    remainingPercent: null,
+    resetAt,
+    resetAfterSeconds,
+    status: chosen.status,
+  }];
+
+  return {
+    ok: true,
+    agent: 'claude',
+    source: 'telemetry',
+    capturedAt: chosen.capturedAt,
+    status: chosen.status,
+    windows,
+    error: null,
+  };
+}
+
+export function getUsage(opts: UsageOpts): UsageResult {
+  const home = process.env.HOME || '';
+  if (!home) return emptyUsage(opts.agent, 'HOME is not set.');
+
+  if (opts.agent === 'codex') {
+    return getCodexUsageFromStateDb(home)
+      || getCodexUsageFromSessions(home)
+      || emptyUsage('codex', 'No recent Codex usage data found.');
+  }
+
+  return getClaudeUsageFromTelemetry(home, opts.model)
+    || emptyUsage('claude', 'No recent Claude usage data found.');
+}

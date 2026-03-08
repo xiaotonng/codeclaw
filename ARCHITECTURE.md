@@ -33,6 +33,7 @@ src/
 │  ├ Keyboards      PathRegistry, buildDirKeyboard, quickReply │
 │  ├ Commands       cmdStart/Status/Host/Sessions/Switch/Agents│
 │  ├ Streaming UI   placeholder → throttled editMessage        │
+│  ├ Artifacts      per-turn dir, manifest validation, uploads │
 │  ├ Callbacks      sw:/sess:/ag:/qr: routing                  │
 │  └ Lifecycle      run() — connect, drain, menu, poll, signal │
 ├──────────────────────────────────────────────────────────────┤
@@ -45,12 +46,14 @@ src/
 │  ├ Telegram API   getMe, getUpdates, sendMessage, ...        │
 │  ├ Dispatch       command/message/callback routing to hooks  │
 │  ├ File download  photo/document → local path                │
+│  ├ File upload    sendPhoto/sendDocument/sendFile routing    │
 │  ├ Group filter   @mention / reply-to-bot detection          │
 │  └ Smart behavior parseMode fallback, message splitting      │
 ├──────────────────────────────────────────────────────────────┤
 │  code-agent.ts  (AI agent abstraction)                       │
 │  ├ doStream()     spawn claude/codex CLI, parse JSONL        │
 │  ├ getSessions()  list local sessions by engine + workdir    │
+│  ├ getUsage()     inspect local Codex/Claude usage telemetry │
 │  └ listAgents()   detect installed CLIs + versions           │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -63,8 +66,8 @@ Adding a new IM means writing bot-xxx.ts that calls the same data methods with
 different rendering (Lark cards, WhatsApp interactive messages, etc.).
 
 **Channel = transport only** — channel-telegram.ts handles Telegram API communication
-(polling, sending, file download, message dispatch). It knows nothing about commands,
-sessions, or agents. It is independently testable.
+(polling, sending, file download/upload routing, message dispatch). It knows nothing
+about commands, sessions, or agents. It is independently testable.
 
 **Bot = business logic** — bot.ts holds all shared state and logic. bot-telegram.ts
 extends it to add Telegram-specific presentation. The split point: if the logic would
@@ -90,10 +93,10 @@ bot-xxx.ts constructor.
 | `/start`    | Welcome + command list               |
 | `/sessions` | List / switch sessions (inline keys) |
 | `/agents`   | List / switch AI agents              |
-| `/status`   | Bot status, uptime, token usage      |
+| `/status`   | Bot status, uptime, provider usage, token usage |
 | `/host`     | Host machine info (CPU, memory, disk) |
 | `/switch`   | Browse and change working directory   |
-| `/restart`  | Restart with latest version (npx)    |
+| `/restart`  | Restart with latest version via non-interactive `npx --yes` |
 
 Direct messages (no command prefix) are forwarded to the current AI agent.
 

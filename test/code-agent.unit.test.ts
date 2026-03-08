@@ -5,7 +5,7 @@
  * This avoids hitting real APIs while testing all parsing and control flow.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { doStream, doCodexStream, doClaudeStream, type StreamOpts } from '../src/code-agent.ts';
+import { doStream, doCodexStream, doClaudeStream, getUsage, type StreamOpts } from '../src/code-agent.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -378,5 +378,102 @@ echo '${JSON.stringify({ type: 'turn.completed', usage: {} })}'`;
     const result = await doCodexStream(baseOpts('codex', { model: 'my-model', thinkingEffort: 'xhigh' }));
     expect(result.model).toBe('my-model');
     expect(result.thinkingEffort).toBe('xhigh');
+  });
+});
+
+describe('getUsage', () => {
+  it('reads codex usage from session history fallback', () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-home-'));
+    const oldHome = process.env.HOME;
+
+    try {
+      process.env.HOME = homeDir;
+      const sessionsDir = path.join(homeDir, '.codex', 'sessions', '2026', '03', '08');
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      fs.writeFileSync(path.join(sessionsDir, 'usage.jsonl'), [
+        JSON.stringify({ type: 'session_meta', payload: { id: 'sess-usage' } }),
+        JSON.stringify({
+          timestamp: '2026-03-08T01:00:00.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'token_count',
+            rate_limits: {
+              primary: {
+                used_percent: 27,
+                window_minutes: 300,
+                reset_after_seconds: 7200,
+                resets_at: 2000000000,
+              },
+              secondary: {
+                used_percent: 61,
+                window_minutes: 10080,
+                reset_after_seconds: 86400,
+                resets_at: 2000086400,
+              },
+            },
+          },
+        }),
+      ].join('\n'));
+
+      const result = getUsage({ agent: 'codex' });
+      expect(result.ok).toBe(true);
+      expect(result.source).toBe('session-history');
+      expect(result.capturedAt).toBe('2026-03-08T01:00:00.000Z');
+      expect(result.windows.map(w => w.label)).toEqual(['5h', '7d']);
+      expect(result.windows[0].usedPercent).toBe(27);
+      expect(result.windows[0].remainingPercent).toBe(73);
+      expect(result.windows[0].resetAfterSeconds).toBe(7200);
+      expect(result.windows[1].usedPercent).toBe(61);
+      expect(result.windows[1].remainingPercent).toBe(39);
+    } finally {
+      if (oldHome == null) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+    }
+  });
+
+  it('reads claude usage from telemetry and prefers the current model family', () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-home-'));
+    const oldHome = process.env.HOME;
+
+    try {
+      process.env.HOME = homeDir;
+      const telemetryDir = path.join(homeDir, '.claude', 'telemetry');
+      fs.mkdirSync(telemetryDir, { recursive: true });
+      fs.writeFileSync(path.join(telemetryDir, 'events.json'), [
+        JSON.stringify({
+          event_type: 'ClaudeCodeInternalEvent',
+          event_data: {
+            event_name: 'tengu_claudeai_limits_status_changed',
+            client_timestamp: '2026-03-08T04:00:00.000Z',
+            model: 'claude-sonnet-4-6',
+            additional_metadata: JSON.stringify({ status: 'allowed', hoursTillReset: 2 }),
+          },
+        }),
+        JSON.stringify({
+          event_type: 'ClaudeCodeInternalEvent',
+          event_data: {
+            event_name: 'tengu_claudeai_limits_status_changed',
+            client_timestamp: '2026-03-08T03:00:00.000Z',
+            model: 'claude-opus-4-6',
+            additional_metadata: JSON.stringify({ status: 'allowed_warning', hoursTillReset: 39 }),
+          },
+        }),
+      ].join('\n'));
+
+      const result = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
+      expect(result.ok).toBe(true);
+      expect(result.source).toBe('telemetry');
+      expect(result.capturedAt).toBe('2026-03-08T03:00:00.000Z');
+      expect(result.status).toBe('allowed_warning');
+      expect(result.windows).toHaveLength(1);
+      expect(result.windows[0].label).toBe('Current');
+      expect(result.windows[0].usedPercent).toBe(null);
+      expect(result.windows[0].remainingPercent).toBe(null);
+      expect(result.windows[0].resetAfterSeconds).toBe(39 * 3600);
+      expect(result.windows[0].status).toBe('allowed_warning');
+    } finally {
+      if (oldHome == null) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+    }
   });
 });

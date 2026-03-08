@@ -118,6 +118,18 @@ export interface TelegramOpts {
 }
 
 const TG_MAX = 4096;
+const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+
+function mimeTypeForFilename(filename: string): string {
+  switch (path.extname(filename).toLowerCase()) {
+    case '.png': return 'image/png';
+    case '.webp': return 'image/webp';
+    case '.jpg':
+    case '.jpeg':
+    default:
+      return 'image/jpeg';
+  }
+}
 
 // ---------------------------------------------------------------------------
 // TelegramChannel
@@ -254,15 +266,21 @@ class TelegramChannel extends Channel {
     await this.api('answerCallbackQuery', { callback_query_id: callbackId, ...(text ? { text } : {}) }).catch(() => {});
   }
 
-  async sendPhoto(chatId: number | string, photo: Buffer, opts: { caption?: string; replyTo?: number | string } = {}): Promise<number | null> {
+  async sendPhoto(
+    chatId: number | string,
+    photo: Buffer,
+    opts: { caption?: string; replyTo?: number | string; filename?: string; mimeType?: string } = {},
+  ): Promise<number | null> {
     const hash = crypto.createHash('md5').update(photo).digest('hex').slice(0, 16);
     const boundary = `----codeclaw${hash}`;
     const parts: Buffer[] = [];
     const add = (s: string) => parts.push(Buffer.from(s, 'utf-8'));
+    const filename = opts.filename || 'photo.jpg';
+    const mimeType = opts.mimeType || mimeTypeForFilename(filename);
     add(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`);
-    if (opts.replyTo) add(`--${boundary}\r\nContent-Disposition: form-data; name="reply_to_message_id"\r\n\r\n${opts.replyTo}\r\n`);
+    if (opts.replyTo != null) add(`--${boundary}\r\nContent-Disposition: form-data; name="reply_to_message_id"\r\n\r\n${opts.replyTo}\r\n`);
     if (opts.caption) add(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${opts.caption.slice(0, 1024)}\r\n`);
-    add(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`);
+    add(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${filename}"\r\nContent-Type: ${mimeType}\r\n\r\n`);
     parts.push(photo);
     add(`\r\n--${boundary}--\r\n`);
     try {
@@ -295,6 +313,25 @@ class TelegramChannel extends Channel {
       if (!data.ok) throw new Error(`Telegram API sendDocument: ${JSON.stringify(data)}`);
       return data?.result?.message_id ?? null;
     } catch (e) { throw e; }
+  }
+
+  async sendFile(
+    chatId: number | string,
+    filePath: string,
+    opts: { caption?: string; replyTo?: number | string; asPhoto?: boolean } = {},
+  ): Promise<number | null> {
+    const content = fs.readFileSync(filePath);
+    const filename = path.basename(filePath);
+    const wantsPhoto = opts.asPhoto ?? PHOTO_EXTS.has(path.extname(filename).toLowerCase());
+    if (wantsPhoto) {
+      return this.sendPhoto(chatId, content, {
+        caption: opts.caption,
+        replyTo: opts.replyTo,
+        filename,
+        mimeType: mimeTypeForFilename(filename),
+      });
+    }
+    return this.sendDocument(chatId, content, filename, { caption: opts.caption, replyTo: opts.replyTo });
   }
 
   /** Set bottom menu commands and ensure the menu button is visible.

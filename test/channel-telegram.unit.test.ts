@@ -101,6 +101,75 @@ describe('TelegramChannel.send', () => {
   });
 });
 
+describe('TelegramChannel.sendPhoto', () => {
+  it('preserves custom filename and mime type for image uploads', async () => {
+    const { ch } = createTestChannel();
+    const fetchMock = vi.fn(async () => ({
+      json: async () => ({ ok: true, result: { message_id: 321 } }),
+    }));
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as any;
+
+    try {
+      const msgId = await ch.sendPhoto(123, Buffer.from('png-bytes'), {
+        filename: 'shot.png',
+        mimeType: 'image/png',
+        caption: 'png',
+      });
+      expect(msgId).toBe(321);
+      const req = fetchMock.mock.calls[0]?.[1];
+      const body = String(req?.body);
+      expect(body).toContain('filename="shot.png"');
+      expect(body).toContain('Content-Type: image/png');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+describe('TelegramChannel.sendFile', () => {
+  it('routes png files through sendPhoto', async () => {
+    const { ch, tmpDir } = createTestChannel();
+    const filePath = path.join(tmpDir, 'shot.png');
+    fs.writeFileSync(filePath, 'fake-png');
+
+    const sendPhoto = vi.spyOn(ch, 'sendPhoto').mockResolvedValue(555);
+    const sendDocument = vi.spyOn(ch, 'sendDocument').mockResolvedValue(666);
+
+    const msgId = await ch.sendFile(123, filePath, { caption: 'shot', replyTo: 7 });
+
+    expect(msgId).toBe(555);
+    expect(sendPhoto).toHaveBeenCalledOnce();
+    expect(sendPhoto).toHaveBeenCalledWith(
+      123,
+      expect.any(Buffer),
+      expect.objectContaining({ caption: 'shot', replyTo: 7, filename: 'shot.png', mimeType: 'image/png' }),
+    );
+    expect(sendDocument).not.toHaveBeenCalled();
+  });
+
+  it('routes non-image files through sendDocument', async () => {
+    const { ch, tmpDir } = createTestChannel();
+    const filePath = path.join(tmpDir, 'notes.txt');
+    fs.writeFileSync(filePath, 'hello');
+
+    const sendPhoto = vi.spyOn(ch, 'sendPhoto').mockResolvedValue(555);
+    const sendDocument = vi.spyOn(ch, 'sendDocument').mockResolvedValue(666);
+
+    const msgId = await ch.sendFile(123, filePath, { caption: 'doc', replyTo: 8 });
+
+    expect(msgId).toBe(666);
+    expect(sendDocument).toHaveBeenCalledOnce();
+    expect(sendDocument).toHaveBeenCalledWith(
+      123,
+      expect.any(Buffer),
+      'notes.txt',
+      expect.objectContaining({ caption: 'doc', replyTo: 8 }),
+    );
+    expect(sendPhoto).not.toHaveBeenCalled();
+  });
+});
+
 describe('TelegramChannel.editMessage', () => {
   it('edits a message', async () => {
     const { ch, apiCalls } = createTestChannel();

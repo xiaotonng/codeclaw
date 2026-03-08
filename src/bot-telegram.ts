@@ -83,6 +83,125 @@ function detectQuickReplies(text: string): string[] {
   return [];
 }
 
+function isNpxBinary(bin: string): boolean {
+  return path.basename(bin, path.extname(bin)).toLowerCase() === 'npx';
+}
+
+function ensureNonInteractiveRestartArgs(bin: string, args: string[]): string[] {
+  if (!isNpxBinary(bin)) return args;
+  if (args.includes('--yes') || args.includes('-y')) return args;
+  return ['--yes', ...args];
+}
+
+type ArtifactKind = 'photo' | 'document';
+
+interface BotArtifact {
+  filePath: string;
+  filename: string;
+  kind: ArtifactKind;
+  caption?: string;
+}
+
+const ARTIFACT_MANIFEST = 'manifest.json';
+const ARTIFACT_ROOT = path.join(os.tmpdir(), 'codeclaw-artifacts');
+const ARTIFACT_MAX_FILES = 8;
+const ARTIFACT_MAX_BYTES = 20 * 1024 * 1024;
+const ARTIFACT_PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+
+function isPhotoFilename(filename: string): boolean {
+  return ARTIFACT_PHOTO_EXTS.has(path.extname(filename).toLowerCase());
+}
+
+function buildArtifactPrompt(prompt: string, artifactDir: string, manifestPath: string): string {
+  const base = prompt.trim() || 'Please help with this request.';
+  return [
+    base,
+    '',
+    '[Telegram Artifact Return]',
+    'If you create screenshots, images, logs, or other files that should be sent back to the Telegram user, write them only inside this directory:',
+    artifactDir,
+    '',
+    `When you want a file returned, also write this JSON manifest: ${manifestPath}`,
+    'Format:',
+    '{"files":[{"path":"screenshot.png","kind":"photo","caption":"optional caption"}]}',
+    'Rules:',
+    '- Use relative paths in "path". Never use absolute paths.',
+    '- Use "photo" for png/jpg/jpeg/webp images. Use "document" for everything else.',
+    '- Omit the manifest entirely if there is nothing to send back.',
+  ].join('\n');
+}
+
+function humanizeUsageStatus(status: string | null | undefined): string {
+  return (status || '').replace(/_/g, ' ').trim();
+}
+
+function usageRemainingSeconds(
+  capturedAt: string | null,
+  resetAfterSeconds: number | null,
+): number | null {
+  if (resetAfterSeconds == null) return null;
+  const capturedAtMs = capturedAt ? Date.parse(capturedAt) : Number.NaN;
+  if (Number.isFinite(capturedAtMs)) {
+    return Math.round((capturedAtMs + resetAfterSeconds * 1000 - Date.now()) / 1000);
+  }
+  return resetAfterSeconds;
+}
+
+function formatProviderUsageLines(usage: {
+  ok: boolean;
+  capturedAt: string | null;
+  status: string | null;
+  windows: Array<{
+    label: string;
+    usedPercent: number | null;
+    remainingPercent: number | null;
+    resetAfterSeconds: number | null;
+    status: string | null;
+  }>;
+  error: string | null;
+}): string[] {
+  const lines = ['', '<b>Provider Usage</b>'];
+
+  if (!usage.ok) {
+    lines.push(`  Unavailable: ${escapeHtml(usage.error || 'No recent usage data found.')}`);
+    return lines;
+  }
+
+  if (usage.capturedAt) {
+    const capturedAtMs = Date.parse(usage.capturedAt);
+    if (Number.isFinite(capturedAtMs)) {
+      lines.push(`  Updated: ${fmtUptime(Math.max(0, Date.now() - capturedAtMs))} ago`);
+    }
+  }
+
+  if (!usage.windows.length) {
+    const status = humanizeUsageStatus(usage.status);
+    lines.push(`  ${escapeHtml(status || 'No window data')}`);
+    return lines;
+  }
+
+  for (const window of usage.windows) {
+    const parts: string[] = [];
+    if (window.usedPercent != null && window.remainingPercent != null) {
+      parts.push(`${window.usedPercent}% used / ${window.remainingPercent}% left`);
+    } else if (window.usedPercent != null) {
+      parts.push(`${window.usedPercent}% used`);
+    }
+
+    const status = humanizeUsageStatus(window.status);
+    if (status) parts.push(status);
+
+    const remainingSeconds = usageRemainingSeconds(usage.capturedAt, window.resetAfterSeconds);
+    if (remainingSeconds != null) {
+      parts.push(remainingSeconds > 0 ? `resets in ${fmtUptime(remainingSeconds * 1000)}` : 'reset passed');
+    }
+
+    lines.push(`  ${escapeHtml(window.label)}: ${escapeHtml(parts.join(' | ') || 'No details')}`);
+  }
+
+  return lines;
+}
+
 // ---------------------------------------------------------------------------
 // Directory browser (Telegram callback_data 64-byte limit)
 // ---------------------------------------------------------------------------
@@ -260,7 +379,7 @@ export class TelegramBot extends Bot {
     if (d.running) {
       lines.push(`<b>Running:</b> ${fmtUptime(Date.now() - d.running.startedAt)} - ${escapeHtml(d.running.prompt.slice(0, 50))}`);
     }
-    lines.push('', '<b>Usage</b>', `  Turns: ${d.stats.totalTurns}`);
+    lines.push(...formatProviderUsageLines(d.usage), '', '<b>Bot Usage</b>', `  Turns: ${d.stats.totalTurns}`);
     if (d.stats.totalInputTokens || d.stats.totalOutputTokens) {
       lines.push(`  In: ${fmtTokens(d.stats.totalInputTokens)}  Out: ${fmtTokens(d.stats.totalOutputTokens)}`);
       if (d.stats.totalCachedTokens) lines.push(`  Cached: ${fmtTokens(d.stats.totalCachedTokens)}`);
@@ -323,7 +442,7 @@ export class TelegramBot extends Bot {
 
     await ctx.reply(
       `<b>Restarting codeclaw...</b>\n\n` +
-      `Pulling latest version via <code>npx codeclaw@latest</code>.\n` +
+      `Pulling latest version via <code>npx --yes codeclaw@latest</code>.\n` +
       `The bot will be back shortly.`,
       { parseMode: 'HTML' },
     );
@@ -337,15 +456,19 @@ export class TelegramBot extends Bot {
     this.channel.disconnect();
     this.stopKeepAlive();
 
-    const restartCmd = process.env.CODECLAW_RESTART_CMD || 'npx codeclaw@latest';
-    const [bin, ...baseArgs] = shellSplit(restartCmd);
+    const restartCmd = process.env.CODECLAW_RESTART_CMD || 'npx --yes codeclaw@latest';
+    const [bin, ...rawArgs] = shellSplit(restartCmd);
+    const baseArgs = ensureNonInteractiveRestartArgs(bin, rawArgs);
     const allArgs = [...baseArgs, ...process.argv.slice(2)];
 
     this.log(`restart: spawning \`${bin} ${allArgs.join(' ')}\``);
     const child = spawn(bin, allArgs, {
       stdio: 'inherit',
       detached: true,
-      env: process.env,
+      env: {
+        ...process.env,
+        npm_config_yes: process.env.npm_config_yes || 'true',
+      },
     });
     child.unref();
     this.log(`restart: new process spawned (PID ${child.pid}), exiting...`);
@@ -359,7 +482,12 @@ export class TelegramBot extends Bot {
     if (!text && !msg.files.length) return;
 
     const cs = this.chat(ctx.chatId);
-    const prompt = buildPrompt(text, msg.files);
+    const artifactTurn = this.createArtifactTurn(ctx.chatId);
+    const prompt = buildArtifactPrompt(
+      buildPrompt(text, msg.files),
+      artifactTurn.dir,
+      artifactTurn.manifestPath,
+    );
     this.log(`[handleMessage] chat=${ctx.chatId} agent=${cs.agent} session=${cs.sessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${msg.files.length}`);
 
     const phId = await ctx.reply(`<code>${escapeHtml(cs.agent)} | thinking ...</code>`, { parseMode: 'HTML' });
@@ -404,6 +532,7 @@ export class TelegramBot extends Bot {
       };
 
       const result = await this.runStream(prompt, cs, msg.files, onText);
+      const artifacts = this.collectArtifacts(artifactTurn.dir, artifactTurn.manifestPath);
 
       this.log(
         `[handleMessage] done agent=${cs.agent} ok=${result.ok} session=${result.sessionId || '?'} elapsed=${result.elapsedS.toFixed(1)}s edits=${editCount} ` +
@@ -411,14 +540,117 @@ export class TelegramBot extends Bot {
       );
       this.log(`[handleMessage] response preview: "${result.message.slice(0, 150)}"`);
 
-      await this.sendFinalReply(ctx, phId, cs.agent, result);
+      const finalMsgId = await this.sendFinalReply(ctx, phId, cs.agent, result);
+      await this.sendArtifacts(ctx, finalMsgId ?? phId, artifacts);
       this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
     } finally {
       this.activeTasks.delete(ctx.chatId);
+      this.cleanupArtifactTurn(artifactTurn.dir);
     }
   }
 
-  private async sendFinalReply(ctx: TgContext, phId: number, agent: Agent, result: StreamResult) {
+  private createArtifactTurn(chatId: number) {
+    const turnId = `${chatId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dir = path.join(ARTIFACT_ROOT, String(chatId), turnId);
+    fs.mkdirSync(dir, { recursive: true });
+    return { dir, manifestPath: path.join(dir, ARTIFACT_MANIFEST) };
+  }
+
+  private cleanupArtifactTurn(dirPath: string) {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  }
+
+  private collectArtifacts(dirPath: string, manifestPath: string): BotArtifact[] {
+    if (!fs.existsSync(manifestPath)) return [];
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    } catch (e) {
+      this.log(`artifact manifest parse error: ${e}`);
+      return [];
+    }
+
+    const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.files) ? parsed.files : [];
+    if (!entries.length) return [];
+
+    const realDir = fs.realpathSync(dirPath);
+    const artifacts: BotArtifact[] = [];
+
+    for (const entry of entries.slice(0, ARTIFACT_MAX_FILES)) {
+      const rawPath = typeof entry?.path === 'string' ? entry.path
+        : typeof entry?.name === 'string' ? entry.name
+        : '';
+      const relPath = rawPath.trim();
+      if (!relPath || path.isAbsolute(relPath)) {
+        this.log(`artifact skipped: invalid path "${rawPath}"`);
+        continue;
+      }
+
+      const resolved = path.resolve(dirPath, relPath);
+      const relative = path.relative(dirPath, resolved);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+        this.log(`artifact skipped: outside turn dir "${relPath}"`);
+        continue;
+      }
+      if (!fs.existsSync(resolved)) {
+        this.log(`artifact skipped: missing file "${relPath}"`);
+        continue;
+      }
+
+      const realFile = fs.realpathSync(resolved);
+      const realRelative = path.relative(realDir, realFile);
+      if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+        this.log(`artifact skipped: symlink outside turn dir "${relPath}"`);
+        continue;
+      }
+
+      const stat = fs.statSync(realFile);
+      if (!stat.isFile()) {
+        this.log(`artifact skipped: not a file "${relPath}"`);
+        continue;
+      }
+      if (stat.size > ARTIFACT_MAX_BYTES) {
+        this.log(`artifact skipped: too large "${relPath}" (${stat.size} bytes)`);
+        continue;
+      }
+
+      const filename = path.basename(realFile);
+      const requestedKind = typeof entry?.kind === 'string' ? entry.kind.toLowerCase()
+        : typeof entry?.type === 'string' ? entry.type.toLowerCase()
+        : '';
+      let kind: ArtifactKind = requestedKind === 'document' ? 'document'
+        : requestedKind === 'photo' ? 'photo'
+        : isPhotoFilename(filename) ? 'photo' : 'document';
+      if (kind === 'photo' && !isPhotoFilename(filename)) kind = 'document';
+
+      const caption = typeof entry?.caption === 'string' ? entry.caption.trim().slice(0, 1024) || undefined : undefined;
+      artifacts.push({ filePath: realFile, filename, kind, caption });
+    }
+
+    return artifacts;
+  }
+
+  private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[]) {
+    for (const artifact of artifacts) {
+      try {
+        await this.channel.sendFile(ctx.chatId, artifact.filePath, {
+          caption: artifact.caption,
+          replyTo,
+          asPhoto: artifact.kind === 'photo',
+        });
+      } catch (e) {
+        this.log(`artifact upload failed for ${artifact.filename}: ${e}`);
+        await this.channel.send(
+          ctx.chatId,
+          `Artifact upload failed: <code>${escapeHtml(artifact.filename)}</code>`,
+          { parseMode: 'HTML', replyTo },
+        ).catch(() => {});
+      }
+    }
+  }
+
+  private async sendFinalReply(ctx: TgContext, phId: number, agent: Agent, result: StreamResult): Promise<number | null> {
     const metaParts: string[] = [agent];
     if (result.model) metaParts.push(result.model);
     if (result.elapsedS != null) metaParts.push(`${result.elapsedS.toFixed(1)}s`);
@@ -474,12 +706,13 @@ export class TelegramBot extends Bot {
 
     const bodyHtml = mdToTgHtml(result.message);
     const fullHtml = `${statusHtml}${thinkingHtml}${bodyHtml}\n\n${meta}${tokenBlock}`;
+    let finalMsgId: number | null = phId;
 
     if (fullHtml.length <= 3900) {
       try {
         await this.channel.editMessage(ctx.chatId, phId, fullHtml, { parseMode: 'HTML', keyboard });
       } catch {
-        await this.channel.send(ctx.chatId, fullHtml, { parseMode: 'HTML', replyTo: ctx.messageId, keyboard });
+        finalMsgId = await this.channel.send(ctx.chatId, fullHtml, { parseMode: 'HTML', replyTo: ctx.messageId, keyboard });
       }
     } else {
       let preview = bodyHtml.slice(0, 3200);
@@ -488,7 +721,7 @@ export class TelegramBot extends Bot {
       try {
         await this.channel.editMessage(ctx.chatId, phId, previewHtml, { parseMode: 'HTML', keyboard });
       } catch {
-        await this.channel.send(ctx.chatId, previewHtml, { parseMode: 'HTML', replyTo: ctx.messageId, keyboard });
+        finalMsgId = await this.channel.send(ctx.chatId, previewHtml, { parseMode: 'HTML', replyTo: ctx.messageId, keyboard });
       }
 
       const thinkingMd = result.thinking
@@ -497,9 +730,10 @@ export class TelegramBot extends Bot {
       await this.channel.sendDocument(
         ctx.chatId, thinkingMd + result.message,
         `response_${phId}.md`,
-        { caption: `Full response (${result.message.length} chars)`, replyTo: phId },
+        { caption: `Full response (${result.message.length} chars)`, replyTo: finalMsgId ?? phId },
       );
     }
+    return finalMsgId;
   }
 
   // ---- callbacks ------------------------------------------------------------
