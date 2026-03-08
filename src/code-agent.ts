@@ -565,6 +565,39 @@ export function listAgents(): AgentListResult {
 }
 
 // ---------------------------------------------------------------------------
+// Model listing
+// ---------------------------------------------------------------------------
+
+export interface ModelInfo {
+  id: string;
+  /** Short alias (e.g. 'opus', 'sonnet') — null if the id IS the alias */
+  alias: string | null;
+}
+
+export interface ModelListResult {
+  agent: Agent;
+  models: ModelInfo[];
+}
+
+const CLAUDE_MODELS: ModelInfo[] = [
+  { id: 'claude-opus-4-6', alias: 'opus' },
+  { id: 'claude-sonnet-4-5-20250929', alias: 'sonnet' },
+  { id: 'claude-haiku-4-5-20250929', alias: 'haiku' },
+];
+
+const CODEX_MODELS: ModelInfo[] = [
+  { id: 'o4-mini', alias: null },
+  { id: 'o3', alias: null },
+  { id: 'gpt-5.4', alias: null },
+  { id: 'gpt-4.1', alias: null },
+  { id: 'codex-mini', alias: null },
+];
+
+export function listModels(agent: Agent): ModelListResult {
+  return { agent, models: agent === 'codex' ? CODEX_MODELS : CLAUDE_MODELS };
+}
+
+// ---------------------------------------------------------------------------
 // Usage inspection
 // ---------------------------------------------------------------------------
 

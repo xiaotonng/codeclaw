@@ -18,6 +18,22 @@ import { TelegramChannel, type TgContext, type TgCallbackContext, type TgMessage
 import { splitText } from './channel-base.js';
 
 // ---------------------------------------------------------------------------
+// Context window sizes (max input tokens per model family)
+// ---------------------------------------------------------------------------
+
+function getContextWindowSize(model: string | null): number | null {
+  if (!model) return null;
+  const m = model.toLowerCase();
+  // Claude models: 200k context
+  if (m.includes('claude')) return 200_000;
+  // GPT-4.1 / GPT-5 / o3/o4 family: 200k (1M for o3, but default to 200k)
+  if (m.startsWith('gpt-') || m.startsWith('o3') || m.startsWith('o4')) return 200_000;
+  // Gemini: 1M context
+  if (m.includes('gemini')) return 1_000_000;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Telegram HTML formatting
 // ---------------------------------------------------------------------------
 
@@ -364,6 +380,7 @@ export class TelegramBot extends Bot {
   private static readonly MENU_COMMANDS = [
     { command: 'sessions', description: 'List / switch sessions' },
     { command: 'agents', description: 'List / switch agents' },
+    { command: 'models', description: 'List / switch models' },
     { command: 'status', description: 'Bot status' },
     { command: 'host', description: 'Host machine info' },
     { command: 'switch', description: 'Switch working directory' },
@@ -383,6 +400,7 @@ export class TelegramBot extends Bot {
       `<b>codeclaw</b> v${VERSION}\n\n` +
       `/sessions \u2014 List / switch sessions\n` +
       `/agents \u2014 List / switch agents\n` +
+      `/models \u2014 List / switch models\n` +
       `/status \u2014 Bot status\n` +
       `/host \u2014 Host machine info\n` +
       `/switch \u2014 Switch working directory\n` +
@@ -502,6 +520,23 @@ export class TelegramBot extends Bot {
       } else {
         lines.push(`   Not installed`);
       }
+    }
+    await ctx.reply(lines.join('\n'), { parseMode: 'HTML', keyboard: { inline_keyboard: rows } });
+  }
+
+  private async cmdModels(ctx: TgContext) {
+    const cs = this.chat(ctx.chatId);
+    const res = this.fetchModels(cs.agent);
+    const currentModel = this.modelForAgent(cs.agent);
+    const lines = [`<b>Models for ${escapeHtml(cs.agent)}</b>\n`];
+    const rows: { text: string; callback_data: string }[][] = [];
+    for (const m of res.models) {
+      const isCurrent = m.id === currentModel || m.alias === currentModel;
+      const status = isCurrent ? '\u25CF' : '\u25CB';
+      const display = m.alias ? `${m.alias} (${m.id})` : m.id;
+      lines.push(`${status} <code>${escapeHtml(display)}</code>${isCurrent ? ' \u2190 current' : ''}`);
+      const label = isCurrent ? `\u25CF ${m.alias || m.id}` : (m.alias || m.id);
+      rows.push([{ text: label, callback_data: `mod:${m.id}` }]);
     }
     await ctx.reply(lines.join('\n'), { parseMode: 'HTML', keyboard: { inline_keyboard: rows } });
   }
@@ -673,6 +708,12 @@ export class TelegramBot extends Bot {
       if (result.inputTokens != null) tp.push(`in: ${fmtTokens(result.inputTokens)}`);
       if (result.cachedInputTokens) tp.push(`cached: ${fmtTokens(result.cachedInputTokens)}`);
       if (result.outputTokens != null) tp.push(`out: ${fmtTokens(result.outputTokens)}`);
+      // Context window usage percentage (based on input tokens = full conversation context)
+      const ctxMax = getContextWindowSize(result.model);
+      if (ctxMax && result.inputTokens != null) {
+        const pct = (result.inputTokens / ctxMax * 100).toFixed(1);
+        tp.push(`ctx: ${pct}%`);
+      }
       tokenBlock = `\n<blockquote expandable>${tp.join('  ')}</blockquote>`;
     }
 
@@ -838,6 +879,25 @@ export class TelegramBot extends Bot {
       return;
     }
 
+    if (data.startsWith('mod:')) {
+      const modelId = data.slice(4);
+      const cs = this.chat(ctx.chatId);
+      const currentModel = this.modelForAgent(cs.agent);
+      if (currentModel === modelId) {
+        await ctx.answerCallback(`Already using ${modelId}`);
+        return;
+      }
+      this.setModelForAgent(cs.agent, modelId);
+      cs.sessionId = null;
+      this.log(`model switched to ${modelId} for ${cs.agent} chat=${ctx.chatId}`);
+      await ctx.answerCallback(`Switched to ${modelId}`);
+      await ctx.editReply(ctx.messageId,
+        `<b>Model switched to <code>${escapeHtml(modelId)}</code></b>\n\nAgent: ${escapeHtml(cs.agent)}\nSession has been reset. Send a message to start a new conversation.`,
+        { parseMode: 'HTML' },
+      );
+      return;
+    }
+
     if (data.startsWith('qr:')) {
       const parts = data.split(':');
       if (parts.length === 3) {
@@ -863,6 +923,7 @@ export class TelegramBot extends Bot {
         case 'start':    await this.cmdStart(ctx); return;
         case 'sessions': await this.cmdSessions(ctx); return;
         case 'agents':   await this.cmdAgents(ctx); return;
+        case 'models':   await this.cmdModels(ctx); return;
         case 'status':   await this.cmdStatus(ctx); return;
         case 'host':     await this.cmdHost(ctx); return;
         case 'switch':   await this.cmdSwitch(ctx); return;

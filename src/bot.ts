@@ -9,11 +9,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
 import {
-  doStream, getSessions, getUsage, listAgents,
+  doStream, getSessions, getUsage, listAgents, listModels,
   type Agent, type StreamOpts, type StreamResult, type SessionInfo, type UsageResult,
+  type ModelInfo, type ModelListResult,
 } from './code-agent.js';
 
-export { type Agent, type StreamResult, type SessionInfo, type UsageResult };
+export { type Agent, type StreamResult, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult };
 export const VERSION = '0.2.7';
 
 // ---------------------------------------------------------------------------
@@ -184,6 +185,16 @@ export class Bot {
 
   fetchAgents() {
     return listAgents();
+  }
+
+  fetchModels(agent: Agent) {
+    return listModels(agent);
+  }
+
+  setModelForAgent(agent: Agent, modelId: string) {
+    if (agent === 'codex') this.codexModel = modelId;
+    else this.claudeModel = modelId;
+    this.log(`model for ${agent} changed to ${modelId}`);
   }
 
   getStatusData(chatId: number) {
