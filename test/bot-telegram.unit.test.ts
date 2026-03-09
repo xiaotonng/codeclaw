@@ -37,6 +37,7 @@ function createBot() {
     }),
     setMenu: vi.fn(async () => {}),
     deleteMessage: vi.fn(async () => {}),
+    sendTyping: vi.fn(async () => {}),
     disconnect: vi.fn(),
   };
 
@@ -197,6 +198,46 @@ describe('TelegramBot.cmdStatus', () => {
 });
 
 describe('TelegramBot.handleMessage streaming', () => {
+  it('refreshes elapsed time and typing state while waiting for the first model output', async () => {
+    vi.useFakeTimers();
+    const { bot, ctx, edits, channel } = createBot();
+
+    vi.spyOn(bot, 'runStream').mockImplementation(async () => {
+      await new Promise(resolve => setTimeout(resolve, 12_000));
+      return {
+        ok: true,
+        message: 'Finally done.',
+        thinking: null,
+        sessionId: 'sess-waiting',
+        model: 'claude-opus-4-6',
+        thinkingEffort: 'high',
+        elapsedS: 12,
+        inputTokens: 4,
+        outputTokens: 8,
+        cachedInputTokens: null,
+        error: null,
+        stopReason: null,
+        incomplete: false,
+      };
+    });
+
+    try {
+      const pending = (bot as any).handleMessage({ text: 'Wait for it', files: [] }, ctx);
+      await vi.advanceTimersByTimeAsync(12_000);
+      await pending;
+
+      const previews = edits.filter(e => !e.opts?.parseMode).map(e => e.text);
+      expect(previews.some(text => text.includes('Waiting for model output...'))).toBe(true);
+      expect(previews.some(text => text.includes('claude | 5s'))).toBe(true);
+      expect(previews.some(text => text.includes('claude | 10s'))).toBe(true);
+      expect(channel.sendTyping).toHaveBeenCalled();
+      expect(vi.mocked(channel.sendTyping).mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(edits[edits.length - 1].text).toContain('Finally done.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps artifact instructions out of the user prompt for resumed codex sessions', async () => {
     const { bot, ctx } = createBot();
     const cs = bot.chat(ctx.chatId);

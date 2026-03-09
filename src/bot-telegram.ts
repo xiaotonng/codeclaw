@@ -155,6 +155,9 @@ const ARTIFACT_ROOT = path.join(os.tmpdir(), 'codeclaw-artifacts');
 const ARTIFACT_MAX_FILES = 8;
 const ARTIFACT_MAX_BYTES = 20 * 1024 * 1024;
 const ARTIFACT_PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+const STREAM_PREVIEW_HEARTBEAT_MS = 5_000;
+const STREAM_TYPING_HEARTBEAT_MS = 4_000;
+const STREAM_STALLED_NOTICE_MS = 15_000;
 
 function isPhotoFilename(filename: string): boolean {
   return ARTIFACT_PHOTO_EXTS.has(path.extname(filename).toLowerCase());
@@ -788,31 +791,46 @@ export class TelegramBot extends Bot {
     const artifactSystemPrompt = buildArtifactSystemPrompt(artifactTurn.dir, artifactTurn.manifestPath);
     const basePrompt = buildPrompt(text, msg.files);
     const prompt = basePrompt;
+    const start = Date.now();
+    const initialPreview = `Waiting for model output...\n\n${cs.agent} | 0s ·`;
     this.log(`[handleMessage] chat=${ctx.chatId} agent=${cs.agent} session=${cs.sessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${msg.files.length}`);
 
-    const phId = await ctx.reply(`<code>${escapeHtml(cs.agent)} | thinking ...</code>`, { parseMode: 'HTML' });
+    const phId = await ctx.reply(initialPreview);
     if (!phId) { this.log(`[handleMessage] placeholder null for chat=${ctx.chatId}`); return; }
     this.log(`[handleMessage] placeholder sent msg_id=${phId}, starting agent stream...`);
 
-    this.activeTasks.set(ctx.chatId, { prompt: basePrompt, startedAt: Date.now() });
+    this.activeTasks.set(ctx.chatId, { prompt: basePrompt, startedAt: start });
 
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let typingTimer: ReturnType<typeof setInterval> | null = null;
     try {
-      const start = Date.now();
       const streamEditIntervalMs = cs.agent === 'codex' ? 400 : 800;
       let lastEdit = 0, editCount = 0;
       let latestText = '', latestThinking = '', latestActivity = '';
-      let lastPreview = '';
+      let lastPreview = initialPreview;
+      let lastProgressAt = start;
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
       let previewVersion = 0;
       let editChain: Promise<void> = Promise.resolve();
+
+      const stopWaitFeedback = () => {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        if (typingTimer) {
+          clearInterval(typingTimer);
+          typingTimer = null;
+        }
+      };
 
       const renderPreview = (text: string, thinking: string, activity: string) => {
         const display = text.trim();
         const thinkDisplay = thinking.trim();
         const activityDisplay = summarizeActivityForPreview(activity);
-        if (!display && !thinkDisplay && !activityDisplay) return '';
-
-        const elapsed = ((Date.now() - start) / 1000).toFixed(0);
+        const now = Date.now();
+        const elapsed = ((now - start) / 1000).toFixed(0);
+        const idleMs = now - lastProgressAt;
         const maxBody = 2400;
         const maxActivity = 900;
         const parts: string[] = [];
@@ -830,6 +848,12 @@ export class TelegramBot extends Bot {
           if (thinkDisplay) parts.push(`${tLabel} (${thinkDisplay.length} chars)`);
           const preview = display.length > maxBody ? '(...truncated)\n' + display.slice(-maxBody) : display;
           parts.push(preview);
+        }
+
+        if (!display && !thinkDisplay && !activityDisplay) {
+          parts.push('Waiting for model output...');
+        } else if (idleMs >= STREAM_STALLED_NOTICE_MS) {
+          parts.push(`No new output for ${fmtUptime(idleMs)}.`);
         }
 
         const dots = '\u00b7'.repeat((editCount % 3) + 1);
@@ -879,19 +903,40 @@ export class TelegramBot extends Bot {
           clearTimeout(flushTimer);
           flushTimer = null;
         }
-        queuePreviewEdit(true);
+        if (editCount > 0 || latestText.trim() || latestThinking.trim() || latestActivity.trim()) {
+          queuePreviewEdit(true);
+        }
         await editChain.catch(() => {});
       };
 
+      const sendTypingPulse = () => {
+        void this.channel.sendTyping(ctx.chatId).catch(() => {});
+      };
+
+      heartbeatTimer = setInterval(() => {
+        const idleMs = Date.now() - lastProgressAt;
+        const recentlyEdited = Date.now() - lastEdit < STREAM_PREVIEW_HEARTBEAT_MS - 250;
+        if (recentlyEdited && idleMs < STREAM_STALLED_NOTICE_MS) return;
+        queuePreviewEdit(true);
+      }, STREAM_PREVIEW_HEARTBEAT_MS);
+      heartbeatTimer.unref?.();
+
+      sendTypingPulse();
+      typingTimer = setInterval(sendTypingPulse, STREAM_TYPING_HEARTBEAT_MS);
+      typingTimer.unref?.();
+
       const onText = (text: string, thinking: string, activity = '') => {
+        const changed = text !== latestText || thinking !== latestThinking || activity !== latestActivity;
         latestText = text;
         latestThinking = thinking;
         latestActivity = activity;
+        if (changed) lastProgressAt = Date.now();
         if (!text.trim() && !thinking.trim() && !activity.trim()) return;
         schedulePreviewEdit();
       };
 
       const result = await this.runStream(prompt, cs, msg.files, onText, artifactSystemPrompt);
+      stopWaitFeedback();
       await flushPreviewEdits();
       const artifacts = this.collectArtifacts(artifactTurn.dir, artifactTurn.manifestPath);
 
@@ -911,6 +956,8 @@ export class TelegramBot extends Bot {
       await this.sendArtifacts(ctx, finalMsgId ?? phId, artifacts);
       this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
     } finally {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (typingTimer) clearInterval(typingTimer);
       this.activeTasks.delete(ctx.chatId);
       this.cleanupArtifactTurn(artifactTurn.dir);
     }
