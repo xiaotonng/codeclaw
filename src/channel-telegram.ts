@@ -57,7 +57,15 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
-import { Channel, BotInfo, SendOpts, splitText, sleep } from './channel-base.js';
+import {
+  Channel,
+  type BotInfo,
+  DEFAULT_CHANNEL_CAPABILITIES,
+  type MenuCommand,
+  type SendOpts,
+  splitText,
+  sleep,
+} from './channel-base.js';
 
 // ---------------------------------------------------------------------------
 // Proxy support — automatically respects HTTPS_PROXY / HTTP_PROXY / NO_PROXY
@@ -248,6 +256,18 @@ function isPollingConflictError(err: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 class TelegramChannel extends Channel {
+  override readonly capabilities = {
+    ...DEFAULT_CHANNEL_CAPABILITIES,
+    editMessages: true,
+    typingIndicators: true,
+    commandMenu: true,
+    callbackActions: true,
+    messageReactions: true,
+    fileUpload: true,
+    fileDownload: true,
+    threads: true,
+  };
+
   private token: string;
   private base: string;
   private workdir: string;
@@ -583,7 +603,7 @@ class TelegramChannel extends Channel {
 
   /** Set bottom menu commands and ensure the menu button is visible.
    *  Automatically applies to all known chats (from incoming updates). */
-  async setMenu(commands: { command: string; description: string }[]) {
+  override async setMenu(commands: MenuCommand[]) {
     this._menuCommands = commands;
     await this.api('setMyCommands', { commands });
     await this.api('setChatMenuButton', { menu_button: { type: 'commands' } });
@@ -613,7 +633,7 @@ class TelegramChannel extends Channel {
   }
 
   /** Remove all bot commands and reset menu button to default. */
-  async clearMenu() {
+  override async clearMenu() {
     this._menuCommands = null;
     await this.api('deleteMyCommands', {}).catch(() => {});
     await this.api('setChatMenuButton', { menu_button: { type: 'default' } }).catch(() => {});

@@ -16,7 +16,7 @@ import {
 } from './code-agent.js';
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
-export const VERSION = '0.2.24';
+export const VERSION = '0.2.25';
 const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 
@@ -353,6 +353,30 @@ export interface ChatState {
   localSessionId?: string | null;
   workspacePath?: string | null;
   codexCumulative?: CodexCumulativeUsage;
+  modelId?: string | null;
+  activeSessionKey?: string | null;
+}
+
+export interface SessionRuntime {
+  key: string;
+  workdir: string;
+  agent: Agent;
+  sessionId: string | null;
+  localSessionId: string;
+  workspacePath: string | null;
+  codexCumulative?: CodexCumulativeUsage;
+  modelId?: string | null;
+  runningTaskIds: Set<string>;
+}
+
+export interface RunningTask {
+  taskId: string;
+  chatId: number;
+  agent: Agent;
+  sessionKey: string;
+  prompt: string;
+  startedAt: number;
+  sourceMessageId: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -375,12 +399,14 @@ export class Bot {
   claudeExtraArgs: string[];
 
   chats = new Map<number, ChatState>();
-  activeTasks = new Map<number, { prompt: string; startedAt: number }>();
+  sessionStates = new Map<string, SessionRuntime>();
+  activeTasks = new Map<string, RunningTask>();
   startedAt = Date.now();
   stats = { totalTurns: 0, totalInputTokens: 0, totalOutputTokens: 0, totalCachedTokens: 0 };
 
   private keepAliveProc: ReturnType<typeof spawn> | null = null;
   private keepAlivePulseTimer: ReturnType<typeof setInterval> | null = null;
+  private sessionChains = new Map<string, Promise<void>>();
 
   constructor() {
     this.workdir = path.resolve((process.env.CODECLAW_WORKDIR || process.cwd()).replace(/^~/, process.env.HOME || ''));
@@ -405,8 +431,150 @@ export class Bot {
 
   chat(chatId: number): ChatState {
     let s = this.chats.get(chatId);
-    if (!s) { s = { agent: this.defaultAgent, sessionId: null }; this.chats.set(chatId, s); }
+    if (!s) { s = { agent: this.defaultAgent, sessionId: null, activeSessionKey: null, modelId: null }; this.chats.set(chatId, s); }
     return s;
+  }
+
+  protected sessionKey(agent: Agent, localSessionId: string): string {
+    return `${agent}:${localSessionId}`;
+  }
+
+  protected getSessionRuntimeByKey(sessionKey: string | null | undefined, opts: { allowAnyWorkdir?: boolean } = {}): SessionRuntime | null {
+    if (!sessionKey) return null;
+    const runtime = this.sessionStates.get(sessionKey) || null;
+    if (!runtime) return null;
+    if (!opts.allowAnyWorkdir && runtime.workdir !== this.workdir) return null;
+    return runtime;
+  }
+
+  protected getSelectedSession(cs: ChatState): SessionRuntime | null {
+    return this.getSessionRuntimeByKey(cs.activeSessionKey);
+  }
+
+  protected upsertSessionRuntime(session: {
+    agent: Agent;
+    localSessionId: string;
+    sessionId?: string | null;
+    workspacePath?: string | null;
+    codexCumulative?: CodexCumulativeUsage;
+    modelId?: string | null;
+    workdir?: string;
+  }): SessionRuntime {
+    const workdir = path.resolve(session.workdir || this.workdir);
+    const key = this.sessionKey(session.agent, session.localSessionId);
+    const existing = this.sessionStates.get(key);
+    if (existing) {
+      existing.workdir = workdir;
+      existing.agent = session.agent;
+      if (session.sessionId !== undefined) existing.sessionId = session.sessionId ?? null;
+      if (session.workspacePath !== undefined) existing.workspacePath = session.workspacePath ?? null;
+      if (session.codexCumulative !== undefined) existing.codexCumulative = session.codexCumulative;
+      if (session.modelId !== undefined) existing.modelId = session.modelId ?? null;
+      return existing;
+    }
+
+    const runtime: SessionRuntime = {
+      key,
+      workdir,
+      agent: session.agent,
+      sessionId: session.sessionId ?? null,
+      localSessionId: session.localSessionId,
+      workspacePath: session.workspacePath ?? null,
+      codexCumulative: session.codexCumulative,
+      modelId: session.modelId ?? null,
+      runningTaskIds: new Set<string>(),
+    };
+    this.sessionStates.set(key, runtime);
+    return runtime;
+  }
+
+  protected applySessionSelection(cs: ChatState, session: SessionRuntime | null) {
+    cs.activeSessionKey = session?.key ?? null;
+    if (session) {
+      cs.agent = session.agent;
+      cs.sessionId = session.sessionId;
+      cs.localSessionId = session.localSessionId;
+      cs.workspacePath = session.workspacePath;
+      cs.codexCumulative = session.codexCumulative;
+      cs.modelId = session.modelId ?? null;
+      return;
+    }
+    cs.sessionId = null;
+    cs.localSessionId = null;
+    cs.workspacePath = null;
+    cs.codexCumulative = undefined;
+    cs.modelId = null;
+  }
+
+  protected resetChatConversation(cs: ChatState) {
+    this.applySessionSelection(cs, null);
+  }
+
+  protected adoptSession(cs: ChatState, session: Pick<SessionInfo, 'agent' | 'engineSessionId' | 'localSessionId' | 'workspacePath' | 'model'>) {
+    if (!session.localSessionId) {
+      this.applySessionSelection(cs, null);
+      return;
+    }
+    const runtime = this.upsertSessionRuntime({
+      agent: session.agent,
+      localSessionId: session.localSessionId,
+      sessionId: session.engineSessionId ?? null,
+      workspacePath: session.workspacePath ?? null,
+      modelId: session.model ?? null,
+    });
+    this.applySessionSelection(cs, runtime);
+  }
+
+  protected syncSelectedChats(session: SessionRuntime) {
+    for (const [, cs] of this.chats) {
+      if (cs.activeSessionKey !== session.key) continue;
+      this.applySessionSelection(cs, session);
+    }
+  }
+
+  protected beginTask(task: RunningTask) {
+    this.activeTasks.set(task.taskId, task);
+    const session = this.getSessionRuntimeByKey(task.sessionKey, { allowAnyWorkdir: true });
+    session?.runningTaskIds.add(task.taskId);
+  }
+
+  protected finishTask(taskId: string) {
+    const task = this.activeTasks.get(taskId);
+    if (!task) return;
+    this.activeTasks.delete(taskId);
+    const session = this.getSessionRuntimeByKey(task.sessionKey, { allowAnyWorkdir: true });
+    if (!session) return;
+    session.runningTaskIds.delete(taskId);
+    if (!session.runningTaskIds.size && session.workdir !== this.workdir) {
+      this.sessionStates.delete(session.key);
+    }
+  }
+
+  protected runningTaskForSession(sessionKey: string | null | undefined): RunningTask | null {
+    const session = this.getSessionRuntimeByKey(sessionKey, { allowAnyWorkdir: true });
+    if (!session || !session.runningTaskIds.size) return null;
+    let running: RunningTask | null = null;
+    for (const taskId of session.runningTaskIds) {
+      const task = this.activeTasks.get(taskId);
+      if (!task) continue;
+      if (!running || task.startedAt < running.startedAt) running = task;
+    }
+    return running;
+  }
+
+  protected queueSessionTask<T>(session: SessionRuntime, task: () => Promise<T>): Promise<T> {
+    const prev = this.sessionChains.get(session.key) || Promise.resolve();
+    const current = prev.catch(() => {}).then(task);
+    const settled = current.then(() => {}, () => {});
+    const chained = settled.finally(() => {
+      if (this.sessionChains.get(session.key) === chained) this.sessionChains.delete(session.key);
+    });
+    this.sessionChains.set(session.key, chained);
+    return current;
+  }
+
+  protected sessionHasPendingWork(session: SessionRuntime): boolean {
+    return this.sessionChains.has(session.key);
   }
 
   modelForAgent(agent: Agent): string {
@@ -442,14 +610,19 @@ export class Bot {
 
   getStatusData(chatId: number) {
     const cs = this.chat(chatId);
+    const selectedSession = this.getSelectedSession(cs);
+    const selectedTask = this.runningTaskForSession(selectedSession?.key ?? null);
+    const fallbackTask = selectedTask || [...this.activeTasks.values()]
+      .sort((a, b) => a.startedAt - b.startedAt)[0] || null;
+    const model = selectedSession?.modelId || this.modelForAgent(cs.agent);
     const mem = process.memoryUsage();
     return {
       version: VERSION, uptime: Date.now() - this.startedAt,
       memRss: mem.rss, memHeap: mem.heapUsed, pid: process.pid,
-      workdir: this.workdir, agent: cs.agent, model: this.modelForAgent(cs.agent), sessionId: cs.sessionId,
+      workdir: this.workdir, agent: cs.agent, model, sessionId: cs.sessionId,
       localSessionId: cs.localSessionId ?? null, workspacePath: cs.workspacePath ?? null,
-      running: this.activeTasks.get(chatId) ?? null, stats: this.stats,
-      usage: getUsage({ agent: cs.agent, model: this.modelForAgent(cs.agent) }),
+      running: fallbackTask, activeTasksCount: this.activeTasks.size, stats: this.stats,
+      usage: getUsage({ agent: cs.agent, model }),
     };
   }
 
@@ -483,10 +656,10 @@ export class Bot {
     const old = this.workdir;
     this.workdir = newPath;
     for (const [, cs] of this.chats) {
-      cs.sessionId = null;
-      cs.localSessionId = null;
-      cs.workspacePath = null;
-      cs.codexCumulative = undefined;
+      this.resetChatConversation(cs);
+    }
+    for (const [key, session] of this.sessionStates) {
+      if (session.workdir === old && !session.runningTaskIds.size) this.sessionStates.delete(key);
     }
     this.log(`switch workdir: ${old} -> ${newPath}`);
     this.afterSwitchWorkdir(old, newPath);
@@ -496,26 +669,26 @@ export class Bot {
   protected afterSwitchWorkdir(_oldPath: string, _newPath: string) {}
 
   async runStream(
-    prompt: string, cs: ChatState, attachments: string[],
+    prompt: string, cs: Pick<SessionRuntime, 'key' | 'agent' | 'sessionId' | 'localSessionId' | 'workspacePath' | 'codexCumulative' | 'modelId'> | ChatState, attachments: string[],
     onText: (text: string, thinking: string, activity?: string, meta?: StreamPreviewMeta, plan?: StreamPreviewPlan | null) => void,
     systemPrompt?: string,
   ): Promise<StreamResult> {
-    this.log(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${this.workdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
+    const resolvedModel = cs.modelId || this.modelForAgent(cs.agent);
+    this.log(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} local_session=${cs.localSessionId || '(new)'} workdir=${this.workdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
     if (cs.agent === 'claude') {
-      this.log(`[runStream] claude config: model=${this.claudeModel} permission=${this.claudePermissionMode} extraArgs=[${this.claudeExtraArgs.join(' ')}]`);
+      this.log(`[runStream] claude config: model=${resolvedModel} permission=${this.claudePermissionMode} extraArgs=[${this.claudeExtraArgs.join(' ')}]`);
     } else if (cs.agent === 'codex') {
-      this.log(`[runStream] codex config: model=${this.codexModel} reasoning=${this.codexReasoningEffort} fullAccess=${this.codexFullAccess} extraArgs=[${this.codexExtraArgs.join(' ')}]`);
+      this.log(`[runStream] codex config: model=${resolvedModel} reasoning=${this.codexReasoningEffort} fullAccess=${this.codexFullAccess} extraArgs=[${this.codexExtraArgs.join(' ')}]`);
     }
-    const snapshotSessionId = cs.sessionId;
     const opts: StreamOpts = {
       agent: cs.agent, prompt, workdir: this.workdir, timeout: this.runTimeout,
-      sessionId: snapshotSessionId, localSessionId: cs.localSessionId ?? null, model: null, thinkingEffort: this.codexReasoningEffort, onText,
+      sessionId: cs.sessionId, localSessionId: cs.localSessionId ?? null, model: null, thinkingEffort: this.codexReasoningEffort, onText,
       attachments: attachments.length ? attachments : undefined,
-      codexModel: this.codexModel, codexFullAccess: this.codexFullAccess,
+      codexModel: cs.agent === 'codex' ? resolvedModel : this.codexModel, codexFullAccess: this.codexFullAccess,
       codexDeveloperInstructions: systemPrompt || undefined,
       codexExtraArgs: this.codexExtraArgs.length ? this.codexExtraArgs : undefined,
       codexPrevCumulative: cs.codexCumulative,
-      claudeModel: this.claudeModel, claudePermissionMode: this.claudePermissionMode,
+      claudeModel: cs.agent === 'claude' ? resolvedModel : this.claudeModel, claudePermissionMode: this.claudePermissionMode,
       claudeAppendSystemPrompt: systemPrompt || undefined,
       claudeExtraArgs: this.claudeExtraArgs.length ? this.claudeExtraArgs : undefined,
     };
@@ -525,10 +698,14 @@ export class Bot {
     if (result.outputTokens) this.stats.totalOutputTokens += result.outputTokens;
     if (result.cachedInputTokens) this.stats.totalCachedTokens += result.cachedInputTokens;
     if (result.codexCumulative) cs.codexCumulative = result.codexCumulative;
-    // Only update sessionId if it hasn't been changed externally (e.g. user switched session during run)
-    if (result.sessionId && cs.sessionId === snapshotSessionId) cs.sessionId = result.sessionId;
+    if (result.sessionId) cs.sessionId = result.sessionId;
     if (result.localSessionId) cs.localSessionId = result.localSessionId;
     if (result.workspacePath) cs.workspacePath = result.workspacePath;
+    if (result.model) cs.modelId = result.model;
+    if ('key' in cs && typeof cs.key === 'string') {
+      const runtime = this.getSessionRuntimeByKey(cs.key, { allowAnyWorkdir: true });
+      if (runtime) this.syncSelectedChats(runtime);
+    }
     this.log(`[runStream] completed turn=${this.stats.totalTurns} cumulative: in=${fmtTokens(this.stats.totalInputTokens)} out=${fmtTokens(this.stats.totalOutputTokens)} cached=${fmtTokens(this.stats.totalCachedTokens)}`);
     return result;
   }

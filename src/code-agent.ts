@@ -794,7 +794,7 @@ class CodexAppServer {
   private buf = '';
   private nextId = 1;
   private pending = new Map<number, RpcCallback>();
-  private notificationHandler: NotificationHandler | null = null;
+  private notificationHandlers = new Set<NotificationHandler>();
   private ready = false;
   private startPromise: Promise<boolean> | null = null;
   private configOverrides: string[] = [];
@@ -843,7 +843,9 @@ class CodexAppServer {
           }
           // Notification (has method, no id)
           if (msg.method && msg.id == null) {
-            this.notificationHandler?.(msg.method, msg.params ?? {});
+            for (const handler of [...this.notificationHandlers]) {
+              handler(msg.method, msg.params ?? {});
+            }
           }
         }
       });
@@ -885,13 +887,20 @@ class CodexAppServer {
   }
 
   /** Register a handler for server notifications. */
-  onNotification(handler: NotificationHandler): void {
-    this.notificationHandler = handler;
+  onNotification(handler: NotificationHandler): () => void {
+    this.notificationHandlers.add(handler);
+    return () => {
+      this.notificationHandlers.delete(handler);
+    };
   }
 
   /** Remove notification handler. */
-  offNotification(): void {
-    this.notificationHandler = null;
+  offNotification(handler?: NotificationHandler): void {
+    if (!handler) {
+      this.notificationHandlers.clear();
+      return;
+    }
+    this.notificationHandlers.delete(handler);
   }
 
   kill(): void {
@@ -899,6 +908,7 @@ class CodexAppServer {
     this.proc = null;
     this.ready = false;
     this.pending.clear();
+    this.notificationHandlers.clear();
   }
 
   get isRunning(): boolean {
@@ -1257,6 +1267,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   // Step 2: turn/start — send the prompt
   const input = buildCodexTurnInput(opts.prompt, opts.attachments || []);
 
+  let unsubscribeNotifications = () => {};
   const turnDone = new Promise<void>((resolve) => {
     const deadline = start + opts.timeout * 1000;
     const hardTimer = setTimeout(() => {
@@ -1268,7 +1279,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       resolve();
     }, opts.timeout * 1000 + 5_000);
 
-    srv.onNotification((method, params) => {
+    const handleNotification = (method: string, params: any) => {
       if (Date.now() > deadline) return;
       const emit = () => {
         s.activity = buildCodexActivityPreview(s);
@@ -1413,7 +1424,8 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       if (method === 'model/rerouted' && params.threadId === s.sessionId) {
         s.model = params.model ?? s.model;
       }
-    });
+    };
+    unsubscribeNotifications = srv.onNotification(handleNotification);
   });
 
   agentLog(`[codex-rpc] turn/start prompt="${opts.prompt.slice(0, 120)}" effort=${mapEffort(opts.thinkingEffort)}`);
@@ -1425,7 +1437,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   });
 
   if (turnResp.error) {
-    srv.offNotification();
+    unsubscribeNotifications();
     const errMsg = turnResp.error.message || 'turn/start failed';
     agentLog(`[codex-rpc] turn/start error: ${errMsg}`);
     return {
@@ -1442,7 +1454,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
 
   // Wait for turn to complete (via notifications)
   await turnDone;
-  srv.offNotification();
+  unsubscribeNotifications();
 
   // Build final text from accumulated parts
   if (!s.text.trim() && s.msgs.length) s.text = s.msgs.join('\n\n');

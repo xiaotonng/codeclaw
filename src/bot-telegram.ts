@@ -1,8 +1,9 @@
 /**
- * bot-telegram.ts — Telegram-specific bot: formatting, keyboards, callbacks, lifecycle.
+ * bot-telegram.ts - Telegram bot orchestration: commands, callbacks, artifacts, lifecycle.
  *
- * All Telegram presentation logic lives here. For a new IM (Lark, WhatsApp, ...),
- * create a parallel bot-lark.ts / bot-whatsapp.ts that extends Bot.
+ * Rendering, workdir browsing, and live preview state live in dedicated helper modules.
+ * For a new IM (Lark, WhatsApp, ...), create a parallel bot-lark.ts / bot-whatsapp.ts
+ * that extends Bot and composes channel-specific renderer/view helpers.
  */
 
 import os from 'node:os';
@@ -10,29 +11,37 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
-  Bot, VERSION, type Agent, type StreamPreviewMeta, type StreamPreviewPlan, type StreamResult,
-  fmtTokens, fmtUptime, fmtBytes, whichSync, listSubdirs, buildPrompt,
-  thinkLabel, formatThinkingForDisplay, parseAllowedChatIds, shellSplit, type SkillInfo,
+  Bot, VERSION, type Agent, type SessionRuntime, type StreamResult,
+  fmtTokens, fmtUptime, fmtBytes, whichSync, buildPrompt,
+  parseAllowedChatIds, shellSplit,
 } from './bot.js';
 import {
+  type BotArtifact,
   getCodexUsageLive,
   shutdownCodexServer,
   stageSessionFiles,
 } from './code-agent.js';
+import {
+  buildDefaultMenuCommands,
+  buildWelcomeIntro,
+  indexSkillsByCommand,
+  SKILL_CMD_PREFIX,
+} from './bot-menu.js';
+import { summarizePromptForStatus } from './bot-streaming.js';
+import { buildSwitchWorkdirView, resolveRegisteredPath } from './bot-telegram-directory.js';
+import { TelegramLivePreview } from './bot-telegram-live-preview.js';
+import {
+  buildInitialPreviewHtml,
+  buildFinalReplyRender,
+  escapeHtml,
+  formatMenuLines,
+  formatProviderUsageLines,
+  renderSessionTurnHtml,
+} from './bot-telegram-render.js';
 import { TelegramChannel, type TgContext, type TgCallbackContext, type TgMessage } from './channel-telegram.js';
-import { splitText } from './channel-base.js';
+import { splitText, supportsChannelCapability } from './channel-base.js';
 
-// ---------------------------------------------------------------------------
-// Context window sizes (max input tokens per model family)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Telegram HTML formatting
-// ---------------------------------------------------------------------------
-
-function escapeHtml(t: string): string {
-  return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+export { buildArtifactPrompt, buildArtifactSystemPrompt, collectArtifacts } from './code-agent.js';
 
 function claudeModelSelectionKey(modelId: string | null | undefined): string | null {
   const value = String(modelId || '').trim().toLowerCase();
@@ -55,79 +64,6 @@ function modelMatchesSelection(agent: Agent, selection: string, currentModel: st
   return !!a && a === b;
 }
 
-function mdToTgHtml(text: string): string {
-  const result: string[] = [];
-  const lines = text.split('\n');
-  let i = 0, inCode = false, codeLang = '', codeLines: string[] = [];
-
-  while (i < lines.length) {
-    const line = lines[i], stripped = line.trim();
-    if (stripped.startsWith('```')) {
-      if (!inCode) { inCode = true; codeLang = stripped.slice(3).trim().split(/\s/)[0] || ''; codeLines = []; }
-      else {
-        inCode = false;
-        const content = escapeHtml(codeLines.join('\n'));
-        result.push(codeLang ? `<pre><code class="language-${escapeHtml(codeLang)}">${content}</code></pre>` : `<pre>${content}</pre>`);
-      }
-      i++; continue;
-    }
-    if (inCode) { codeLines.push(line); i++; continue; }
-    // Markdown table: collect consecutive lines starting with '|'
-    if (stripped.startsWith('|') && stripped.endsWith('|')) {
-      const tableLines: string[] = [];
-      while (i < lines.length) {
-        const tl = lines[i].trim();
-        if (!tl.startsWith('|')) break;
-        // skip separator rows like |---|---|
-        if (/^\|[\s\-:|]+\|$/.test(tl)) { i++; continue; }
-        tableLines.push(tl);
-        i++;
-      }
-      if (tableLines.length) result.push(`<pre>${escapeHtml(tableLines.join('\n'))}</pre>`);
-      continue;
-    }
-    const hm = line.match(/^(#{1,6})\s+(.+)$/);
-    if (hm) { result.push(`<b>${mdInline(hm[2])}</b>`); i++; continue; }
-    result.push(mdInline(line)); i++;
-  }
-  if (inCode && codeLines.length) result.push(`<pre>${escapeHtml(codeLines.join('\n'))}</pre>`);
-  return result.join('\n');
-}
-
-function renderSessionTurnHtml(userText: string | null | undefined, assistantText: string | null | undefined): string {
-  const parts: string[] = [];
-  const user = String(userText || '').trim();
-  const assistant = String(assistantText || '').trim();
-  if (user) parts.push(`<blockquote expandable>${escapeHtml(user)}</blockquote>`);
-  if (assistant) parts.push(mdToTgHtml(assistant));
-  return parts.join('\n\n');
-}
-
-function mdInline(line: string): string {
-  const parts: string[] = [];
-  let rest = line;
-  while (rest.includes('`')) {
-    const a = rest.indexOf('`'), b = rest.indexOf('`', a + 1);
-    if (b === -1) break;
-    parts.push(fmtSeg(rest.slice(0, a)));
-    parts.push(`<code>${escapeHtml(rest.slice(a + 1, b))}</code>`);
-    rest = rest.slice(b + 1);
-  }
-  parts.push(fmtSeg(rest));
-  return parts.join('');
-}
-
-function fmtSeg(t: string): string {
-  t = escapeHtml(t);
-  t = t.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-  t = t.replace(/__(.+?)__/g, '<b>$1</b>');
-  t = t.replace(/(?<!\w)\*([^*]+?)\*(?!\w)/g, '<i>$1</i>');
-  t = t.replace(/(?<!\w)_([^_]+?)_(?!\w)/g, '<i>$1</i>');
-  t = t.replace(/~~(.+?)~~/g, '<s>$1</s>');
-  t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-  return t;
-}
-
 function isNpxBinary(bin: string): boolean {
   return path.basename(bin, path.extname(bin)).toLowerCase() === 'npx';
 }
@@ -147,524 +83,6 @@ const SHUTDOWN_EXIT_CODE: Record<ShutdownSignal, number> = {
 };
 const SHUTDOWN_FORCE_EXIT_MS = 3_000;
 
-function formatMenuLines(commands: { command: string; description: string }[]): string[] {
-  return commands.map(cmd => `/${cmd.command} \u2014 ${escapeHtml(cmd.description)}`);
-}
-
-const SKILL_CMD_PREFIX = 'sk_';
-
-function buildSkillCommandName(skillName: string): string | null {
-  const normalized = skillName.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
-  if (!normalized) return null;
-  const cmdName = `${SKILL_CMD_PREFIX}${normalized}`;
-  if (cmdName.length > 32) return null;
-  return cmdName;
-}
-
-function indexSkillsByCommand(skills: SkillInfo[]): Map<string, SkillInfo> {
-  const indexed = new Map<string, SkillInfo>();
-  for (const skill of skills) {
-    const cmdName = buildSkillCommandName(skill.name);
-    if (!cmdName || indexed.has(cmdName)) continue;
-    indexed.set(cmdName, skill);
-  }
-  return indexed;
-}
-
-export type ArtifactKind = 'photo' | 'document';
-
-export interface BotArtifact {
-  filePath: string;
-  filename: string;
-  kind: ArtifactKind;
-  caption?: string;
-}
-
-const ARTIFACT_MAX_FILES = 8;
-const ARTIFACT_MAX_BYTES = 20 * 1024 * 1024;
-const ARTIFACT_PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
-const STREAM_PREVIEW_HEARTBEAT_MS = 5_000;
-const STREAM_TYPING_HEARTBEAT_MS = 4_000;
-const STREAM_STALLED_NOTICE_MS = 15_000;
-
-function isPhotoFilename(filename: string): boolean {
-  return ARTIFACT_PHOTO_EXTS.has(path.extname(filename).toLowerCase());
-}
-
-export function collectArtifacts(dirPath: string, manifestPath: string, log?: (msg: string) => void): BotArtifact[] {
-  const _log = log || (() => {});
-  if (!fs.existsSync(manifestPath)) return [];
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-  } catch (e) {
-    _log(`artifact manifest parse error: ${e}`);
-    return [];
-  }
-
-  const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.files) ? parsed.files : [];
-  if (!entries.length) return [];
-
-  const realDir = fs.realpathSync(dirPath);
-  const artifacts: BotArtifact[] = [];
-
-  for (const entry of entries.slice(0, ARTIFACT_MAX_FILES)) {
-    const rawPath = typeof entry?.path === 'string' ? entry.path
-      : typeof entry?.name === 'string' ? entry.name
-      : '';
-    const relPath = rawPath.trim();
-    if (!relPath || path.isAbsolute(relPath)) {
-      _log(`artifact skipped: invalid path "${rawPath}"`);
-      continue;
-    }
-
-    const resolved = path.resolve(dirPath, relPath);
-    const relative = path.relative(dirPath, resolved);
-    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
-      _log(`artifact skipped: outside turn dir "${relPath}"`);
-      continue;
-    }
-    if (!fs.existsSync(resolved)) {
-      _log(`artifact skipped: missing file "${relPath}"`);
-      continue;
-    }
-
-    const realFile = fs.realpathSync(resolved);
-    const realRelative = path.relative(realDir, realFile);
-    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
-      _log(`artifact skipped: symlink outside turn dir "${relPath}"`);
-      continue;
-    }
-
-    const stat = fs.statSync(realFile);
-    if (!stat.isFile()) {
-      _log(`artifact skipped: not a file "${relPath}"`);
-      continue;
-    }
-    if (stat.size > ARTIFACT_MAX_BYTES) {
-      _log(`artifact skipped: too large "${relPath}" (${stat.size} bytes)`);
-      continue;
-    }
-
-    const filename = path.basename(realFile);
-    const requestedKind = typeof entry?.kind === 'string' ? entry.kind.toLowerCase()
-      : typeof entry?.type === 'string' ? entry.type.toLowerCase()
-      : '';
-    let kind: ArtifactKind = requestedKind === 'document' ? 'document'
-      : requestedKind === 'photo' ? 'photo'
-      : isPhotoFilename(filename) ? 'photo' : 'document';
-    if (kind === 'photo' && !isPhotoFilename(filename)) kind = 'document';
-
-    const caption = typeof entry?.caption === 'string' ? entry.caption.trim().slice(0, 1024) || undefined : undefined;
-    artifacts.push({ filePath: realFile, filename, kind, caption });
-  }
-
-  return artifacts;
-}
-
-/**
- * Build the system-level artifact return instructions (for --append-system-prompt / developerInstructions).
- */
-export function buildArtifactSystemPrompt(artifactDir: string, manifestPath: string): string {
-  return [
-    '[Telegram Artifact Return]',
-    'If you create screenshots, images, logs, or other files that should be sent back to the Telegram user, write them only inside this directory:',
-    artifactDir,
-    '',
-    `When you want a file returned, also write this JSON manifest: ${manifestPath}`,
-    'Manifest format:',
-    '{"files":[{"path":"screenshot.png","kind":"photo","caption":"optional caption"}]}',
-    'Rules:',
-    '- Use relative paths in "path". Never use absolute paths.',
-    '- Use "photo" for png/jpg/jpeg/webp images. Use "document" for everything else.',
-    '- Omit the manifest entirely if there is nothing to send back.',
-  ].join('\n');
-}
-
-/**
- * @deprecated Use buildArtifactSystemPrompt() for the system prompt path.
- * Kept for legacy prompt sanitization tests and historical sessions only.
- */
-export function buildArtifactPrompt(prompt: string, artifactDir: string, manifestPath: string): string {
-  const base = prompt.trim() || 'Please help with this request.';
-  return base + '\n\n' + buildArtifactSystemPrompt(artifactDir, manifestPath);
-}
-
-function stripInjectedPrompts(text: string): string {
-  const markers = ['\n[Telegram Artifact Return]', '\n[Artifact Return]'];
-  for (const marker of markers) {
-    const idx = text.indexOf(marker);
-    if (idx >= 0) return text.slice(0, idx).trim();
-  }
-  return text.trim();
-}
-
-function summarizePromptForStatus(prompt: string, maxLen = 50): string {
-  const clean = stripInjectedPrompts(prompt).replace(/\s+/g, ' ').trim();
-  if (!clean) return '';
-  if (clean.length <= maxLen) return clean;
-  return clean.slice(0, Math.max(0, maxLen - 3)).trimEnd() + '...';
-}
-
-function trimActivityForPreview(text: string, maxChars = 900): string {
-  if (text.length <= maxChars) return text;
-
-  const lines = text.split('\n').filter(line => line.trim());
-  if (lines.length <= 1) return text.slice(0, Math.max(0, maxChars - 3)).trimEnd() + '...';
-
-  const tailCount = Math.min(2, Math.max(1, lines.length - 1));
-  const tail = lines.slice(-tailCount);
-  const headCandidates = lines.slice(0, Math.max(0, lines.length - tailCount));
-  const reserved = tail.join('\n').length + 5; // "\n...\n"
-  const budget = Math.max(0, maxChars - reserved);
-  const head: string[] = [];
-  let used = 0;
-
-  for (const line of headCandidates) {
-    const extra = line.length + (head.length ? 1 : 0);
-    if (used + extra > budget) break;
-    head.push(line);
-    used += extra;
-  }
-
-  if (!head.length) return text.slice(0, Math.max(0, maxChars - 3)).trimEnd() + '...';
-  return [...head, '...', ...tail].join('\n');
-}
-
-function parseClaudeShellActivity(line: string): {
-  key: string;
-  status: 'active' | 'done' | 'failed';
-} | null {
-  const prefix = 'Run shell: ';
-  if (!line.startsWith(prefix)) return null;
-
-  const detail = line.slice(prefix.length).trim();
-  if (!detail) return { key: prefix.trim(), status: 'active' };
-
-  const doneIdx = detail.indexOf(' -> ');
-  if (doneIdx > 0) {
-    return {
-      key: detail.slice(0, doneIdx).trim(),
-      status: 'done',
-    };
-  }
-
-  const failed = detail.match(/^(.*)\sfailed(?::.*)?$/);
-  if (failed?.[1]?.trim()) {
-    return {
-      key: failed[1].trim(),
-      status: 'failed',
-    };
-  }
-
-  if (detail.endsWith(' done')) {
-    const key = detail.slice(0, -' done'.length).trim();
-    return { key: key || detail, status: 'done' };
-  }
-
-  return { key: detail, status: 'active' };
-}
-
-function parseActivitySummary(activity: string): {
-  narrative: string[];
-  failedCommands: number;
-  completedCommands: number;
-  activeCommands: number;
-} {
-  const narrative: string[] = [];
-  let failedCommands = 0;
-  let activeCommands = 0;
-  let completedCommands = 0;
-  const activeClaudeShells = new Map<string, number>();
-
-  for (const rawLine of activity.split('\n')) {
-    const line = rawLine.replace(/\s+/g, ' ').trim();
-    if (!line) continue;
-    const claudeShell = parseClaudeShellActivity(line);
-    if (claudeShell) {
-      const key = claudeShell.key || 'Run shell';
-      const current = activeClaudeShells.get(key) || 0;
-      if (claudeShell.status === 'active') {
-        activeClaudeShells.set(key, current + 1);
-      } else {
-        if (current > 0) activeClaudeShells.set(key, current - 1);
-        if (claudeShell.status === 'done') completedCommands++;
-        else failedCommands++;
-      }
-      continue;
-    }
-    if (line.startsWith('$ ')) {
-      activeCommands++;
-      continue;
-    }
-    if (line.startsWith('Ran: ')) {
-      completedCommands++;
-      continue;
-    }
-    const executed = line.match(/^Executed (\d+) command(?:s)?\.$/);
-    if (executed) {
-      completedCommands = Math.max(completedCommands, parseInt(executed[1], 10) || 0);
-      continue;
-    }
-    const running = line.match(/^Running (\d+) command(?:s)?\.\.\.$/);
-    if (running) {
-      activeCommands = Math.max(activeCommands, parseInt(running[1], 10) || 0);
-      continue;
-    }
-    const failed = line.match(/^Command failed \((\d+)\):/);
-    if (failed) {
-      failedCommands++;
-      continue;
-    }
-    if (/^Command failed \(\d+\)$/.test(line)) {
-      failedCommands++;
-      continue;
-    }
-    narrative.push(line);
-  }
-
-  for (const pending of activeClaudeShells.values()) {
-    activeCommands += pending;
-  }
-
-  return { narrative, failedCommands, completedCommands, activeCommands };
-}
-
-function formatActivityCommandSummary(completedCommands: number, activeCommands: number, failedCommands = 0): string {
-  const parts: string[] = [];
-  if (failedCommands > 0) parts.push(`${failedCommands} failed`);
-  if (completedCommands > 0) parts.push(`${completedCommands} done`);
-  if (activeCommands > 0) parts.push(`${activeCommands} running`);
-  return parts.length ? `commands: ${parts.join(', ')}` : '';
-}
-
-function summarizeActivityForPreview(activity: string): string {
-  const summary = parseActivitySummary(activity);
-  const lines = [
-    ...summary.narrative,
-  ];
-
-  const commandSummary = formatActivityCommandSummary(
-    summary.completedCommands,
-    summary.activeCommands,
-    summary.failedCommands,
-  );
-  if (commandSummary) lines.push(commandSummary);
-
-  return lines.join('\n');
-}
-
-function hasPreviewMeta(meta: StreamPreviewMeta | null | undefined): boolean {
-  return meta?.contextPercent != null;
-}
-
-function samePreviewMeta(a: StreamPreviewMeta | null, b: StreamPreviewMeta | null): boolean {
-  return (a?.contextPercent ?? null) === (b?.contextPercent ?? null);
-}
-
-function fmtCompactUptime(ms: number): string {
-  return fmtUptime(ms).replace(/\s+/g, '');
-}
-
-type FooterStatus = 'running' | 'done' | 'failed';
-
-function footerStatusSymbol(status: FooterStatus): string {
-  switch (status) {
-    case 'running': return '●';
-    case 'done': return '✓';
-    case 'failed': return '✗';
-  }
-}
-
-function formatFooterSummary(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null, contextPercent?: number | null): string {
-  const parts: string[] = [agent];
-  const ctx = contextPercent ?? meta?.contextPercent ?? null;
-  if (ctx != null) parts.push(`${ctx}%`);
-  parts.push(fmtCompactUptime(Math.max(0, Math.round(elapsedMs))));
-  return parts.join(' · ');
-}
-
-function formatPreviewFooterLine(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null): string {
-  return `${footerStatusSymbol('running')} ${formatFooterSummary(agent, elapsedMs, meta)}`;
-}
-
-function formatPreviewFooterHtml(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null): string {
-  return escapeHtml(formatPreviewFooterLine(agent, elapsedMs, meta));
-}
-
-function formatFinalFooterHtml(status: FooterStatus, agent: Agent, elapsedMs: number, contextPercent?: number | null): string {
-  const line = `${footerStatusSymbol(status)} ${formatFooterSummary(agent, elapsedMs, null, contextPercent ?? null)}`;
-  return escapeHtml(line);
-}
-
-function normalizePlanStep(step: string): string {
-  return step.replace(/\s+/g, ' ').trim();
-}
-
-function samePreviewPlan(a: StreamPreviewPlan | null, b: StreamPreviewPlan | null): boolean {
-  if ((a?.explanation ?? null) !== (b?.explanation ?? null)) return false;
-  const aSteps = a?.steps ?? [];
-  const bSteps = b?.steps ?? [];
-  if (aSteps.length !== bSteps.length) return false;
-  for (let i = 0; i < aSteps.length; i++) {
-    if (aSteps[i].status !== bSteps[i].status) return false;
-    if (aSteps[i].step !== bSteps[i].step) return false;
-  }
-  return true;
-}
-
-function renderPlanForPreview(plan: StreamPreviewPlan | null): string {
-  if (!plan?.steps.length) return '';
-  const completed = plan.steps.filter(step => step.status === 'completed').length;
-  const total = plan.steps.length;
-  const lines = [`Plan ${completed}/${total}`];
-  for (const step of plan.steps.slice(0, 4)) {
-    const prefix = step.status === 'completed' ? '[x]' : step.status === 'inProgress' ? '[>]' : '[ ]';
-    lines.push(`${prefix} ${normalizePlanStep(step.step)}`);
-  }
-  if (plan.steps.length > 4) lines.push(`... +${plan.steps.length - 4} more`);
-  return lines.join('\n');
-}
-
-function humanizeUsageStatus(status: string | null | undefined): string {
-  return (status || '').replace(/_/g, ' ').trim();
-}
-
-function usageRemainingSeconds(
-  capturedAt: string | null,
-  resetAfterSeconds: number | null,
-): number | null {
-  if (resetAfterSeconds == null) return null;
-  const capturedAtMs = capturedAt ? Date.parse(capturedAt) : Number.NaN;
-  if (Number.isFinite(capturedAtMs)) {
-    return Math.round((capturedAtMs + resetAfterSeconds * 1000 - Date.now()) / 1000);
-  }
-  return resetAfterSeconds;
-}
-
-function formatProviderUsageLines(usage: {
-  ok: boolean;
-  capturedAt: string | null;
-  status: string | null;
-  windows: Array<{
-    label: string;
-    usedPercent: number | null;
-    remainingPercent: number | null;
-    resetAfterSeconds: number | null;
-    status: string | null;
-  }>;
-  error: string | null;
-}): string[] {
-  const lines = ['', '<b>Provider Usage</b>'];
-
-  if (!usage.ok) {
-    lines.push(`  Unavailable: ${escapeHtml(usage.error || 'No recent usage data found.')}`);
-    return lines;
-  }
-
-  if (usage.capturedAt) {
-    const capturedAtMs = Date.parse(usage.capturedAt);
-    if (Number.isFinite(capturedAtMs)) {
-      lines.push(`  Updated: ${fmtUptime(Math.max(0, Date.now() - capturedAtMs))} ago`);
-    }
-  }
-
-  if (!usage.windows.length) {
-    const status = humanizeUsageStatus(usage.status);
-    lines.push(`  ${escapeHtml(status || 'No window data')}`);
-    return lines;
-  }
-
-  for (const window of usage.windows) {
-    const parts: string[] = [];
-    if (window.usedPercent != null && window.remainingPercent != null) {
-      parts.push(`${window.usedPercent}% used / ${window.remainingPercent}% left`);
-    } else if (window.usedPercent != null) {
-      parts.push(`${window.usedPercent}% used`);
-    }
-
-    const status = humanizeUsageStatus(window.status);
-    if (status) parts.push(status);
-
-    const remainingSeconds = usageRemainingSeconds(usage.capturedAt, window.resetAfterSeconds);
-    if (remainingSeconds != null) {
-      parts.push(remainingSeconds > 0 ? `resets in ${fmtUptime(remainingSeconds * 1000)}` : 'reset passed');
-    }
-
-    lines.push(`  ${escapeHtml(window.label)}: ${escapeHtml(parts.join(' | ') || 'No details')}`);
-  }
-
-  return lines;
-}
-
-// ---------------------------------------------------------------------------
-// Directory browser (Telegram callback_data 64-byte limit)
-// ---------------------------------------------------------------------------
-
-class PathRegistry {
-  private pathToId = new Map<string, number>();
-  private idToPath = new Map<number, string>();
-  private nextId = 1;
-
-  register(p: string): number {
-    let id = this.pathToId.get(p);
-    if (id != null) return id;
-    id = this.nextId++;
-    this.pathToId.set(p, id);
-    this.idToPath.set(id, p);
-    if (this.pathToId.size > 500) {
-      const oldest = [...this.pathToId.entries()].slice(0, 200);
-      for (const [k, v] of oldest) { this.pathToId.delete(k); this.idToPath.delete(v); }
-    }
-    return id;
-  }
-
-  resolve(id: number): string | undefined {
-    return this.idToPath.get(id);
-  }
-}
-
-const pathReg = new PathRegistry();
-const DIR_PAGE_SIZE = 8;
-
-function buildDirKeyboard(browsePath: string, page: number) {
-  const dirs = listSubdirs(browsePath);
-  const totalPages = Math.max(1, Math.ceil(dirs.length / DIR_PAGE_SIZE));
-  const pg = Math.min(Math.max(0, page), totalPages - 1);
-  const slice = dirs.slice(pg * DIR_PAGE_SIZE, (pg + 1) * DIR_PAGE_SIZE);
-
-  const rows: { text: string; callback_data: string }[][] = [];
-
-  for (let i = 0; i < slice.length; i += 2) {
-    const row: { text: string; callback_data: string }[] = [];
-    for (let j = i; j < Math.min(i + 2, slice.length); j++) {
-      const full = path.join(browsePath, slice[j]);
-      const id = pathReg.register(full);
-      row.push({ text: slice[j], callback_data: `sw:n:${id}:0` });
-    }
-    rows.push(row);
-  }
-
-  const navRow: { text: string; callback_data: string }[] = [];
-  const parent = path.dirname(browsePath);
-  if (parent !== browsePath) {
-    const pid = pathReg.register(parent);
-    navRow.push({ text: '\u2B06 ..', callback_data: `sw:n:${pid}:0` });
-  }
-  if (totalPages > 1) {
-    const bid = pathReg.register(browsePath);
-    if (pg > 0) navRow.push({ text: `\u25C0 ${pg}/${totalPages}`, callback_data: `sw:n:${bid}:${pg - 1}` });
-    if (pg < totalPages - 1) navRow.push({ text: `${pg + 2}/${totalPages} \u25B6`, callback_data: `sw:n:${bid}:${pg + 1}` });
-  }
-  if (navRow.length) rows.push(navRow);
-
-  const selId = pathReg.register(browsePath);
-  rows.push([{ text: '\u2705 Select this directory', callback_data: `sw:s:${selId}` }]);
-
-  return { inline_keyboard: rows };
-}
-
 // ---------------------------------------------------------------------------
 // TelegramBot
 // ---------------------------------------------------------------------------
@@ -672,6 +90,8 @@ function buildDirKeyboard(browsePath: string, page: number) {
 export class TelegramBot extends Bot {
   private token: string;
   private channel!: TelegramChannel;
+  private sessionMessages = new Map<number, Map<number, string>>();
+  private nextTaskId = 1;
   private shutdownInFlight = false;
   private shutdownExitCode: number | null = null;
   private shutdownForceExitTimer: ReturnType<typeof setTimeout> | null = null;
@@ -690,48 +110,16 @@ export class TelegramBot extends Bot {
   /** Skill command prefix used in Telegram bot commands. */
   private static readonly SKILL_CMD_PREFIX = SKILL_CMD_PREFIX;
 
-  private static buildMenuCommands(agentCount: number, skills: SkillInfo[] = []) {
-    const commands = [
-      { command: 'sessions', description: 'Switch sessions' },
-    ];
-
-    // Only show agents in normal position if there are multiple agents
-    if (agentCount > 1) {
-      commands.push({ command: 'agents', description: 'Switch agents' });
-    }
-
-    commands.push(
-      { command: 'switch', description: 'Change workdir' },
-      { command: 'models', description: 'Switch models' },
-      { command: 'status', description: 'Show status' },
-      { command: 'host', description: 'Host info' },
-    );
-
-    // If only one agent, put agents at the bottom
-    if (agentCount === 1) {
-      commands.push({ command: 'agents', description: 'Switch agents' });
-    }
-
-    // Inject project-defined skills as sk_<name> commands
-    for (const [cmdName, sk] of indexSkillsByCommand(skills)) {
-      // Use short human-facing label; fall back to capitalized skill name
-      const displayName = sk.label || sk.name.charAt(0).toUpperCase() + sk.name.slice(1);
-      commands.push({ command: cmdName, description: `⚡ ${displayName}` });
-    }
-
-    commands.push({ command: 'restart', description: 'Restart bot' });
-
-    return commands;
-  }
-
   /** Register bot menu commands. Called automatically after connect. */
   async setupMenu() {
+    if (!supportsChannelCapability((this as any).channel, 'commandMenu')) return;
     const { commands, skillCount } = this.getCurrentMenuState();
     await this.channel.setMenu(commands);
     this.log(`menu: ${commands.length} commands (${skillCount} skills)`);
   }
 
   protected override afterSwitchWorkdir(_oldPath: string, _newPath: string) {
+    this.sessionMessages.clear();
     if (!(this as any).channel) return;
     void this.setupMenu().catch(err => this.log(`menu refresh failed after workdir switch: ${err}`));
   }
@@ -795,15 +183,86 @@ export class TelegramBot extends Bot {
     const res = this.fetchAgents();
     const installedCount = res.agents.filter(a => a.installed).length;
     const skillRes = this.fetchSkills();
-    const commands = TelegramBot.buildMenuCommands(installedCount, skillRes.skills);
+    const commands = buildDefaultMenuCommands(installedCount, skillRes.skills);
     return { commands, skillCount: skillRes.skills.length, skills: skillRes.skills };
   }
 
   private welcomeIntroLines(): string[] {
+    const intro = buildWelcomeIntro(VERSION);
     return [
-      `<b>Hi, I'm codeclaw</b> v${VERSION}`,
-      'Send me a message to get started.',
+      `<b>${escapeHtml(intro.title)}</b> v${escapeHtml(intro.version)}`,
+      escapeHtml(intro.subtitle),
     ];
+  }
+
+  private createTaskId(session: SessionRuntime): string {
+    const seq = this.nextTaskId++;
+    return `${session.key}:${Date.now().toString(36)}:${seq.toString(36)}`;
+  }
+
+  private registerSessionMessage(chatId: number, messageId: number | null | undefined, session: SessionRuntime) {
+    if (session.workdir !== this.workdir) return;
+    if (typeof messageId !== 'number' || !Number.isFinite(messageId)) return;
+    let messages = this.sessionMessages.get(chatId);
+    if (!messages) {
+      messages = new Map<number, string>();
+      this.sessionMessages.set(chatId, messages);
+    }
+    messages.set(messageId, session.key);
+    while (messages.size > 1024) {
+      const oldest = messages.keys().next();
+      if (oldest.done) break;
+      messages.delete(oldest.value);
+    }
+  }
+
+  private registerSessionMessages(chatId: number, messageIds: Array<number | null | undefined>, session: SessionRuntime) {
+    for (const messageId of messageIds) this.registerSessionMessage(chatId, messageId, session);
+  }
+
+  private sessionFromMessage(chatId: number, messageId: number | null | undefined): SessionRuntime | null {
+    if (typeof messageId !== 'number' || !Number.isFinite(messageId)) return null;
+    const sessionKey = this.sessionMessages.get(chatId)?.get(messageId) || null;
+    return this.getSessionRuntimeByKey(sessionKey);
+  }
+
+  private ensureSession(chatId: number, title: string, files: string[]): SessionRuntime {
+    const cs = this.chat(chatId);
+    const selected = this.getSelectedSession(cs);
+    if (selected) return selected;
+
+    const staged = stageSessionFiles({
+      agent: cs.agent,
+      workdir: this.workdir,
+      files: [],
+      localSessionId: null,
+      sessionId: null,
+      title: title || files[0] || 'New session',
+    });
+    const runtime = this.upsertSessionRuntime({
+      agent: cs.agent,
+      localSessionId: staged.localSessionId,
+      workspacePath: staged.workspacePath,
+      modelId: this.modelForAgent(cs.agent),
+    });
+    this.applySessionSelection(cs, runtime);
+    return runtime;
+  }
+
+  private resolveIncomingSession(ctx: TgContext, text: string, files: string[]): SessionRuntime {
+    const cs = this.chat(ctx.chatId);
+    const replyMessageId = typeof ctx.raw?.reply_to_message?.message_id === 'number'
+      ? ctx.raw.reply_to_message.message_id
+      : null;
+    const repliedSession = this.sessionFromMessage(ctx.chatId, replyMessageId);
+    if (repliedSession) {
+      this.applySessionSelection(cs, repliedSession);
+      return repliedSession;
+    }
+
+    const selected = this.getSelectedSession(cs);
+    if (selected) return selected;
+    return this.ensureSession(ctx.chatId, text, files);
   }
 
   // ---- commands -------------------------------------------------------------
@@ -840,10 +299,15 @@ export class TelegramBot extends Bot {
     for (const s of slice) {
       const sessionKey = s.localSessionId || s.sessionId || '';
       if (!sessionKey) continue;
-      const isCurrent = s.localSessionId
-        ? s.localSessionId === (cs.localSessionId ?? null)
-        : s.sessionId === (cs.sessionId ?? null);
-      const icon = s.running ? '🟢' : isCurrent ? '● ' : '';
+      const runtimeKey = s.localSessionId ? this.sessionKey(s.agent, s.localSessionId) : null;
+      const runtime = this.getSessionRuntimeByKey(runtimeKey);
+      const isCurrent = runtime ? cs.activeSessionKey === runtime.key : (
+        s.localSessionId
+          ? s.localSessionId === (cs.localSessionId ?? null)
+          : s.sessionId === (cs.sessionId ?? null)
+      );
+      const isRunning = !!runtime?.runningTaskIds.size || s.running;
+      const icon = isRunning ? '🟢' : isCurrent ? '● ' : '';
       const prefix = s.title ? s.title.replace(/\n/g, ' ').slice(0, 10) : sessionKey.slice(0, 10);
       const time = s.createdAt ? new Date(s.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?';
 
@@ -888,7 +352,8 @@ export class TelegramBot extends Bot {
       '',
       `<b>Agent:</b> ${escapeHtml(d.agent)}`,
       `<b>Model:</b> ${escapeHtml(d.model)}`,
-      `<b>Session:</b> ${d.sessionId ? `<code>${d.sessionId.slice(0, 16)}</code>` : '(new)'}`,
+      `<b>Session:</b> ${d.localSessionId ? `<code>${escapeHtml(d.localSessionId)}</code>` : d.sessionId ? `<code>${escapeHtml(d.sessionId.slice(0, 16))}</code>` : '(new)'}`,
+      `<b>Active Tasks:</b> ${d.activeTasksCount}`,
     ];
     if (d.running) {
       lines.push(`<b>Running:</b> ${fmtUptime(Date.now() - d.running.startedAt)} - ${escapeHtml(summarizePromptForStatus(d.running.prompt))}`);
@@ -903,10 +368,10 @@ export class TelegramBot extends Bot {
 
   private async cmdSwitch(ctx: TgContext) {
     const browsePath = path.dirname(this.workdir);
-    const kb = buildDirKeyboard(browsePath, 0);
+    const view = buildSwitchWorkdirView(this.workdir, browsePath);
     await ctx.reply(
-      `<b>Switch workdir</b>\nCurrent: <code>${escapeHtml(this.workdir)}</code>\n\nBrowsing: <code>${escapeHtml(browsePath)}</code>`,
-      { parseMode: 'HTML', keyboard: kb },
+      view.text,
+      { parseMode: 'HTML', keyboard: view.keyboard },
     );
   }
 
@@ -1033,24 +498,40 @@ export class TelegramBot extends Bot {
     const text = msg.text.trim();
     if (!text && !msg.files.length) return;
 
+    const session = this.resolveIncomingSession(ctx, text, msg.files);
     const cs = this.chat(ctx.chatId);
+    this.applySessionSelection(cs, session);
+    const messageThreadId = typeof ctx.raw?.message_thread_id === 'number' ? ctx.raw.message_thread_id : undefined;
+
     if (!text && msg.files.length) {
-      try {
-        const staged = stageSessionFiles({
-          agent: cs.agent,
-          workdir: this.workdir,
-          files: msg.files,
-          localSessionId: cs.localSessionId ?? null,
-          sessionId: cs.sessionId,
-        });
-        cs.localSessionId = staged.localSessionId;
-        cs.workspacePath = staged.workspacePath;
-        if (!staged.importedFiles.length) throw new Error('no files persisted');
-        this.log(`[handleMessage] staged workspace files chat=${ctx.chatId} local_session=${staged.localSessionId} files=${staged.importedFiles.length}`);
-        await ctx.reply('ok');
-      } catch (e: any) {
-        this.log(`[handleMessage] stage files failed: ${e?.message || e}`);
-        await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['⚠️']);
+      const hadPendingWork = this.sessionHasPendingWork(session);
+      const stageTask = this.queueSessionTask(session, async () => {
+        try {
+          const staged = stageSessionFiles({
+            agent: session.agent,
+            workdir: this.workdir,
+            files: msg.files,
+            localSessionId: session.localSessionId,
+            sessionId: session.sessionId,
+            title: msg.files[0],
+          });
+          session.workspacePath = staged.workspacePath;
+          this.syncSelectedChats(session);
+          if (!staged.importedFiles.length) throw new Error('no files persisted');
+          this.log(`[handleMessage] staged workspace files chat=${ctx.chatId} local_session=${staged.localSessionId} files=${staged.importedFiles.length}`);
+          const ack = messageThreadId != null
+            ? await ctx.reply('ok', { messageThreadId })
+            : await ctx.reply('ok');
+          this.registerSessionMessage(ctx.chatId, ack, session);
+        } catch (e: any) {
+          this.log(`[handleMessage] stage files failed: ${e?.message || e}`);
+          await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['⚠️']);
+        }
+      });
+      if (hadPendingWork) {
+        void stageTask.catch(e => this.log(`[handleMessage] stage queue failed: ${e}`));
+      } else {
+        await stageTask.catch(e => this.log(`[handleMessage] stage queue failed: ${e}`));
       }
       return;
     }
@@ -1058,217 +539,126 @@ export class TelegramBot extends Bot {
     const files = msg.files;
     const prompt = buildPrompt(text, files);
     const start = Date.now();
-    const initialEditPreview = formatPreviewFooterHtml(cs.agent, 0);
-    const messageThreadId = typeof ctx.raw?.message_thread_id === 'number' ? ctx.raw.message_thread_id : undefined;
-    this.log(`[handleMessage] chat=${ctx.chatId} agent=${cs.agent} session=${cs.sessionId || '(new)'} local_session=${cs.localSessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${files.length}`);
-    const phId = await ctx.reply(initialEditPreview, { parseMode: 'HTML', messageThreadId });
-    if (!phId) { this.log(`[handleMessage] placeholder unavailable for chat=${ctx.chatId}; continuing without live preview`); return; }
-    this.log(`[handleMessage] placeholder sent msg_id=${phId}, starting agent stream...`);
-
-    this.activeTasks.set(ctx.chatId, { prompt, startedAt: start });
-
-    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-    let typingTimer: ReturnType<typeof setInterval> | null = null;
-    try {
-      const streamEditIntervalMs = cs.agent === 'codex' ? 400 : 800;
-      let lastEdit = 0, editCount = 0;
-      let latestText = '', latestThinking = '', latestActivity = '';
-      let latestMeta: StreamPreviewMeta | null = null;
-      let latestPlan: StreamPreviewPlan | null = null;
-      let lastPreview = initialEditPreview;
-      let lastProgressAt = start;
-      let flushTimer: ReturnType<typeof setTimeout> | null = null;
-      let previewVersion = 0;
-      let editChain: Promise<void> = Promise.resolve();
-
-      const pushPreview = async (preview: string) => {
-        await this.channel.editMessage(ctx.chatId, phId, preview, { parseMode: 'HTML' });
-      };
-
-      const stopWaitFeedback = () => {
-        if (heartbeatTimer) {
-          clearInterval(heartbeatTimer);
-          heartbeatTimer = null;
-        }
-        if (typingTimer) {
-          clearInterval(typingTimer);
-          typingTimer = null;
-        }
-      };
-
-      const renderPreview = (bodyText: string, thinking: string, activity: string, meta: StreamPreviewMeta | null) => {
-        const maxBody = 2400;
-        const maxActivity = 900;
-        const display = bodyText.trim();
-        const rawThinking = thinking.trim();
-        const thinkDisplay = formatThinkingForDisplay(thinking, maxBody);
-        const planDisplay = renderPlanForPreview(latestPlan);
-        const activityDisplay = summarizeActivityForPreview(activity);
-        const now = Date.now();
-        const parts: string[] = [];
-        const tLabel = thinkLabel(cs.agent);
-
-        if (planDisplay) {
-          parts.push(`<blockquote><b>Plan</b>\n${escapeHtml(planDisplay)}</blockquote>`);
-        }
-
-        if (activityDisplay) {
-          const preview = trimActivityForPreview(activityDisplay, maxActivity);
-          parts.push(`<blockquote><b>Activity</b>\n${escapeHtml(preview)}</blockquote>`);
-        }
-
-        if (thinkDisplay && !display) {
-          parts.push(`<blockquote><b>${escapeHtml(tLabel)}</b>\n${escapeHtml(thinkDisplay)}</blockquote>`);
-        } else if (display) {
-          if (rawThinking) parts.push(`<i>${escapeHtml(`${tLabel} (${rawThinking.length} chars)`)}</i>`);
-          const preview = display.length > maxBody ? '(...truncated)\n' + display.slice(-maxBody) : display;
-          parts.push(mdToTgHtml(preview));
-        }
-
-        parts.push(formatPreviewFooterHtml(cs.agent, now - start, meta));
-        return parts.join('\n\n');
-      };
-
-      const queuePreviewEdit = (force = false) => {
-        const preview = renderPreview(latestText, latestThinking, latestActivity, latestMeta);
-        if (!preview) return;
-        if (!force && preview === lastPreview) return;
-        lastPreview = preview;
-        const version = ++previewVersion;
-        editCount++;
-        lastEdit = Date.now();
-        editChain = editChain
-          .catch(() => {})
-          .then(async () => {
-            if (version !== previewVersion) return;
-            try {
-              await pushPreview(preview);
-            } catch (e: any) {
-              this.log(`stream edit err: ${e?.message || e}`);
-            }
-          });
-      };
-
-      const schedulePreviewEdit = () => {
-        const wait = streamEditIntervalMs - (Date.now() - lastEdit);
-        if (wait <= 0) {
-          if (flushTimer) {
-            clearTimeout(flushTimer);
-            flushTimer = null;
-          }
-          queuePreviewEdit();
-          return;
-        }
-        if (flushTimer) return;
-        flushTimer = setTimeout(() => {
-          flushTimer = null;
-          queuePreviewEdit();
-        }, wait);
-      };
-
-      const flushPreviewEdits = async () => {
-        if (flushTimer) {
-          clearTimeout(flushTimer);
-          flushTimer = null;
-        }
-        if (editCount > 0 || latestText.trim() || latestThinking.trim() || latestActivity.trim()) {
-          queuePreviewEdit(true);
-        }
-        await editChain.catch(() => {});
-      };
-
-      const sendTypingPulse = () => {
-        void this.channel.sendTyping(ctx.chatId, { messageThreadId }).catch(() => {});
-      };
-
-      heartbeatTimer = setInterval(() => {
-        const idleMs = Date.now() - lastProgressAt;
-        const recentlyEdited = Date.now() - lastEdit < STREAM_PREVIEW_HEARTBEAT_MS - 250;
-        if (recentlyEdited && idleMs < STREAM_STALLED_NOTICE_MS) return;
-        queuePreviewEdit(true);
-      }, STREAM_PREVIEW_HEARTBEAT_MS);
-      heartbeatTimer.unref?.();
-
-      sendTypingPulse();
-      typingTimer = setInterval(sendTypingPulse, STREAM_TYPING_HEARTBEAT_MS);
-      typingTimer.unref?.();
-
-      const onText = (
-        text: string,
-        thinking: string,
-        activity = '',
-        meta?: StreamPreviewMeta,
-        plan?: StreamPreviewPlan | null,
-      ) => {
-        const nextMeta: StreamPreviewMeta | null = hasPreviewMeta(meta) ? meta! : null;
-        const nextPlan = plan?.steps?.length ? plan : null;
-        const changed = text !== latestText
-          || thinking !== latestThinking
-          || activity !== latestActivity
-          || !samePreviewMeta(nextMeta, latestMeta)
-          || !samePreviewPlan(nextPlan, latestPlan);
-        latestText = text;
-        latestThinking = thinking;
-        latestActivity = activity;
-        latestMeta = nextMeta;
-        latestPlan = nextPlan;
-        if (changed) lastProgressAt = Date.now();
-        if (!text.trim() && !thinking.trim() && !activity.trim() && !hasPreviewMeta(nextMeta) && !nextPlan) return;
-        schedulePreviewEdit();
-      };
-
-      const result = await this.runStream(prompt, cs, files, onText);
-      stopWaitFeedback();
-      await flushPreviewEdits();
-      const artifacts = result.artifacts || [];
-
-      this.log(
-        `[handleMessage] done agent=${cs.agent} ok=${result.ok} session=${result.sessionId || '?'} local_session=${result.localSessionId || '?'} elapsed=${result.elapsedS.toFixed(1)}s edits=${editCount} ` +
-        `tokens=in:${fmtTokens(result.inputTokens)}/cached:${fmtTokens(result.cachedInputTokens)}/out:${fmtTokens(result.outputTokens)} artifacts=${artifacts.length}`
-      );
-      this.log(`[handleMessage] response preview: "${result.message.slice(0, 150)}"`);
-
-      // If artifacts were collected successfully, suppress the "incomplete" warning
-      if (artifacts.length && result.incomplete && result.message.trim()) {
-        result.incomplete = false;
-        this.log(`[handleMessage] suppressed incomplete flag: artifacts present`);
-      }
-
-      const finalMsgId = await this.sendFinalReply(ctx, phId, cs.agent, result, { messageThreadId });
-      await this.sendArtifacts(ctx, finalMsgId ?? phId ?? ctx.messageId, artifacts, messageThreadId);
-      this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
-    } finally {
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      if (typingTimer) clearInterval(typingTimer);
-      this.activeTasks.delete(ctx.chatId);
+    this.log(`[handleMessage] queued chat=${ctx.chatId} agent=${session.agent} session=${session.sessionId || '(new)'} local_session=${session.localSessionId} prompt="${prompt.slice(0, 100)}" files=${files.length}`);
+    const placeholderId = await ctx.reply(buildInitialPreviewHtml(session.agent), { parseMode: 'HTML', messageThreadId });
+    const phId = typeof placeholderId === 'number' ? placeholderId : null;
+    if (phId != null) {
+      this.registerSessionMessage(ctx.chatId, phId, session);
+      this.log(`[handleMessage] placeholder sent msg_id=${phId}, task queued`);
+    } else {
+      this.log(`[handleMessage] placeholder unavailable for chat=${ctx.chatId}; continuing without live preview`);
     }
+
+    const taskId = this.createTaskId(session);
+    this.beginTask({
+      taskId,
+      chatId: ctx.chatId,
+      agent: session.agent,
+      sessionKey: session.key,
+      prompt,
+      startedAt: start,
+      sourceMessageId: ctx.messageId,
+    });
+
+    void this.queueSessionTask(session, async () => {
+      let livePreview: TelegramLivePreview | null = null;
+      try {
+        if (phId != null) {
+          livePreview = new TelegramLivePreview({
+            agent: session.agent,
+            chatId: ctx.chatId,
+            placeholderMessageId: phId,
+            channel: this.channel,
+            streamEditIntervalMs: session.agent === 'codex' ? 400 : 800,
+            startTimeMs: start,
+            canEditMessages: supportsChannelCapability((this as any).channel, 'editMessages'),
+            canSendTyping: supportsChannelCapability((this as any).channel, 'typingIndicators'),
+            messageThreadId,
+            log: message => this.log(message),
+          });
+          livePreview.start();
+        }
+
+        const result = await this.runStream(prompt, session, files, (nextText, nextThinking, nextActivity = '', meta, plan) => {
+          livePreview?.update(nextText, nextThinking, nextActivity, meta, plan);
+        });
+        await livePreview?.settle();
+        const artifacts = result.artifacts || [];
+
+        this.log(
+          `[handleMessage] done agent=${session.agent} ok=${result.ok} session=${result.sessionId || '?'} local_session=${result.localSessionId || '?'} elapsed=${result.elapsedS.toFixed(1)}s edits=${livePreview?.getEditCount() || 0} ` +
+          `tokens=in:${fmtTokens(result.inputTokens)}/cached:${fmtTokens(result.cachedInputTokens)}/out:${fmtTokens(result.outputTokens)} artifacts=${artifacts.length}`
+        );
+        this.log(`[handleMessage] response preview: "${result.message.slice(0, 150)}"`);
+
+        if (artifacts.length && result.incomplete && result.message.trim()) {
+          result.incomplete = false;
+          this.log(`[handleMessage] suppressed incomplete flag: artifacts present`);
+        }
+
+        const finalReply = await this.sendFinalReply(ctx, phId, session.agent, result, { messageThreadId });
+        this.registerSessionMessages(ctx.chatId, finalReply.messageIds, session);
+        const artifactReplyTo = finalReply.primaryMessageId ?? phId ?? ctx.messageId;
+        const artifactResult = await this.sendArtifacts(ctx, artifactReplyTo, artifacts, messageThreadId);
+        this.registerSessionMessages(ctx.chatId, artifactResult.messageIds, session);
+        this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
+      } catch (e: any) {
+        const msgText = String(e?.message || e || 'Unknown error');
+        this.log(`[handleMessage] task failed chat=${ctx.chatId} local_session=${session.localSessionId} error=${msgText}`);
+        const errorHtml = `<b>Error</b>\n\n<code>${escapeHtml(msgText.slice(0, 500))}</code>`;
+        if (phId != null) {
+          try {
+            await this.channel.editMessage(ctx.chatId, phId, errorHtml, { parseMode: 'HTML' });
+            this.registerSessionMessage(ctx.chatId, phId, session);
+          } catch {
+            const sent = await this.channel.send(ctx.chatId, errorHtml, { parseMode: 'HTML', replyTo: ctx.messageId, messageThreadId }).catch(() => null);
+            this.registerSessionMessage(ctx.chatId, typeof sent === 'number' ? sent : null, session);
+          }
+        } else {
+          const sent = await this.channel.send(ctx.chatId, errorHtml, { parseMode: 'HTML', replyTo: ctx.messageId, messageThreadId }).catch(() => null);
+          this.registerSessionMessage(ctx.chatId, typeof sent === 'number' ? sent : null, session);
+        }
+        await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['⚠️']);
+      } finally {
+        livePreview?.dispose();
+        this.finishTask(taskId);
+        this.syncSelectedChats(session);
+      }
+    }).catch(e => {
+      this.log(`[handleMessage] queue execution failed: ${e}`);
+      this.finishTask(taskId);
+    });
   }
 
-  private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[], messageThreadId?: number) {
+  private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[], messageThreadId?: number): Promise<{ failed: BotArtifact[]; messageIds: number[] }> {
     const failed: BotArtifact[] = [];
+    const messageIds: number[] = [];
     for (const artifact of artifacts) {
       const caption = artifact.caption;
       try {
-        await this.channel.sendFile(ctx.chatId, artifact.filePath, {
+        const sent = await this.channel.sendFile(ctx.chatId, artifact.filePath, {
           caption,
           replyTo,
           messageThreadId,
           asPhoto: artifact.kind === 'photo',
         });
+        if (typeof sent === 'number') messageIds.push(sent);
       } catch (e) {
         failed.push(artifact);
         this.log(`artifact upload failed for ${artifact.filename}: ${e}`);
-        await this.channel.send(
+        const sent = await this.channel.send(
           ctx.chatId,
           `Artifact upload failed: <code>${escapeHtml(artifact.filename)}</code>`,
           { parseMode: 'HTML', replyTo, messageThreadId },
         ).catch(() => {});
+        if (typeof sent === 'number') messageIds.push(sent);
       }
     }
-    return { failed };
+    return { failed, messageIds };
   }
 
   private async safeSetMessageReaction(chatId: number, messageId: number, reactions: string[]) {
+    if (!supportsChannelCapability((this as any).channel, 'messageReactions')) return;
     const setReaction = (this.channel as any)?.setMessageReaction;
     if (typeof setReaction !== 'function') return;
     try {
@@ -1282,9 +672,13 @@ export class TelegramBot extends Bot {
     agent: Agent,
     result: StreamResult,
     opts: { messageThreadId?: number } = {},
-  ): Promise<number | null> {
-    const footerStatus: FooterStatus = result.incomplete || !result.ok ? 'failed' : 'done';
-    const footer = formatFinalFooterHtml(footerStatus, agent, result.elapsedS * 1000, result.contextPercent ?? null);
+  ): Promise<{ primaryMessageId: number | null; messageIds: number[] }> {
+    const rendered = buildFinalReplyRender(agent, result);
+    const messageIds: number[] = [];
+    const remember = (messageId: number | null) => {
+      if (typeof messageId === 'number' && !messageIds.includes(messageId)) messageIds.push(messageId);
+      return messageId;
+    };
     const sendFinalText = (text: string, replyTo?: number | null) => this.channel.send(ctx.chatId, text, {
       parseMode: 'HTML',
       replyTo: replyTo ?? ctx.messageId,
@@ -1294,242 +688,215 @@ export class TelegramBot extends Bot {
       if (phId != null) {
         try {
           await this.channel.editMessage(ctx.chatId, phId, text, { parseMode: 'HTML' });
-          return phId;
+          return remember(phId);
         } catch {}
       }
-      return await sendFinalText(text);
+      return remember(await sendFinalText(text));
     };
-
-    let activityHtml = '';
-    let activityNoteHtml = '';
-    if (result.activity) {
-      const summary = parseActivitySummary(result.activity);
-      const narrative = summary.narrative.join('\n');
-      if (narrative) {
-        let display = narrative;
-        if (display.length > 800) display = '...\n' + display.slice(-800);
-        activityHtml = `<blockquote><b>Activity</b>\n${escapeHtml(display)}</blockquote>\n\n`;
-      }
-      const commandSummary = formatActivityCommandSummary(
-        summary.completedCommands,
-        summary.activeCommands,
-        summary.failedCommands,
-      );
-      if (commandSummary) activityNoteHtml = `<i>${escapeHtml(commandSummary)}</i>\n\n`;
-    }
-
-    let thinkingHtml = '';
-    if (result.thinking) {
-      const label = thinkLabel(agent);
-      const display = formatThinkingForDisplay(result.thinking, 800);
-      thinkingHtml = `<blockquote><b>${label}</b>\n${escapeHtml(display)}</blockquote>\n\n`;
-    }
-
-    let statusHtml = '';
-    if (result.incomplete) {
-      const statusLines: string[] = [];
-      if (result.stopReason === 'max_tokens') statusLines.push('Output limit reached. Response may be truncated.');
-      if (result.stopReason === 'timeout') {
-        statusLines.push(`Timed out after ${fmtUptime(Math.max(0, Math.round(result.elapsedS * 1000)))} before the agent reported completion.`);
-      }
-      if (!result.ok) {
-        const detail = result.error?.trim();
-        if (detail && detail !== result.message.trim() && !statusLines.includes(detail)) statusLines.push(detail);
-        else if (result.stopReason !== 'timeout') statusLines.push('Agent exited before reporting completion.');
-      }
-      statusHtml = `<blockquote expandable><b>Incomplete Response</b>\n${statusLines.map(escapeHtml).join('\n')}</blockquote>\n\n`;
-    }
-
-    const bodyHtml = mdToTgHtml(result.message);
-    const fullHtml = `${activityHtml}${activityNoteHtml}${statusHtml}${thinkingHtml}${bodyHtml}\n\n${footer}`;
     let finalMsgId: number | null = phId;
 
-    if (fullHtml.length <= 3900) {
-      finalMsgId = await replacePreview(fullHtml);
+    if (rendered.fullHtml.length <= 3900) {
+      finalMsgId = await replacePreview(rendered.fullHtml);
     } else {
-      // Send full content as split plain-text messages instead of a file.
-      // First message: edit placeholder with meta + thinking + beginning of body.
-      const headerHtml = `${activityHtml}${activityNoteHtml}${statusHtml}${thinkingHtml}`;
-      const footerHtml = `\n\n${footer}`;
-      const maxFirst = 3900 - headerHtml.length - footerHtml.length;
+      const maxFirst = 3900 - rendered.headerHtml.length - rendered.footerHtml.length;
       let firstBody: string;
       let remaining: string;
       if (maxFirst > 200) {
-        // find a newline-friendly cut in the HTML body
-        let cut = bodyHtml.lastIndexOf('\n', maxFirst);
+        let cut = rendered.bodyHtml.lastIndexOf('\n', maxFirst);
         if (cut < maxFirst * 0.3) cut = maxFirst;
-        firstBody = bodyHtml.slice(0, cut);
-        remaining = bodyHtml.slice(cut);
+        firstBody = rendered.bodyHtml.slice(0, cut);
+        remaining = rendered.bodyHtml.slice(cut);
       } else {
         firstBody = '';
-        remaining = bodyHtml;
+        remaining = rendered.bodyHtml;
       }
-      const firstHtml = `${headerHtml}${firstBody}${footerHtml}`;
+      const firstHtml = `${rendered.headerHtml}${firstBody}${rendered.footerHtml}`;
       finalMsgId = await replacePreview(firstHtml);
 
-      // Send remaining body as continuation messages (split at ~3800 chars)
       if (remaining.trim()) {
         const chunks = splitText(remaining, 3800);
         for (const chunk of chunks) {
-          await sendFinalText(chunk, finalMsgId ?? phId ?? ctx.messageId);
+          remember(await sendFinalText(chunk, finalMsgId ?? phId ?? ctx.messageId));
         }
       }
     }
-    return finalMsgId;
+    return { primaryMessageId: finalMsgId, messageIds };
   }
 
   // ---- callbacks ------------------------------------------------------------
 
+  private async handleSwitchNavigateCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
+    if (!data.startsWith('sw:n:')) return false;
+    const [pathId, pageRaw] = data.slice(5).split(':');
+    const browsePath = resolveRegisteredPath(parseInt(pathId, 10));
+    if (!browsePath) {
+      await ctx.answerCallback('Expired, use /switch again');
+      return true;
+    }
+    const view = buildSwitchWorkdirView(this.workdir, browsePath, parseInt(pageRaw, 10) || 0);
+    await ctx.editReply(ctx.messageId, view.text, { parseMode: 'HTML', keyboard: view.keyboard });
+    await ctx.answerCallback();
+    return true;
+  }
+
+  private async handleSwitchSelectCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
+    if (!data.startsWith('sw:s:')) return false;
+    const dirPath = resolveRegisteredPath(parseInt(data.slice(5), 10));
+    if (!dirPath) {
+      await ctx.answerCallback('Expired, use /switch again');
+      return true;
+    }
+    if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
+      await ctx.answerCallback('Not a valid directory');
+      return true;
+    }
+
+    const oldPath = this.switchWorkdir(dirPath);
+    await ctx.answerCallback('Switched!');
+    await ctx.editReply(
+      ctx.messageId,
+      `<b>Workdir switched</b>\n\n<code>${escapeHtml(oldPath)}</code>\n↓\n<code>${escapeHtml(dirPath)}</code>`,
+      { parseMode: 'HTML' },
+    );
+    return true;
+  }
+
+  private async handleSessionsPageCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
+    if (!data.startsWith('sp:')) return false;
+    const page = parseInt(data.slice(3), 10) || 0;
+    const view = await this.buildSessionsPage(ctx.chatId, page);
+    await ctx.editReply(ctx.messageId, view.text, { parseMode: 'HTML', keyboard: view.keyboard });
+    await ctx.answerCallback('');
+    return true;
+  }
+
+  private async previewCurrentSessionTurn(chatId: number, agent: Agent, localSessionId: string | null, sessionId: string | null) {
+    try {
+      const tailId = localSessionId || sessionId;
+      const tail = tailId ? await this.fetchSessionTail(agent, tailId, 50) : { ok: true, messages: [], error: null };
+      if (!tail.ok || !tail.messages.length) return;
+
+      const messages = tail.messages;
+      let lastUserIndex = -1;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+          lastUserIndex = i;
+          break;
+        }
+      }
+
+      const lastUserText = lastUserIndex >= 0 ? messages[lastUserIndex].text : '';
+      const assistantTexts: string[] = [];
+      for (let i = lastUserIndex >= 0 ? lastUserIndex + 1 : 0; i < messages.length; i++) {
+        if (messages[i].role === 'assistant' && messages[i].text) assistantTexts.push(messages[i].text);
+      }
+
+      const previewHtml = renderSessionTurnHtml(lastUserText, assistantTexts.join('\n\n'));
+      if (!previewHtml) return;
+      const sent = await this.channel.send(chatId, previewHtml, { parseMode: 'HTML' });
+      if (localSessionId) {
+        const runtime = this.getSessionRuntimeByKey(this.sessionKey(agent, localSessionId));
+        if (runtime && typeof sent === 'number') this.registerSessionMessage(chatId, sent, runtime);
+      }
+    } catch {
+      // non-critical
+    }
+  }
+
+  private async handleSessionCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
+    if (!data.startsWith('sess:')) return false;
+
+    const requestedSessionId = data.slice(5);
+    const cs = this.chat(ctx.chatId);
+    if (requestedSessionId === 'new') {
+      this.resetChatConversation(cs);
+      await ctx.answerCallback('New session');
+      await ctx.editReply(ctx.messageId, 'Session reset. Send a message to start.', {});
+      return true;
+    }
+
+    const res = await this.fetchSessions(cs.agent);
+    if (!res.ok) {
+      await ctx.answerCallback('Failed to load sessions');
+      return true;
+    }
+
+    const session = res.sessions.find(entry =>
+      entry.localSessionId === requestedSessionId
+      || entry.sessionId === requestedSessionId
+      || entry.engineSessionId === requestedSessionId,
+    );
+    if (!session) {
+      await ctx.answerCallback('Session not found');
+      return true;
+    }
+
+    this.adoptSession(cs, session);
+    const runtime = session.localSessionId ? this.getSessionRuntimeByKey(this.sessionKey(session.agent, session.localSessionId)) : null;
+    const displayId = session.localSessionId || session.sessionId || requestedSessionId;
+    await ctx.answerCallback(`Session: ${displayId.slice(0, 12)}`);
+    await ctx.editReply(
+      ctx.messageId,
+      `Switched to session: <code>${escapeHtml(displayId.slice(0, 16))}</code>`,
+      { parseMode: 'HTML' },
+    );
+    if (runtime) this.registerSessionMessage(ctx.chatId, ctx.messageId, runtime);
+    await this.previewCurrentSessionTurn(ctx.chatId, session.agent, session.localSessionId, session.sessionId);
+    return true;
+  }
+
+  private async handleAgentCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
+    if (!data.startsWith('ag:')) return false;
+
+    const agent = data.slice(3) as Agent;
+    const cs = this.chat(ctx.chatId);
+    if (cs.agent === agent) {
+      await ctx.answerCallback(`Already using ${agent}`);
+      return true;
+    }
+
+    cs.agent = agent;
+    this.resetChatConversation(cs);
+    this.log(`agent switched to ${agent} chat=${ctx.chatId}`);
+    await ctx.answerCallback(`Switched to ${agent}`);
+    await ctx.editReply(
+      ctx.messageId,
+      `<b>Switched to ${escapeHtml(agent)}</b>\n\nSession has been reset. Previous conversation history will not carry over.\nSend a message to start a new conversation.`,
+      { parseMode: 'HTML' },
+    );
+    return true;
+  }
+
+  private async handleModelCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
+    if (!data.startsWith('mod:')) return false;
+
+    const modelId = data.slice(4);
+    const cs = this.chat(ctx.chatId);
+    const currentModel = this.modelForAgent(cs.agent);
+    if (modelMatchesSelection(cs.agent, modelId, currentModel)) {
+      await ctx.answerCallback(`Already using ${modelId}`);
+      return true;
+    }
+
+    this.setModelForAgent(cs.agent, modelId);
+    this.resetChatConversation(cs);
+    this.log(`model switched to ${modelId} for ${cs.agent} chat=${ctx.chatId}`);
+    await ctx.answerCallback(`Switched to ${modelId}`);
+    await ctx.editReply(
+      ctx.messageId,
+      `<b>Model switched to <code>${escapeHtml(modelId)}</code></b>\n\nAgent: ${escapeHtml(cs.agent)}\nSession has been reset. Send a message to start a new conversation.`,
+      { parseMode: 'HTML' },
+    );
+    return true;
+  }
+
   async handleCallback(data: string, ctx: TgCallbackContext) {
-    if (data.startsWith('sw:n:')) {
-      const parts = data.slice(5).split(':');
-      const browsePath = pathReg.resolve(parseInt(parts[0], 10));
-      if (!browsePath) { await ctx.answerCallback('Expired, use /switch again'); return; }
-      const page = parseInt(parts[1], 10) || 0;
-      const kb = buildDirKeyboard(browsePath, page);
-      await ctx.editReply(ctx.messageId,
-        `<b>Switch workdir</b>\nCurrent: <code>${escapeHtml(this.workdir)}</code>\n\nBrowsing: <code>${escapeHtml(browsePath)}</code>`,
-        { parseMode: 'HTML', keyboard: kb },
-      );
-      await ctx.answerCallback();
-      return;
-    }
-
-    if (data.startsWith('sw:s:')) {
-      const dirPath = pathReg.resolve(parseInt(data.slice(5), 10));
-      if (!dirPath) { await ctx.answerCallback('Expired, use /switch again'); return; }
-      if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
-        await ctx.answerCallback('Not a valid directory');
-        return;
-      }
-      const oldPath = this.switchWorkdir(dirPath);
-      await ctx.answerCallback(`Switched!`);
-      await ctx.editReply(ctx.messageId,
-        `<b>Workdir switched</b>\n\n<code>${escapeHtml(oldPath)}</code>\n\u2193\n<code>${escapeHtml(dirPath)}</code>`,
-        { parseMode: 'HTML' },
-      );
-      return;
-    }
-
-    if (data.startsWith('sp:')) {
-      const page = parseInt(data.slice(3), 10) || 0;
-      const { text, keyboard } = await this.buildSessionsPage(ctx.chatId, page);
-      await ctx.editReply(ctx.messageId, text, { parseMode: 'HTML', keyboard });
-      await ctx.answerCallback('');
-      return;
-    }
-
-    if (data.startsWith('sess:')) {
-      const localSessionId = data.slice(5);
-      const cs = this.chat(ctx.chatId);
-      if (localSessionId === 'new') {
-        cs.sessionId = null;
-        cs.localSessionId = null;
-        cs.workspacePath = null;
-        cs.codexCumulative = undefined;
-        await ctx.answerCallback('New session');
-        await ctx.editReply(ctx.messageId, 'Session reset. Send a message to start.', {});
-      } else {
-        const res = await this.fetchSessions(cs.agent);
-        if (!res.ok) {
-          await ctx.answerCallback('Failed to load sessions');
-          return;
-        }
-        const session = res.sessions.find(entry =>
-          entry.localSessionId === localSessionId
-          || entry.sessionId === localSessionId
-          || entry.engineSessionId === localSessionId,
-        );
-        if (!session) {
-          await ctx.answerCallback('Session not found');
-          return;
-        }
-
-        cs.sessionId = session.engineSessionId;
-        cs.localSessionId = session.localSessionId;
-        cs.workspacePath = session.workspacePath;
-        cs.codexCumulative = undefined;
-        const displayId = session.localSessionId || session.sessionId || localSessionId;
-        await ctx.answerCallback(`Session: ${displayId.slice(0, 12)}`);
-
-        await ctx.editReply(ctx.messageId,
-          `Switched to session: <code>${escapeHtml(displayId.slice(0, 16))}</code>`,
-          { parseMode: 'HTML' },
-        );
-
-        // Send the last full turn as a separate message (auto-splits if too long)
-        try {
-          const tailId = session.localSessionId || session.sessionId;
-          const tail = tailId ? await this.fetchSessionTail(cs.agent, tailId, 50) : { ok: true, messages: [], error: null };
-          if (tail.ok && tail.messages.length) {
-            // Find the last user message index, then collect ALL assistant messages after it
-            const msgs = tail.messages;
-            let lastUserIdx = -1;
-            for (let i = msgs.length - 1; i >= 0; i--) {
-              if (msgs[i].role === 'user') { lastUserIdx = i; break; }
-            }
-            const lastUserText = lastUserIdx >= 0 ? msgs[lastUserIdx].text : '';
-            // Gather all assistant messages after the last user message
-            const startIdx = lastUserIdx >= 0 ? lastUserIdx + 1 : 0;
-            const assistantTexts: string[] = [];
-            for (let i = startIdx; i < msgs.length; i++) {
-              if (msgs[i].role === 'assistant' && msgs[i].text) {
-                assistantTexts.push(msgs[i].text);
-              }
-            }
-            const previewHtml = renderSessionTurnHtml(lastUserText, assistantTexts.join('\n\n'));
-            if (previewHtml) {
-              await this.channel.send(ctx.chatId, previewHtml, { parseMode: 'HTML' });
-            }
-          }
-        } catch { /* non-critical */ }
-      }
-      return;
-    }
-
-    if (data.startsWith('ag:')) {
-      const agent = data.slice(3) as Agent;
-      const cs = this.chat(ctx.chatId);
-      if (cs.agent === agent) {
-        await ctx.answerCallback(`Already using ${agent}`);
-        return;
-      }
-      cs.agent = agent;
-      cs.sessionId = null;
-      cs.localSessionId = null;
-      cs.workspacePath = null;
-      cs.codexCumulative = undefined;
-      this.log(`agent switched to ${agent} chat=${ctx.chatId}`);
-      await ctx.answerCallback(`Switched to ${agent}`);
-      await ctx.editReply(ctx.messageId,
-        `<b>Switched to ${escapeHtml(agent)}</b>\n\nSession has been reset. Previous conversation history will not carry over.\nSend a message to start a new conversation.`,
-        { parseMode: 'HTML' },
-      );
-      return;
-    }
-
-    if (data.startsWith('mod:')) {
-      const modelId = data.slice(4);
-      const cs = this.chat(ctx.chatId);
-      const currentModel = this.modelForAgent(cs.agent);
-      if (modelMatchesSelection(cs.agent, modelId, currentModel)) {
-        await ctx.answerCallback(`Already using ${modelId}`);
-        return;
-      }
-      this.setModelForAgent(cs.agent, modelId);
-      cs.sessionId = null;
-      cs.localSessionId = null;
-      cs.workspacePath = null;
-      cs.codexCumulative = undefined;
-      this.log(`model switched to ${modelId} for ${cs.agent} chat=${ctx.chatId}`);
-      await ctx.answerCallback(`Switched to ${modelId}`);
-      await ctx.editReply(ctx.messageId,
-        `<b>Model switched to <code>${escapeHtml(modelId)}</code></b>\n\nAgent: ${escapeHtml(cs.agent)}\nSession has been reset. Send a message to start a new conversation.`,
-        { parseMode: 'HTML' },
-      );
-      return;
-    }
-
+    if (await this.handleSwitchNavigateCallback(data, ctx)) return;
+    if (await this.handleSwitchSelectCallback(data, ctx)) return;
+    if (await this.handleSessionsPageCallback(data, ctx)) return;
+    if (await this.handleSessionCallback(data, ctx)) return;
+    if (await this.handleAgentCallback(data, ctx)) return;
+    if (await this.handleModelCallback(data, ctx)) return;
     await ctx.answerCallback();
   }
 
@@ -1577,7 +944,7 @@ export class TelegramBot extends Bot {
     if (cs.agent === 'claude') {
       prompt = `Please execute the /${skillName} skill defined in this project.${extra ? ` Additional context: ${extra.trim()}` : ''}`;
     } else {
-      // codex — no native skill system, describe semantically
+      // codex - no native skill system, describe the requested skill semantically
       prompt = `In this project's .claude/skills/${skillName}/ directory (or .claude/commands/${skillName}.md), there is a custom skill definition. Please read and execute the instructions defined in that skill file.${extra ? ` Additional context: ${extra.trim()}` : ''}`;
     }
 
