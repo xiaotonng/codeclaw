@@ -14,7 +14,11 @@ import {
   fmtTokens, fmtUptime, fmtBytes, whichSync, listSubdirs, buildPrompt,
   thinkLabel, formatThinkingForDisplay, parseAllowedChatIds, shellSplit, type SkillInfo,
 } from './bot.js';
-import { getCodexUsageLive, shutdownCodexServer } from './code-agent.js';
+import {
+  getCodexUsageLive,
+  shutdownCodexServer,
+  stageSessionFiles,
+} from './code-agent.js';
 import { TelegramChannel, type TgContext, type TgCallbackContext, type TgMessage } from './channel-telegram.js';
 import { splitText } from './channel-base.js';
 
@@ -167,23 +171,12 @@ export interface BotArtifact {
   caption?: string;
 }
 
-const ARTIFACT_MANIFEST = 'manifest.json';
-const ARTIFACT_ROOT = path.join(os.tmpdir(), 'codeclaw-artifacts');
-const ARTIFACT_PROMPT_ROOT = '.codeclaw/artifacts';
 const ARTIFACT_MAX_FILES = 8;
 const ARTIFACT_MAX_BYTES = 20 * 1024 * 1024;
 const ARTIFACT_PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 const STREAM_PREVIEW_HEARTBEAT_MS = 5_000;
 const STREAM_TYPING_HEARTBEAT_MS = 4_000;
 const STREAM_STALLED_NOTICE_MS = 15_000;
-
-interface ArtifactTurn {
-  dir: string;
-  manifestPath: string;
-  promptDir: string;
-  promptManifestPath: string;
-  aliasDir: string | null;
-}
 
 function isPhotoFilename(filename: string): boolean {
   return ARTIFACT_PHOTO_EXTS.has(path.extname(filename).toLowerCase());
@@ -330,6 +323,40 @@ function trimActivityForPreview(text: string, maxChars = 900): string {
   return [...head, '...', ...tail].join('\n');
 }
 
+function parseClaudeShellActivity(line: string): {
+  key: string;
+  status: 'active' | 'done' | 'failed';
+} | null {
+  const prefix = 'Run shell: ';
+  if (!line.startsWith(prefix)) return null;
+
+  const detail = line.slice(prefix.length).trim();
+  if (!detail) return { key: prefix.trim(), status: 'active' };
+
+  const doneIdx = detail.indexOf(' -> ');
+  if (doneIdx > 0) {
+    return {
+      key: detail.slice(0, doneIdx).trim(),
+      status: 'done',
+    };
+  }
+
+  const failed = detail.match(/^(.*)\sfailed(?::.*)?$/);
+  if (failed?.[1]?.trim()) {
+    return {
+      key: failed[1].trim(),
+      status: 'failed',
+    };
+  }
+
+  if (detail.endsWith(' done')) {
+    const key = detail.slice(0, -' done'.length).trim();
+    return { key: key || detail, status: 'done' };
+  }
+
+  return { key: detail, status: 'active' };
+}
+
 function parseActivitySummary(activity: string): {
   narrative: string[];
   failedCommands: number;
@@ -340,10 +367,24 @@ function parseActivitySummary(activity: string): {
   let failedCommands = 0;
   let activeCommands = 0;
   let completedCommands = 0;
+  const activeClaudeShells = new Map<string, number>();
 
   for (const rawLine of activity.split('\n')) {
     const line = rawLine.replace(/\s+/g, ' ').trim();
     if (!line) continue;
+    const claudeShell = parseClaudeShellActivity(line);
+    if (claudeShell) {
+      const key = claudeShell.key || 'Run shell';
+      const current = activeClaudeShells.get(key) || 0;
+      if (claudeShell.status === 'active') {
+        activeClaudeShells.set(key, current + 1);
+      } else {
+        if (current > 0) activeClaudeShells.set(key, current - 1);
+        if (claudeShell.status === 'done') completedCommands++;
+        else failedCommands++;
+      }
+      continue;
+    }
     if (line.startsWith('$ ')) {
       activeCommands++;
       continue;
@@ -372,6 +413,10 @@ function parseActivitySummary(activity: string): {
       continue;
     }
     narrative.push(line);
+  }
+
+  for (const pending of activeClaudeShells.values()) {
+    activeCommands += pending;
   }
 
   return { narrative, failedCommands, completedCommands, activeCommands };
@@ -721,12 +766,16 @@ export class TelegramBot extends Bot {
     const rows: { text: string; callback_data: string }[][] = [];
 
     for (const s of slice) {
-      const isCurrent = s.sessionId === cs.sessionId;
+      const sessionKey = s.localSessionId || s.sessionId || '';
+      if (!sessionKey) continue;
+      const isCurrent = s.localSessionId
+        ? s.localSessionId === (cs.localSessionId ?? null)
+        : s.sessionId === (cs.sessionId ?? null);
       const icon = s.running ? '🟢' : isCurrent ? '● ' : '';
-      const prefix = s.title ? s.title.replace(/\n/g, ' ').slice(0, 10) : s.sessionId.slice(0, 10);
+      const prefix = s.title ? s.title.replace(/\n/g, ' ').slice(0, 10) : sessionKey.slice(0, 10);
       const time = s.createdAt ? new Date(s.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?';
 
-      let cbData = `sess:${s.sessionId}`;
+      let cbData = `sess:${sessionKey}`;
       if (cbData.length > 64) cbData = cbData.slice(0, 64);
       rows.push([{ text: `${icon}${prefix}  ${time}`, callback_data: cbData }]);
     }
@@ -913,31 +962,40 @@ export class TelegramBot extends Bot {
     if (!text && !msg.files.length) return;
 
     const cs = this.chat(ctx.chatId);
-    const artifactTurn = this.createArtifactTurn(ctx.chatId);
-    const artifactSystemPrompt = buildArtifactSystemPrompt(artifactTurn.promptDir, artifactTurn.promptManifestPath);
-    const basePrompt = buildPrompt(text, msg.files);
-    // Codex does not reliably surface developerInstructions to the model during
-    // real artifact-return turns, especially on resumed sessions. Inject the
-    // artifact instructions into the turn prompt as well so the target paths
-    // are visible in the actual conversation input.
-    const prompt = cs.agent === 'codex'
-      ? buildArtifactPrompt(basePrompt, artifactTurn.promptDir, artifactTurn.promptManifestPath)
-      : basePrompt;
+    if (!text && msg.files.length) {
+      try {
+        const staged = stageSessionFiles({
+          agent: cs.agent,
+          workdir: this.workdir,
+          files: msg.files,
+          localSessionId: cs.localSessionId ?? null,
+          sessionId: cs.sessionId,
+        });
+        cs.localSessionId = staged.localSessionId;
+        cs.workspacePath = staged.workspacePath;
+        this.log(`[handleMessage] staged workspace files chat=${ctx.chatId} local_session=${staged.localSessionId} files=${staged.importedFiles.length}`);
+        await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['👍']);
+      } catch (e: any) {
+        this.log(`[handleMessage] stage files failed: ${e?.message || e}`);
+        await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['⚠️']);
+      }
+      return;
+    }
+
+    const files = msg.files;
+    const prompt = buildPrompt(text, files);
     const start = Date.now();
     const initialPreview = formatPreviewFooterLine(cs.agent, 0);
-    this.log(`[handleMessage] chat=${ctx.chatId} agent=${cs.agent} session=${cs.sessionId || '(new)'} prompt="${basePrompt.slice(0, 100)}" files=${msg.files.length}`);
+    this.log(`[handleMessage] chat=${ctx.chatId} agent=${cs.agent} session=${cs.sessionId || '(new)'} local_session=${cs.localSessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${files.length}`);
 
     const phId = await ctx.reply(initialPreview);
     if (!phId) { this.log(`[handleMessage] placeholder null for chat=${ctx.chatId}`); return; }
     this.log(`[handleMessage] placeholder sent msg_id=${phId}, starting agent stream...`);
 
-    this.activeTasks.set(ctx.chatId, { prompt: basePrompt, startedAt: start });
+    this.activeTasks.set(ctx.chatId, { prompt, startedAt: start });
 
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let typingTimer: ReturnType<typeof setInterval> | null = null;
-    let collectedArtifacts: BotArtifact[] = [];
-    let artifactDeliveryAttempted = false;
-    let artifactUploadFailed = false;
     try {
       const streamEditIntervalMs = cs.agent === 'codex' ? 400 : 800;
       let lastEdit = 0, editCount = 0;
@@ -1082,14 +1140,13 @@ export class TelegramBot extends Bot {
         schedulePreviewEdit();
       };
 
-      const result = await this.runStream(prompt, cs, msg.files, onText, artifactSystemPrompt);
+      const result = await this.runStream(prompt, cs, files, onText);
       stopWaitFeedback();
       await flushPreviewEdits();
-      const artifacts = this.collectArtifacts(artifactTurn.dir, artifactTurn.manifestPath);
-      collectedArtifacts = artifacts;
+      const artifacts = result.artifacts || [];
 
       this.log(
-        `[handleMessage] done agent=${cs.agent} ok=${result.ok} session=${result.sessionId || '?'} elapsed=${result.elapsedS.toFixed(1)}s edits=${editCount} ` +
+        `[handleMessage] done agent=${cs.agent} ok=${result.ok} session=${result.sessionId || '?'} local_session=${result.localSessionId || '?'} elapsed=${result.elapsedS.toFixed(1)}s edits=${editCount} ` +
         `tokens=in:${fmtTokens(result.inputTokens)}/cached:${fmtTokens(result.cachedInputTokens)}/out:${fmtTokens(result.outputTokens)} artifacts=${artifacts.length}`
       );
       this.log(`[handleMessage] response preview: "${result.message.slice(0, 150)}"`);
@@ -1101,52 +1158,13 @@ export class TelegramBot extends Bot {
       }
 
       const finalMsgId = await this.sendFinalReply(ctx, phId, cs.agent, result);
-      artifactDeliveryAttempted = true;
-      const upload = await this.sendArtifacts(ctx, finalMsgId ?? phId, artifacts);
-      artifactUploadFailed = upload.failed.length > 0;
+      await this.sendArtifacts(ctx, finalMsgId ?? phId, artifacts);
       this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
     } finally {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (typingTimer) clearInterval(typingTimer);
       this.activeTasks.delete(ctx.chatId);
-      const preserveArtifacts = collectedArtifacts.length > 0 && (!artifactDeliveryAttempted || artifactUploadFailed);
-      if (preserveArtifacts) {
-        this.log(`artifact turn preserved for retry/debugging: ${artifactTurn.dir}`);
-      } else {
-        this.cleanupArtifactTurn(artifactTurn);
-      }
     }
-  }
-
-  private createArtifactTurn(chatId: number) {
-    const turnId = `${chatId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const dir = path.join(ARTIFACT_ROOT, String(chatId), turnId);
-    fs.mkdirSync(dir, { recursive: true });
-    const manifestPath = path.join(dir, ARTIFACT_MANIFEST);
-
-    const promptDir = path.posix.join(ARTIFACT_PROMPT_ROOT, `telegram-${chatId}`, 'current');
-    const promptManifestPath = path.posix.join(promptDir, ARTIFACT_MANIFEST);
-    const aliasDir = path.join(this.workdir, ...promptDir.split('/'));
-    const aliasParent = path.dirname(aliasDir);
-
-    try {
-      fs.mkdirSync(aliasParent, { recursive: true });
-      fs.rmSync(aliasDir, { recursive: true, force: true });
-      fs.symlinkSync(dir, aliasDir, 'dir');
-      return { dir, manifestPath, promptDir, promptManifestPath, aliasDir };
-    } catch (e) {
-      this.log(`artifact alias fallback to absolute path: ${e}`);
-      return { dir, manifestPath, promptDir: dir, promptManifestPath: manifestPath, aliasDir: null };
-    }
-  }
-
-  private cleanupArtifactTurn(turn: ArtifactTurn) {
-    if (turn.aliasDir) fs.rmSync(turn.aliasDir, { recursive: true, force: true });
-    fs.rmSync(turn.dir, { recursive: true, force: true });
-  }
-
-  private collectArtifacts(dirPath: string, manifestPath: string): BotArtifact[] {
-    return collectArtifacts(dirPath, manifestPath, msg => this.log(msg));
   }
 
   private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[]) {
@@ -1170,6 +1188,14 @@ export class TelegramBot extends Bot {
       }
     }
     return { failed };
+  }
+
+  private async safeSetMessageReaction(chatId: number, messageId: number, reactions: string[]) {
+    const setReaction = (this.channel as any)?.setMessageReaction;
+    if (typeof setReaction !== 'function') return;
+    try {
+      await setReaction.call(this.channel, chatId, messageId, reactions);
+    } catch {}
   }
 
   private async sendFinalReply(ctx: TgContext, phId: number, agent: Agent, result: StreamResult): Promise<number | null> {
@@ -1304,24 +1330,47 @@ export class TelegramBot extends Bot {
     }
 
     if (data.startsWith('sess:')) {
-      const sessionId = data.slice(5);
+      const localSessionId = data.slice(5);
       const cs = this.chat(ctx.chatId);
-      if (sessionId === 'new') {
+      if (localSessionId === 'new') {
         cs.sessionId = null;
+        cs.localSessionId = null;
+        cs.workspacePath = null;
+        cs.codexCumulative = undefined;
         await ctx.answerCallback('New session');
         await ctx.editReply(ctx.messageId, 'Session reset. Send a message to start.', {});
       } else {
-        cs.sessionId = sessionId;
-        await ctx.answerCallback(`Session: ${sessionId.slice(0, 12)}`);
+        const res = await this.fetchSessions(cs.agent);
+        if (!res.ok) {
+          await ctx.answerCallback('Failed to load sessions');
+          return;
+        }
+        const session = res.sessions.find(entry =>
+          entry.localSessionId === localSessionId
+          || entry.sessionId === localSessionId
+          || entry.engineSessionId === localSessionId,
+        );
+        if (!session) {
+          await ctx.answerCallback('Session not found');
+          return;
+        }
+
+        cs.sessionId = session.engineSessionId;
+        cs.localSessionId = session.localSessionId;
+        cs.workspacePath = session.workspacePath;
+        cs.codexCumulative = undefined;
+        const displayId = session.localSessionId || session.sessionId || localSessionId;
+        await ctx.answerCallback(`Session: ${displayId.slice(0, 12)}`);
 
         await ctx.editReply(ctx.messageId,
-          `Switched to session: <code>${escapeHtml(sessionId.slice(0, 16))}</code>`,
+          `Switched to session: <code>${escapeHtml(displayId.slice(0, 16))}</code>`,
           { parseMode: 'HTML' },
         );
 
         // Send the last full turn as a separate message (auto-splits if too long)
         try {
-          const tail = await this.fetchSessionTail(cs.agent, sessionId, 50);
+          const tailId = session.localSessionId || session.sessionId;
+          const tail = tailId ? await this.fetchSessionTail(cs.agent, tailId, 50) : { ok: true, messages: [], error: null };
           if (tail.ok && tail.messages.length) {
             // Find the last user message index, then collect ALL assistant messages after it
             const msgs = tail.messages;
@@ -1357,6 +1406,9 @@ export class TelegramBot extends Bot {
       }
       cs.agent = agent;
       cs.sessionId = null;
+      cs.localSessionId = null;
+      cs.workspacePath = null;
+      cs.codexCumulative = undefined;
       this.log(`agent switched to ${agent} chat=${ctx.chatId}`);
       await ctx.answerCallback(`Switched to ${agent}`);
       await ctx.editReply(ctx.messageId,
@@ -1376,6 +1428,9 @@ export class TelegramBot extends Bot {
       }
       this.setModelForAgent(cs.agent, modelId);
       cs.sessionId = null;
+      cs.localSessionId = null;
+      cs.workspacePath = null;
+      cs.codexCumulative = undefined;
       this.log(`model switched to ${modelId} for ${cs.agent} chat=${ctx.chatId}`);
       await ctx.answerCallback(`Switched to ${modelId}`);
       await ctx.editReply(ctx.messageId,

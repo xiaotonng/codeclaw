@@ -14,17 +14,12 @@ import path from 'node:path';
 import { TelegramBot, buildArtifactPrompt } from '../src/bot-telegram.ts';
 import type { TgContext } from '../src/channel-telegram.ts';
 
-function resolveArtifactPromptPath(promptPath: string): string {
-  return path.isAbsolute(promptPath)
-    ? promptPath
-    : path.resolve(process.env.CODECLAW_WORKDIR!, promptPath);
-}
-
 function createBot() {
   const edits: Array<{ text: string; opts?: any }> = [];
   const sends: Array<{ text: string; opts?: any }> = [];
   const docs: Array<{ content: string | Buffer; filename: string; opts?: any }> = [];
   const files: Array<{ filePath: string; opts?: any }> = [];
+  const reactions: Array<{ chatId: number; messageId: number; reactions: string[] }> = [];
   const channel = {
     editMessage: vi.fn(async (_chatId: number, _msgId: number, text: string, opts?: any) => {
       edits.push({ text, opts });
@@ -40,6 +35,9 @@ function createBot() {
     sendFile: vi.fn(async (_chatId: number, filePath: string, opts?: any) => {
       files.push({ filePath, opts });
       return 779;
+    }),
+    setMessageReaction: vi.fn(async (chatId: number, messageId: number, reactionList: string[]) => {
+      reactions.push({ chatId, messageId, reactions: reactionList });
     }),
     setMenu: vi.fn(async () => {}),
     deleteMessage: vi.fn(async () => {}),
@@ -62,7 +60,7 @@ function createBot() {
     raw: {},
   };
 
-  return { bot, channel, ctx, edits, sends, docs, files };
+  return { bot, channel, ctx, edits, sends, docs, files, reactions };
 }
 
 beforeEach(() => {
@@ -276,10 +274,41 @@ describe('TelegramBot.sendFinalReply', () => {
     expect(edits[0].text).not.toContain('npm test');
   });
 
-  it('shows only the last thinking block in the final reply', async () => {
+  it('renders Claude shell activity as a low-key command note in the final reply', async () => {
     const { bot, ctx, edits } = createBot();
 
     await (bot as any).sendFinalReply(ctx, 104, 'claude', {
+      ok: true,
+      message: '当前账号是 xiaotonng。',
+      thinking: null,
+      sessionId: 'sess-claude-shell',
+      model: 'claude-opus-4-6',
+      thinkingEffort: 'high',
+      elapsedS: 3.1,
+      inputTokens: 5,
+      outputTokens: 11,
+      cachedInputTokens: null,
+      error: null,
+      stopReason: null,
+      incomplete: false,
+      activity: [
+        'Run shell: Check current GitHub CLI authentication status',
+        'Run shell: Check current GitHub CLI authentication status -> github.com',
+      ].join('\n'),
+    });
+
+    expect(edits).toHaveLength(1);
+    expect(edits[0].text).toContain('<i>commands: 1 done</i>');
+    expect(edits[0].text).not.toContain('<b>Activity</b>');
+    expect(edits[0].text).not.toContain('Run shell:');
+    expect(edits[0].text).not.toContain('Check current GitHub CLI authentication status');
+    expect(edits[0].text).not.toContain('github.com');
+  });
+
+  it('shows only the last thinking block in the final reply', async () => {
+    const { bot, ctx, edits } = createBot();
+
+    await (bot as any).sendFinalReply(ctx, 105, 'claude', {
       ok: true,
       message: '结论已经整理好了。',
       thinking: '先检查上下文\n再确认调用链\n\n最后定位到 Telegram 展示层把完整 thinking 透传出来了',
@@ -370,7 +399,25 @@ describe('TelegramBot.cmdStatus', () => {
 describe('TelegramBot.handleCallback session preview', () => {
   it('renders resumed history as a quoted user prompt plus normal assistant markdown', async () => {
     const { bot, ctx, sends } = createBot();
-    const sessionId = 'sess-history-preview';
+    const localSessionId = 'sess-history-preview';
+    const engineSessionId = 'engine-history-preview';
+
+    vi.spyOn(bot, 'fetchSessions').mockResolvedValue({
+      ok: true,
+      sessions: [{
+        sessionId: engineSessionId,
+        localSessionId,
+        engineSessionId,
+        agent: 'claude',
+        workdir: process.env.CODECLAW_WORKDIR!,
+        workspacePath: path.join(process.env.CODECLAW_WORKDIR!, '.codeclaw', 'sessions', 'claude', localSessionId, 'workspace'),
+        model: 'claude-opus-4-6',
+        createdAt: new Date().toISOString(),
+        title: 'history preview',
+        running: false,
+      }],
+      error: null,
+    });
 
     vi.spyOn(bot, 'fetchSessionTail').mockResolvedValue({
       ok: true,
@@ -381,13 +428,15 @@ describe('TelegramBot.handleCallback session preview', () => {
       error: null,
     });
 
-    await bot.handleCallback(`sess:${sessionId}`, ctx as any);
+    await bot.handleCallback(`sess:${localSessionId}`, ctx as any);
 
     expect(ctx.editReply).toHaveBeenCalledWith(
       ctx.messageId,
-      `Switched to session: <code>${sessionId.slice(0, 16)}</code>`,
+      `Switched to session: <code>${localSessionId.slice(0, 16)}</code>`,
       { parseMode: 'HTML' },
     );
+    expect(bot.chat(ctx.chatId).sessionId).toBe(engineSessionId);
+    expect(bot.chat(ctx.chatId).localSessionId).toBe(localSessionId);
     expect(ctx.reply).not.toHaveBeenCalled();
     expect(sends).toHaveLength(1);
     expect(sends[0].opts).toEqual({ parseMode: 'HTML' });
@@ -485,9 +534,9 @@ describe('TelegramBot.handleMessage streaming', () => {
 
     const runStream = vi.spyOn(bot, 'runStream').mockImplementation(async (prompt: string, _cs: any, _files: string[], _onText: any, systemPrompt?: string) => {
       expect(prompt).toContain('Inspect this repo');
-      expect(prompt).toContain('[Telegram Artifact Return]');
-      expect(systemPrompt).toContain('[Telegram Artifact Return]');
-      expect(systemPrompt).toContain('.codeclaw/artifacts/telegram-100/current');
+      expect(prompt).not.toContain('[Telegram Artifact Return]');
+      expect(prompt).not.toContain('[Session Workspace]');
+      expect(systemPrompt).toBeUndefined();
       return {
         ok: true,
         message: 'done',
@@ -508,6 +557,55 @@ describe('TelegramBot.handleMessage streaming', () => {
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
 
     expect(runStream).toHaveBeenCalledOnce();
+  });
+
+  it('stages bare uploads and includes them on the next text turn', async () => {
+    const { bot, ctx, reactions } = createBot();
+    const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-upload-'));
+    const uploadPath = path.join(uploadDir, 'report.pdf');
+    fs.writeFileSync(uploadPath, 'pdf');
+    let stagedLocalSessionId: string | null = null;
+    let stagedWorkspacePath: string | null = null;
+
+    const runStream = vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, state: any, files: string[]) => {
+      expect(files).toEqual([]);
+      expect(state.localSessionId).toBe(stagedLocalSessionId);
+      expect(state.workspacePath).toBe(stagedWorkspacePath);
+      expect(stagedWorkspacePath && fs.existsSync(path.join(stagedWorkspacePath, 'report.pdf'))).toBe(true);
+      return {
+        ok: true,
+        message: 'done',
+        thinking: null,
+        sessionId: 'sess-pending-file',
+        model: 'claude-opus-4-6',
+        thinkingEffort: 'high',
+        elapsedS: 1,
+        inputTokens: 3,
+        outputTokens: 2,
+        cachedInputTokens: null,
+        error: null,
+        stopReason: null,
+        incomplete: false,
+      };
+    });
+
+    await (bot as any).handleMessage({ text: '', files: [uploadPath] }, ctx);
+    stagedLocalSessionId = bot.chat(ctx.chatId).localSessionId ?? null;
+    stagedWorkspacePath = bot.chat(ctx.chatId).workspacePath ?? null;
+
+    expect(runStream).not.toHaveBeenCalled();
+    expect(vi.mocked(ctx.reply)).not.toHaveBeenCalled();
+    expect(reactions).toEqual([{ chatId: 100, messageId: 200, reactions: ['👍'] }]);
+    expect(stagedLocalSessionId).toBeTruthy();
+    expect(stagedWorkspacePath).toBeTruthy();
+    expect(fs.existsSync(path.join(stagedWorkspacePath!, 'report.pdf'))).toBe(true);
+
+    await (bot as any).handleMessage({ text: 'Please summarize it', files: [] }, ctx);
+
+    expect(runStream).toHaveBeenCalledOnce();
+    expect(runStream.mock.calls[0]?.[2]).toEqual([]);
+
+    fs.rmSync(uploadDir, { recursive: true, force: true });
   });
 
   it('keeps codex commentary while hiding raw command details in the streaming preview', async () => {
@@ -709,6 +807,41 @@ describe('TelegramBot.handleMessage streaming', () => {
     expect(preview).not.toContain('npm test');
   });
 
+  it('collapses Claude shell activity in the streaming preview', async () => {
+    const { bot, ctx, edits } = createBot();
+
+    vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, _cs: any, _files: string[], onText: any) => {
+      onText('', '', [
+        'Run shell: Check current GitHub CLI authentication status',
+        'Run shell: Check current GitHub CLI authentication status -> github.com',
+      ].join('\n'));
+      return {
+        ok: true,
+        message: '当前账号是 xiaotonng。',
+        thinking: null,
+        sessionId: 'sess-stream-claude-shell',
+        model: 'claude-opus-4-6',
+        thinkingEffort: 'high',
+        elapsedS: 1.2,
+        inputTokens: 9,
+        outputTokens: 3,
+        cachedInputTokens: null,
+        error: null,
+        stopReason: null,
+        incomplete: false,
+      };
+    });
+
+    await (bot as any).handleMessage({ text: '你看下我当前 gh 用的是哪个账号', files: [] }, ctx);
+
+    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    expect(preview).toContain('Activity');
+    expect(preview).toContain('commands: 1 done');
+    expect(preview).not.toContain('Run shell:');
+    expect(preview).not.toContain('Check current GitHub CLI authentication status');
+    expect(preview).not.toContain('github.com');
+  });
+
   it('preserves early codex stage descriptions when activity becomes long', async () => {
     const { bot, ctx, edits } = createBot();
     bot.chat(ctx.chatId).agent = 'codex';
@@ -826,31 +959,22 @@ describe('TelegramBot.handleMessage streaming', () => {
 });
 
 describe('TelegramBot.handleMessage artifacts', () => {
-  it('uploads returned artifacts and cleans up the turn directory', async () => {
+  it('uploads returned artifacts from the stream result', async () => {
     const { bot, ctx, channel, files, edits } = createBot();
-    let artifactDir = '';
+    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-artifacts-'));
+    const shotPath = path.join(artifactDir, 'shot.png');
+    const notesPath = path.join(artifactDir, 'notes.txt');
+    fs.writeFileSync(shotPath, Buffer.from('png-bytes'));
+    fs.writeFileSync(notesPath, 'hello');
 
-    vi.spyOn(bot, 'runStream').mockImplementation(async (prompt: string, _cs: any, _files: string[], _onText: any, systemPrompt?: string) => {
-      const manifestSource = systemPrompt ?? prompt;
-      const manifestMatch = manifestSource.match(/write this JSON manifest: (.+)\nManifest format:/);
-      expect(manifestMatch?.[1]).toBeTruthy();
-      const manifestPath = resolveArtifactPromptPath(manifestMatch![1]);
-      artifactDir = path.dirname(manifestPath);
-
-      fs.writeFileSync(path.join(artifactDir, 'shot.png'), Buffer.from('png-bytes'));
-      fs.writeFileSync(path.join(artifactDir, 'notes.txt'), 'hello');
-      fs.writeFileSync(manifestPath, JSON.stringify({
-        files: [
-          { path: 'shot.png', kind: 'photo', caption: 'Screenshot' },
-          { path: 'notes.txt', kind: 'document', caption: 'Notes' },
-        ],
-      }));
-
+    vi.spyOn(bot, 'runStream').mockImplementation(async () => {
       return {
         ok: true,
         message: 'Artifacts ready.',
         thinking: null,
+        localSessionId: 'sess-artifacts-local',
         sessionId: 'sess-artifacts',
+        workspacePath: artifactDir,
         model: 'claude-opus-4-6',
         thinkingEffort: 'high',
         elapsedS: 1.5,
@@ -860,6 +984,10 @@ describe('TelegramBot.handleMessage artifacts', () => {
         error: null,
         stopReason: null,
         incomplete: false,
+        artifacts: [
+          { filePath: shotPath, filename: 'shot.png', kind: 'photo', caption: 'Screenshot' },
+          { filePath: notesPath, filename: 'notes.txt', kind: 'document', caption: 'Notes' },
+        ],
       };
     });
 
@@ -875,69 +1003,25 @@ describe('TelegramBot.handleMessage artifacts', () => {
     expect(files[1].filePath).toContain('notes.txt');
     expect(files[1].opts).toMatchObject({ caption: 'Notes', replyTo: 1, asPhoto: false });
     expect(channel.sendFile).toHaveBeenCalledTimes(2);
-    expect(fs.existsSync(artifactDir)).toBe(false);
+    expect(fs.existsSync(artifactDir)).toBe(true);
+
+    fs.rmSync(artifactDir, { recursive: true, force: true });
   });
 
-  it('rejects manifest entries that escape the turn directory', async () => {
-    const { bot, ctx, channel, files } = createBot();
-    const leakedPath = path.join(process.env.CODECLAW_WORKDIR!, 'secret.txt');
-    fs.writeFileSync(leakedPath, 'do not leak');
-
-    vi.spyOn(bot, 'runStream').mockImplementation(async (prompt: string, _cs: any, _files: string[], _onText: any, systemPrompt?: string) => {
-      const manifestSource = systemPrompt ?? prompt;
-      const manifestMatch = manifestSource.match(/write this JSON manifest: (.+)\nManifest format:/);
-      const manifestPath = resolveArtifactPromptPath(manifestMatch![1]);
-      fs.writeFileSync(manifestPath, JSON.stringify({
-        files: [
-          { path: '../secret.txt', kind: 'document', caption: 'Leak' },
-        ],
-      }));
-
-      return {
-        ok: true,
-        message: 'Done.',
-        thinking: null,
-        sessionId: 'sess-no-leak',
-        model: 'claude-opus-4-6',
-        thinkingEffort: 'high',
-        elapsedS: 0.8,
-        inputTokens: 5,
-        outputTokens: 6,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
-    });
-
-    await (bot as any).handleMessage({ text: 'Try to leak a file', files: [] }, ctx);
-
-    expect(files).toHaveLength(0);
-    expect(channel.sendFile).not.toHaveBeenCalled();
-  });
-
-  it('preserves the turn directory when artifact upload fails', async () => {
+  it('reports artifact upload failures without deleting the workspace files', async () => {
     const { bot, ctx, channel, sends } = createBot();
-    let artifactDir = '';
+    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-artifacts-fail-'));
+    const shotPath = path.join(artifactDir, 'shot.png');
+    fs.writeFileSync(shotPath, Buffer.from('png-bytes'));
 
-    vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, _cs: any, _files: string[], _onText: any, systemPrompt?: string) => {
-      const manifestSource = systemPrompt ?? '';
-      const manifestMatch = manifestSource.match(/write this JSON manifest: (.+)\nManifest format:/);
-      const manifestPath = resolveArtifactPromptPath(manifestMatch![1]);
-      artifactDir = path.dirname(manifestPath);
-
-      fs.writeFileSync(path.join(artifactDir, 'shot.png'), Buffer.from('png-bytes'));
-      fs.writeFileSync(manifestPath, JSON.stringify({
-        files: [
-          { path: 'shot.png', kind: 'photo', caption: 'Screenshot' },
-        ],
-      }));
-
+    vi.spyOn(bot, 'runStream').mockImplementation(async () => {
       return {
         ok: true,
         message: 'Artifacts ready.',
         thinking: null,
+        localSessionId: 'sess-artifacts-fail-local',
         sessionId: 'sess-artifacts-fail',
+        workspacePath: artifactDir,
         model: 'claude-opus-4-6',
         thinkingEffort: 'high',
         elapsedS: 1.5,
@@ -947,6 +1031,9 @@ describe('TelegramBot.handleMessage artifacts', () => {
         error: null,
         stopReason: null,
         incomplete: false,
+        artifacts: [
+          { filePath: shotPath, filename: 'shot.png', kind: 'photo', caption: 'Screenshot' },
+        ],
       };
     });
 

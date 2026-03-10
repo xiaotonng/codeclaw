@@ -103,6 +103,52 @@ describe('TelegramChannel.listen', () => {
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0]?.[0]?.message).toContain('Telegram polling conflict:');
   });
+
+  it('reports nested fetch cause details for polling failures', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-test-'));
+    const ch = new TelegramChannel({ token: 'test-token', workdir: tmpDir });
+    const cause = Object.assign(new Error('getaddrinfo ENOTFOUND api.telegram.org'), {
+      code: 'ENOTFOUND',
+      errno: -3008,
+      syscall: 'getaddrinfo',
+      hostname: 'api.telegram.org',
+    });
+    const err = new TypeError('fetch failed');
+    (err as any).cause = cause;
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => { throw err; }) as any;
+
+    try {
+      const promise = ch.api('getUpdates', { offset: 0, timeout: 45 });
+      await expect(promise).rejects.toThrow(/Telegram API getUpdates request failed after 55s: TypeError: fetch failed/);
+      await expect(promise).rejects.toThrow(/code=ENOTFOUND/);
+      await expect(promise).rejects.toThrow(/hostname=api\.telegram\.org/);
+      await expect(promise).rejects.toThrow(/cause=Error: getaddrinfo ENOTFOUND api\.telegram\.org/);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('reports HTTP status and body when Telegram returns invalid JSON', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-test-'));
+    const ch = new TelegramChannel({ token: 'test-token', workdir: tmpDir });
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: false,
+      status: 502,
+      statusText: 'Bad Gateway',
+      text: async () => '<html>upstream failed</html>',
+    })) as any;
+
+    try {
+      await expect(ch.api('getUpdates', { offset: 0, timeout: 45 })).rejects.toThrow(
+        /Telegram API getUpdates returned invalid JSON: HTTP 502 Bad Gateway; body=<html>upstream failed<\/html>/,
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -125,12 +171,51 @@ describe('TelegramChannel.send', () => {
     expect(apiCalls[0].payload.parse_mode).toBe('HTML');
     expect(apiCalls[0].payload.reply_to_message_id).toBe(50);
   });
+
+  it('logs outgoing text verbatim before sending', async () => {
+    const { ch } = createTestChannel();
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    try {
+      await ch.send(123, 'line 1\nline 2');
+      const logged = writeSpy.mock.calls.map(args => String(args[0])).join('');
+      expect(logged).toContain('[send] sendMessage chat=123 chunk=1/1');
+      expect(logged).toContain('line 1\nline 2');
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+});
+
+describe('TelegramChannel.setMessageReaction', () => {
+  it('calls the Telegram reaction API with emoji reactions', async () => {
+    const { ch, apiCalls } = createTestChannel();
+
+    await ch.setMessageReaction(123, 456, ['👍', '⚠️']);
+
+    expect(apiCalls).toContainEqual({
+      method: 'setMessageReaction',
+      payload: {
+        chat_id: 123,
+        message_id: 456,
+        reaction: [
+          { type: 'emoji', emoji: '👍' },
+          { type: 'emoji', emoji: '⚠️' },
+        ],
+        is_big: false,
+      },
+    });
+  });
 });
 
 describe('TelegramChannel.sendPhoto', () => {
   it('preserves custom filename and mime type for image uploads', async () => {
     const { ch } = createTestChannel();
     const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => JSON.stringify({ ok: true, result: { message_id: 321 } }),
       json: async () => ({ ok: true, result: { message_id: 321 } }),
     }));
     const origFetch = globalThis.fetch;
@@ -365,6 +450,45 @@ describe('onMessage — photo aggregation', () => {
 
     // cleanup
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('serializes non-command messages per chat', async () => {
+    const { ch } = createTestChannel();
+    await ch.connect();
+
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const firstDone = new Promise<void>(resolve => { releaseFirst = resolve; });
+
+    ch.onMessage(async (msg) => {
+      events.push(`start:${msg.text}`);
+      if (msg.text === 'first') await firstDone;
+      events.push(`end:${msg.text}`);
+    });
+
+    const first = feedUpdate(ch, {
+      message: {
+        message_id: 21, chat: { id: 100, type: 'private' }, from: { id: 200 },
+        text: 'first',
+      },
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const second = feedUpdate(ch, {
+      message: {
+        message_id: 22, chat: { id: 100, type: 'private' }, from: { id: 200 },
+        text: 'second',
+      },
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(events).toEqual(['start:first']);
+
+    releaseFirst();
+    await first;
+    await second;
+
+    expect(events).toEqual(['start:first', 'end:first', 'start:second', 'end:second']);
   });
 });
 

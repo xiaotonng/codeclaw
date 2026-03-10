@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import fs from 'node:fs';
@@ -33,6 +34,7 @@ export interface StreamOpts {
   prompt: string;
   workdir: string;
   timeout: number;
+  localSessionId?: string | null;
   sessionId: string | null;
   model: string | null;
   thinkingEffort: string;
@@ -65,7 +67,9 @@ export interface StreamResult {
   ok: boolean;
   message: string;
   thinking: string | null;
+  localSessionId: string | null;
   sessionId: string | null;
+  workspacePath: string | null;
   model: string | null;
   thinkingEffort: string;
   elapsedS: number;
@@ -85,13 +89,502 @@ export interface StreamResult {
   stopReason: string | null;
   incomplete: boolean;
   activity: string | null;
+  artifacts: BotArtifact[];
 }
+
+export type ArtifactKind = 'photo' | 'document';
+
+export interface BotArtifact {
+  filePath: string;
+  filename: string;
+  kind: ArtifactKind;
+  caption?: string;
+}
+
+interface LocalSessionRecord {
+  localSessionId: string;
+  agent: Agent;
+  workdir: string;
+  engineSessionId: string | null;
+  workspacePath: string;
+  createdAt: string;
+  updatedAt: string;
+  title: string | null;
+  model: string | null;
+  stagedFiles: string[];
+}
+
+interface SessionIndexData {
+  version: number;
+  sessions: LocalSessionRecord[];
+}
+
+interface EnsureSessionWorkspaceOpts {
+  agent: Agent;
+  workdir: string;
+  localSessionId?: string | null;
+  sessionId?: string | null;
+  title?: string | null;
+}
+
+interface SessionWorkspaceInfo {
+  localSessionId: string;
+  workspacePath: string;
+  manifestPath: string;
+  record: LocalSessionRecord;
+}
+
+export interface StageSessionFilesOpts {
+  agent: Agent;
+  workdir: string;
+  files: string[];
+  localSessionId?: string | null;
+  sessionId?: string | null;
+  title?: string | null;
+}
+
+export interface StageSessionFilesResult {
+  localSessionId: string;
+  workspacePath: string;
+  importedFiles: string[];
+}
+
+const CODECLAW_DIR = '.codeclaw';
+const CODECLAW_SESSIONS_DIR = path.join(CODECLAW_DIR, 'sessions');
+const CODECLAW_SESSION_INDEX = path.join(CODECLAW_SESSIONS_DIR, 'index.json');
+const CODECLAW_LEGACY_WORKSPACES_DIR = path.join(CODECLAW_DIR, 'workspaces');
+const SESSION_WORKSPACE_DIR = 'workspace';
+const SESSION_META_FILE = 'session.json';
+const SESSION_RETURN_MANIFEST = 'return.json';
+const ARTIFACT_MAX_FILES = 8;
+const ARTIFACT_MAX_BYTES = 20 * 1024 * 1024;
+const ARTIFACT_PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
 const Q = (a: string) => /[^a-zA-Z0-9_./:=@-]/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a;
 
 function agentLog(msg: string) {
   const ts = new Date().toTimeString().slice(0, 8);
   process.stdout.write(`[agent ${ts}] ${msg}\n`);
+}
+
+function dedupeStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const value of values) {
+    const item = String(value || '').trim();
+    if (!item || seen.has(item)) continue;
+    seen.add(item);
+    deduped.push(item);
+  }
+  return deduped;
+}
+
+function ensureDir(dirPath: string) {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function readJsonFile<T>(filePath: string, fallback: T): T {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonFile(filePath: string, value: unknown) {
+  ensureDir(path.dirname(filePath));
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpPath, JSON.stringify(value, null, 2));
+  fs.renameSync(tmpPath, filePath);
+}
+
+function sessionIndexPath(workdir: string): string {
+  return path.join(workdir, CODECLAW_SESSION_INDEX);
+}
+
+function sessionDirPath(workdir: string, agent: Agent, localSessionId: string): string {
+  return path.join(workdir, CODECLAW_SESSIONS_DIR, agent, localSessionId);
+}
+
+function legacySessionWorkspacePath(workdir: string, agent: Agent, localSessionId: string): string {
+  return path.join(workdir, CODECLAW_LEGACY_WORKSPACES_DIR, agent, localSessionId);
+}
+
+function sessionWorkspacePath(workdir: string, agent: Agent, localSessionId: string): string {
+  return path.join(sessionDirPath(workdir, agent, localSessionId), SESSION_WORKSPACE_DIR);
+}
+
+function sessionRootFromWorkspacePath(workspacePath: string): string {
+  const resolved = path.resolve(workspacePath);
+  return path.basename(resolved) === SESSION_WORKSPACE_DIR ? path.dirname(resolved) : resolved;
+}
+
+function sessionManifestPath(workspacePath: string): string {
+  return path.join(sessionRootFromWorkspacePath(workspacePath), SESSION_RETURN_MANIFEST);
+}
+
+function sessionMetaPath(workspacePath: string): string {
+  return path.join(sessionRootFromWorkspacePath(workspacePath), SESSION_META_FILE);
+}
+
+function legacySessionMetaPath(workspacePath: string): string {
+  return path.join(workspacePath, CODECLAW_DIR, SESSION_META_FILE);
+}
+
+function legacySessionManifestPath(workspacePath: string): string {
+  return path.join(workspacePath, CODECLAW_DIR, SESSION_RETURN_MANIFEST);
+}
+
+function normalizeSessionRecord(raw: any, workdir: string): LocalSessionRecord | null {
+  const localSessionId = typeof raw?.localSessionId === 'string' ? raw.localSessionId.trim() : '';
+  const agent = raw?.agent === 'codex' ? 'codex' : raw?.agent === 'claude' ? 'claude' : null;
+  if (!localSessionId || !agent) return null;
+
+  const workspacePath = typeof raw?.workspacePath === 'string' && raw.workspacePath.trim()
+    ? path.resolve(raw.workspacePath)
+    : sessionWorkspacePath(workdir, agent, localSessionId);
+  return {
+    localSessionId,
+    agent,
+    workdir,
+    engineSessionId: typeof raw?.engineSessionId === 'string' && raw.engineSessionId.trim() ? raw.engineSessionId.trim() : null,
+    workspacePath,
+    createdAt: typeof raw?.createdAt === 'string' && raw.createdAt.trim() ? raw.createdAt : new Date().toISOString(),
+    updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : new Date().toISOString(),
+    title: typeof raw?.title === 'string' && raw.title.trim() ? raw.title.trim() : null,
+    model: typeof raw?.model === 'string' && raw.model.trim() ? raw.model.trim() : null,
+    stagedFiles: Array.isArray(raw?.stagedFiles) ? dedupeStrings(raw.stagedFiles.filter((v: unknown) => typeof v === 'string')) : [],
+  };
+}
+
+function loadSessionIndex(workdir: string): SessionIndexData {
+  const parsed = readJsonFile<any>(sessionIndexPath(workdir), { version: 1, sessions: [] });
+  const sessions = Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+  return {
+    version: 1,
+    sessions: sessions
+      .map((entry: any) => normalizeSessionRecord(entry, workdir))
+      .filter((entry: LocalSessionRecord | null): entry is LocalSessionRecord => !!entry),
+  };
+}
+
+function writeSessionMeta(record: LocalSessionRecord) {
+  writeJsonFile(sessionMetaPath(record.workspacePath), {
+    localSessionId: record.localSessionId,
+    agent: record.agent,
+    workdir: record.workdir,
+    engineSessionId: record.engineSessionId,
+    workspacePath: record.workspacePath,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    title: record.title,
+    model: record.model,
+    stagedFiles: record.stagedFiles,
+    returnManifestPath: sessionManifestPath(record.workspacePath),
+  });
+}
+
+function copyPath(sourcePath: string, targetPath: string) {
+  const stat = fs.statSync(sourcePath);
+  if (stat.isDirectory()) {
+    fs.cpSync(sourcePath, targetPath, { recursive: true, force: true });
+    return;
+  }
+  ensureDir(path.dirname(targetPath));
+  fs.copyFileSync(sourcePath, targetPath);
+}
+
+function migrateSessionLayout(workdir: string, record: LocalSessionRecord): LocalSessionRecord {
+  const targetSessionDir = sessionDirPath(workdir, record.agent, record.localSessionId);
+  const targetWorkspacePath = sessionWorkspacePath(workdir, record.agent, record.localSessionId);
+  const targetManifestPath = sessionManifestPath(targetWorkspacePath);
+  const currentWorkspacePath = path.resolve(record.workspacePath || targetWorkspacePath);
+  const legacyWorkspacePath = path.resolve(legacySessionWorkspacePath(workdir, record.agent, record.localSessionId));
+
+  ensureDir(targetSessionDir);
+  ensureDir(targetWorkspacePath);
+
+  for (const sourceWorkspacePath of dedupeStrings([currentWorkspacePath, legacyWorkspacePath])) {
+    if (sourceWorkspacePath === targetWorkspacePath || !fs.existsSync(sourceWorkspacePath)) continue;
+    if (!fs.statSync(sourceWorkspacePath).isDirectory()) continue;
+
+    for (const entry of fs.readdirSync(sourceWorkspacePath)) {
+      if (entry === CODECLAW_DIR) continue;
+      copyPath(
+        path.join(sourceWorkspacePath, entry),
+        path.join(targetWorkspacePath, entry),
+      );
+    }
+
+    const sourceManifestPath = legacySessionManifestPath(sourceWorkspacePath);
+    if (fs.existsSync(sourceManifestPath) && !fs.existsSync(targetManifestPath)) {
+      copyPath(sourceManifestPath, targetManifestPath);
+    }
+
+    if (sourceWorkspacePath === legacyWorkspacePath) {
+      fs.rmSync(sourceWorkspacePath, { recursive: true, force: true });
+    }
+  }
+
+  const currentManifestPath = legacySessionManifestPath(currentWorkspacePath);
+  if (fs.existsSync(currentManifestPath) && !fs.existsSync(targetManifestPath)) {
+    copyPath(currentManifestPath, targetManifestPath);
+  }
+
+  record.workspacePath = path.resolve(targetWorkspacePath);
+  return record;
+}
+
+function saveSessionRecord(workdir: string, record: LocalSessionRecord): LocalSessionRecord {
+  record = migrateSessionLayout(workdir, record);
+  ensureDir(sessionDirPath(workdir, record.agent, record.localSessionId));
+  ensureDir(record.workspacePath);
+  const index = loadSessionIndex(workdir);
+  const now = new Date().toISOString();
+  record.updatedAt = now;
+  const pos = index.sessions.findIndex(entry => entry.localSessionId === record.localSessionId);
+  if (pos >= 0) index.sessions[pos] = record;
+  else index.sessions.unshift(record);
+  index.sessions.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  writeJsonFile(sessionIndexPath(workdir), { version: 1, sessions: index.sessions });
+  writeSessionMeta(record);
+  return record;
+}
+
+function nextLocalSessionId(): string {
+  return `sess_${crypto.randomBytes(6).toString('hex')}`;
+}
+
+function summarizePromptTitle(prompt: string | null | undefined): string | null {
+  const text = String(prompt || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  return text.length <= 120 ? text : `${text.slice(0, 117).trimEnd()}...`;
+}
+
+function safeWorkspaceFilename(filename: string): string {
+  const base = path.basename(filename || 'file');
+  const sanitized = base
+    .replace(/[^\w.\- ]+/g, '_')
+    .replace(/^\.+/, '')
+    .trim();
+  return sanitized || `file-${Date.now()}`;
+}
+
+function uniqueWorkspaceFilename(workspacePath: string, desiredName: string): string {
+  const ext = path.extname(desiredName);
+  const stem = ext ? desiredName.slice(0, -ext.length) : desiredName;
+  let candidate = desiredName;
+  let index = 2;
+  while (fs.existsSync(path.join(workspacePath, candidate))) {
+    candidate = `${stem}-${index}${ext}`;
+    index++;
+  }
+  return candidate;
+}
+
+function importFilesIntoWorkspace(workspacePath: string, files: string[]): string[] {
+  const imported: string[] = [];
+  const realWorkspace = fs.realpathSync(workspacePath);
+  for (const filePath of files) {
+    const sourcePath = path.resolve(filePath);
+    if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) continue;
+
+    let relPath = path.relative(realWorkspace, sourcePath);
+    if (relPath && !relPath.startsWith('..') && !path.isAbsolute(relPath)) {
+      imported.push(relPath.split(path.sep).join(path.posix.sep));
+      continue;
+    }
+
+    const targetName = uniqueWorkspaceFilename(workspacePath, safeWorkspaceFilename(path.basename(sourcePath)));
+    const targetPath = path.join(workspacePath, targetName);
+    fs.copyFileSync(sourcePath, targetPath);
+    imported.push(targetName);
+  }
+  return dedupeStrings(imported);
+}
+
+function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): SessionWorkspaceInfo {
+  const workdir = path.resolve(opts.workdir);
+  const index = loadSessionIndex(workdir);
+  let record = index.sessions.find(entry => entry.agent === opts.agent && opts.localSessionId && entry.localSessionId === opts.localSessionId)
+    || index.sessions.find(entry => entry.agent === opts.agent && opts.sessionId && entry.engineSessionId === opts.sessionId)
+    || null;
+
+  if (!record) {
+    const localSessionId = opts.localSessionId?.trim() || nextLocalSessionId();
+    record = {
+      localSessionId,
+      agent: opts.agent,
+      workdir,
+      engineSessionId: opts.sessionId?.trim() || null,
+      workspacePath: sessionWorkspacePath(workdir, opts.agent, localSessionId),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: summarizePromptTitle(opts.title) || null,
+      model: null,
+      stagedFiles: [],
+    };
+  }
+
+  if (!record.engineSessionId && opts.sessionId?.trim()) record.engineSessionId = opts.sessionId.trim();
+  if (!record.title && opts.title) record.title = summarizePromptTitle(opts.title);
+  record.workspacePath = path.resolve(record.workspacePath);
+  saveSessionRecord(workdir, record);
+  return {
+    localSessionId: record.localSessionId,
+    workspacePath: record.workspacePath,
+    manifestPath: sessionManifestPath(record.workspacePath),
+    record,
+  };
+}
+
+function appendSystemPrompt(base: string | undefined, extra: string): string {
+  const lhs = String(base || '').trim();
+  const rhs = String(extra || '').trim();
+  if (!lhs) return rhs;
+  if (!rhs) return lhs;
+  return `${lhs}\n\n${rhs}`;
+}
+
+function isPhotoFilename(filename: string): boolean {
+  return ARTIFACT_PHOTO_EXTS.has(path.extname(filename).toLowerCase());
+}
+
+export function collectArtifacts(dirPath: string, manifestPath = sessionManifestPath(dirPath), log?: (msg: string) => void): BotArtifact[] {
+  const _log = log || (() => {});
+  if (!fs.existsSync(manifestPath)) return [];
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+  } catch (e) {
+    _log(`artifact manifest parse error: ${e}`);
+    return [];
+  }
+
+  const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.files) ? parsed.files : [];
+  if (!entries.length) return [];
+
+  const realDir = fs.realpathSync(dirPath);
+  const artifacts: BotArtifact[] = [];
+
+  for (const entry of entries.slice(0, ARTIFACT_MAX_FILES)) {
+    const rawPath = typeof entry?.path === 'string' ? entry.path
+      : typeof entry?.name === 'string' ? entry.name
+      : '';
+    const relPath = rawPath.trim();
+    if (!relPath || path.isAbsolute(relPath)) {
+      _log(`artifact skipped: invalid path "${rawPath}"`);
+      continue;
+    }
+    if (relPath === SESSION_RETURN_MANIFEST || relPath === SESSION_META_FILE || relPath.startsWith(`${CODECLAW_DIR}/`)) {
+      _log(`artifact skipped: reserved path "${relPath}"`);
+      continue;
+    }
+
+    const resolved = path.resolve(dirPath, relPath);
+    const realResolved = path.resolve(resolved);
+    const relative = path.relative(realDir, realResolved);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+      _log(`artifact skipped: outside workspace "${relPath}"`);
+      continue;
+    }
+    if (!fs.existsSync(resolved)) {
+      _log(`artifact skipped: missing file "${relPath}"`);
+      continue;
+    }
+
+    let realFile: string;
+    try {
+      realFile = fs.realpathSync(resolved);
+    } catch (e) {
+      _log(`artifact skipped: realpath failed "${relPath}" (${e})`);
+      continue;
+    }
+
+    const realRelative = path.relative(realDir, realFile);
+    if (!realRelative || realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+      _log(`artifact skipped: symlink outside workspace "${relPath}"`);
+      continue;
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(realFile);
+    } catch {
+      _log(`artifact skipped: missing file "${relPath}"`);
+      continue;
+    }
+    if (!stat.isFile()) {
+      _log(`artifact skipped: not a file "${relPath}"`);
+      continue;
+    }
+    if (stat.size > ARTIFACT_MAX_BYTES) {
+      _log(`artifact skipped: too large "${relPath}" (${stat.size} bytes)`);
+      continue;
+    }
+
+    const filename = path.basename(realFile);
+    const requestedKind = typeof entry?.kind === 'string' ? entry.kind.toLowerCase()
+      : typeof entry?.type === 'string' ? entry.type.toLowerCase()
+      : '';
+    let kind: ArtifactKind = requestedKind === 'document' ? 'document'
+      : requestedKind === 'photo' ? 'photo'
+      : isPhotoFilename(filename) ? 'photo' : 'document';
+    if (kind === 'photo' && !isPhotoFilename(filename)) kind = 'document';
+    const caption = typeof entry?.caption === 'string' ? entry.caption.trim().slice(0, 1024) || undefined : undefined;
+
+    artifacts.push({ filePath: realFile, filename, kind, caption });
+  }
+
+  return artifacts;
+}
+
+export function buildArtifactSystemPrompt(workspacePath: string, manifestPath = sessionManifestPath(workspacePath)): string {
+  return [
+    '[Session Workspace]',
+    'This session has a dedicated workspace directory:',
+    workspacePath,
+    'Put user-uploaded files here and write any generated user-facing files here unless the task clearly requires another location.',
+    '',
+    '[Artifact Return]',
+    'If you want codeclaw to return files to the user, write this JSON manifest:',
+    manifestPath,
+    '',
+    'Manifest format:',
+    '{"files":[{"path":"report.md","kind":"document","caption":"optional caption"}]}',
+    'Rules:',
+    '- Use relative paths rooted at the session workspace.',
+    '- Use "photo" for png/jpg/jpeg/webp images. Use "document" for everything else.',
+    '- Do not point outside the workspace.',
+    '- Omit the manifest entirely if there is nothing to return.',
+  ].join('\n');
+}
+
+export function buildArtifactPrompt(prompt: string, workspacePath: string, manifestPath = sessionManifestPath(workspacePath)): string {
+  const base = prompt.trim() || 'Please help with this request.';
+  return `${base}\n\n${buildArtifactSystemPrompt(workspacePath, manifestPath)}`;
+}
+
+export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFilesResult {
+  const session = ensureSessionWorkspace({
+    agent: opts.agent,
+    workdir: opts.workdir,
+    localSessionId: opts.localSessionId,
+    sessionId: opts.sessionId,
+    title: opts.title,
+  });
+  const importedFiles = importFilesIntoWorkspace(session.workspacePath, opts.files);
+  if (importedFiles.length) {
+    session.record.stagedFiles = dedupeStrings([...session.record.stagedFiles, ...importedFiles]);
+    if (!session.record.title) session.record.title = importedFiles[0];
+    saveSessionRecord(opts.workdir, session.record);
+  }
+  return {
+    localSessionId: session.localSessionId,
+    workspacePath: session.workspacePath,
+    importedFiles,
+  };
 }
 
 function computeContext(s: { inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null; cacheCreationInputTokens: number | null; contextWindow: number | null }) {
@@ -265,7 +758,7 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
   if (stderr.trim() && !procOk) agentLog(`[result] stderr: ${stderr.trim().slice(0, 300)}`);
 
   return {
-    ok, sessionId: s.sessionId, model: s.model, thinkingEffort: s.thinkingEffort,
+    ok, localSessionId: opts.localSessionId ?? null, sessionId: s.sessionId, workspacePath: null, model: s.model, thinkingEffort: s.thinkingEffort,
     message: s.text.trim() || s.errors?.join('; ') || (procOk ? '(no textual response)' : `Failed (exit=${code}).\n\n${stderr.trim() || '(no output)'}`),
     thinking: s.thinking.trim() || null,
     elapsedS: (Date.now() - start) / 1000,
@@ -277,6 +770,7 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
     stopReason: s.stopReason,
     incomplete,
     activity: s.activity.trim() || null,
+    artifacts: [],
   };
 }
 
@@ -651,7 +1145,9 @@ export function buildCodexTurnInput(prompt: string, attachments: string[]): any[
       // Local images should use the dedicated app-server variant so Codex can
       // serialize them into an API-ready data URL.
       input.push({ type: 'localImage', path: filePath });
+      continue;
     }
+    input.push({ type: 'text', text: `[Attached file: ${filePath}]` });
   }
   input.push({ type: 'text', text: prompt });
   return input;
@@ -678,10 +1174,11 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   if (!(await srv.ensureRunning(config))) {
     return {
       ok: false, message: 'Failed to start codex app-server.', thinking: null,
-      sessionId: opts.sessionId, model: opts.model, thinkingEffort: opts.thinkingEffort,
+      localSessionId: opts.localSessionId ?? null,
+      sessionId: opts.sessionId, workspacePath: null, model: opts.model, thinkingEffort: opts.thinkingEffort,
       elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
       cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: 'Failed to start codex app-server.',
-      codexCumulative: null, stopReason: null, incomplete: true, activity: null,
+      codexCumulative: null, stopReason: null, incomplete: true, activity: null, artifacts: [],
     };
   }
 
@@ -738,10 +1235,11 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     agentLog(`[codex-rpc] thread error: ${errMsg}`);
     return {
       ok: false, message: errMsg, thinking: null,
-      sessionId: opts.sessionId, model: opts.model, thinkingEffort: opts.thinkingEffort,
+      localSessionId: opts.localSessionId ?? null,
+      sessionId: opts.sessionId, workspacePath: null, model: opts.model, thinkingEffort: opts.thinkingEffort,
       elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
       cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: errMsg,
-      codexCumulative: null, stopReason: null, incomplete: true, activity: null,
+      codexCumulative: null, stopReason: null, incomplete: true, activity: null, artifacts: [],
     };
   }
 
@@ -926,10 +1424,11 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     agentLog(`[codex-rpc] turn/start error: ${errMsg}`);
     return {
       ok: false, message: errMsg, thinking: null,
-      sessionId: s.sessionId, model: s.model, thinkingEffort: s.thinkingEffort,
+      localSessionId: opts.localSessionId ?? null,
+      sessionId: s.sessionId, workspacePath: null, model: s.model, thinkingEffort: s.thinkingEffort,
       elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
       cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: errMsg,
-      codexCumulative: null, stopReason: null, incomplete: true, activity: null,
+      codexCumulative: null, stopReason: null, incomplete: true, activity: null, artifacts: [],
     };
   }
 
@@ -954,7 +1453,9 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
 
   return {
     ok,
+    localSessionId: opts.localSessionId ?? null,
     sessionId: s.sessionId,
+    workspacePath: null,
     model: s.model,
     thinkingEffort: s.thinkingEffort,
     message: s.text.trim() || error || '(no textual response)',
@@ -971,6 +1472,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     stopReason,
     incomplete,
     activity: s.activity.trim() || null,
+    artifacts: [],
   };
 }
 
@@ -1137,8 +1639,102 @@ export async function doClaudeStream(opts: StreamOpts): Promise<StreamResult> {
 
 // --- unified entry ---
 
-export function doStream(opts: StreamOpts): Promise<StreamResult> {
-  return opts.agent === 'codex' ? doCodexStream(opts) : doClaudeStream(opts);
+function listCodeclawSessions(workdir: string, agent: Agent, limit?: number): LocalSessionRecord[] {
+  const records = loadSessionIndex(path.resolve(workdir)).sessions
+    .filter(entry => entry.agent === agent)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  return typeof limit === 'number' ? records.slice(0, limit) : records;
+}
+
+function findCodeclawSessionByLocalId(workdir: string, agent: Agent, localSessionId: string): LocalSessionRecord | null {
+  return listCodeclawSessions(workdir, agent).find(entry => entry.localSessionId === localSessionId) || null;
+}
+
+function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: SessionWorkspaceInfo; attachments: string[] } {
+  const session = ensureSessionWorkspace({
+    agent: opts.agent,
+    workdir: opts.workdir,
+    localSessionId: opts.localSessionId,
+    sessionId: opts.sessionId,
+    title: opts.prompt,
+  });
+  const importedFiles = importFilesIntoWorkspace(session.workspacePath, opts.attachments || []);
+  const attachmentRelPaths = dedupeStrings([...session.record.stagedFiles, ...importedFiles]);
+  session.record.stagedFiles = [];
+  if (!session.record.title) session.record.title = summarizePromptTitle(opts.prompt) || importedFiles[0] || null;
+  saveSessionRecord(opts.workdir, session.record);
+
+  const attachmentPaths = attachmentRelPaths.map(relPath => path.join(session.workspacePath, relPath));
+  const artifactSystemPrompt = buildArtifactSystemPrompt(session.workspacePath, session.manifestPath);
+  const prompt = opts.agent === 'codex'
+    ? buildArtifactPrompt(opts.prompt, session.workspacePath, session.manifestPath)
+    : opts.prompt;
+
+  return {
+    session,
+    attachments: attachmentPaths,
+    prepared: {
+      ...opts,
+      localSessionId: session.localSessionId,
+      prompt,
+      attachments: attachmentPaths.length ? attachmentPaths : undefined,
+      codexDeveloperInstructions: appendSystemPrompt(opts.codexDeveloperInstructions, artifactSystemPrompt),
+      claudeAppendSystemPrompt: appendSystemPrompt(opts.claudeAppendSystemPrompt, artifactSystemPrompt),
+    },
+  };
+}
+
+function finalizeStreamResult(result: StreamResult, workdir: string, prompt: string, session: SessionWorkspaceInfo): StreamResult {
+  session.record.engineSessionId = result.sessionId || session.record.engineSessionId;
+  session.record.model = result.model || session.record.model;
+  if (!session.record.title) session.record.title = summarizePromptTitle(prompt);
+  saveSessionRecord(workdir, session.record);
+  const artifacts = collectArtifacts(session.workspacePath, session.manifestPath, msg => agentLog(msg));
+  return {
+    ...result,
+    localSessionId: session.localSessionId,
+    workspacePath: session.workspacePath,
+    artifacts,
+  };
+}
+
+export async function doStream(opts: StreamOpts): Promise<StreamResult> {
+  let session: SessionWorkspaceInfo;
+  let prepared: StreamOpts;
+  try {
+    const prep = prepareStreamOpts(opts);
+    session = prep.session;
+    prepared = prep.prepared;
+  } catch (e: any) {
+    const message = e?.message || String(e);
+    return {
+      ok: false,
+      message,
+      thinking: null,
+      localSessionId: opts.localSessionId ?? null,
+      sessionId: opts.sessionId,
+      workspacePath: null,
+      model: opts.model,
+      thinkingEffort: opts.thinkingEffort,
+      elapsedS: 0,
+      inputTokens: null,
+      outputTokens: null,
+      cachedInputTokens: null,
+      cacheCreationInputTokens: null,
+      contextWindow: null,
+      contextUsedTokens: null,
+      contextPercent: null,
+      codexCumulative: null,
+      error: message,
+      stopReason: null,
+      incomplete: true,
+      activity: null,
+      artifacts: [],
+    };
+  }
+
+  const result = await (prepared.agent === 'codex' ? doCodexStream(prepared) : doClaudeStream(prepared));
+  return finalizeStreamResult(result, opts.workdir, opts.prompt, session);
 }
 
 // ---------------------------------------------------------------------------
@@ -1146,9 +1742,14 @@ export function doStream(opts: StreamOpts): Promise<StreamResult> {
 // ---------------------------------------------------------------------------
 
 export interface SessionInfo {
-  sessionId: string;
+  /** Engine-native session/thread ID when available */
+  sessionId: string | null;
+  /** Codeclaw-managed local session ID used for workspace lookup */
+  localSessionId: string | null;
+  engineSessionId: string | null;
   agent: Agent;
   workdir: string | null;
+  workspacePath: string | null;
   model: string | null;
   createdAt: string | null;
   /** First user prompt (truncated), used as a display title */
@@ -1227,8 +1828,11 @@ function parseClaudeSession(filePath: string, workdir: string): SessionInfo | nu
 
     return {
       sessionId,
+      localSessionId: null,
+      engineSessionId: sessionId,
       agent: 'claude',
       workdir,
+      workspacePath: null,
       model,
       createdAt: stat.birthtime?.toISOString() ?? stat.mtime?.toISOString() ?? null,
       title,
@@ -1251,69 +1855,34 @@ function getRunningClaudeSessionIds(): Set<string> {
 }
 
 function getClaudeSessions(opts: SessionListOpts): SessionListResult {
-  const limit = opts.limit ?? 50;
-  const home = process.env.HOME || '';
-  const projectDir = path.join(home, '.claude', 'projects', claudeProjectDirName(opts.workdir));
-
-  if (!fs.existsSync(projectDir)) {
-    return { ok: true, sessions: [], error: null };
-  }
-
-  const sessions: SessionInfo[] = [];
-  try {
-    const files = fs.readdirSync(projectDir)
-      .filter(f => f.endsWith('.jsonl'))
-      .map(f => ({ name: f, full: path.join(projectDir, f), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, limit);
-
-    const runningIds = getRunningClaudeSessionIds();
-    const now = Date.now();
-    for (const f of files) {
-      const info = parseClaudeSession(f.full, opts.workdir);
-      if (info) {
-        info.running = runningIds.has(info.sessionId) || (now - f.mtime < 10_000);
-        sessions.push(info);
-      }
-    }
-  } catch (e: any) {
-    return { ok: false, sessions: [], error: e.message };
-  }
+  const sessions = listCodeclawSessions(opts.workdir, 'claude', opts.limit).map(record => ({
+    sessionId: record.engineSessionId,
+    localSessionId: record.localSessionId,
+    engineSessionId: record.engineSessionId,
+    agent: 'claude' as Agent,
+    workdir: record.workdir,
+    workspacePath: record.workspacePath,
+    model: record.model,
+    createdAt: record.createdAt,
+    title: record.title,
+    running: Date.now() - Date.parse(record.updatedAt) < 10_000,
+  }));
   return { ok: true, sessions, error: null };
 }
 
 async function getCodexSessions(opts: SessionListOpts): Promise<SessionListResult> {
-  const limit = opts.limit ?? 50;
-  const srv = getCodexServer();
-  if (!(await srv.ensureRunning())) {
-    return { ok: false, sessions: [], error: 'Failed to start codex app-server.' };
-  }
-
-  const resp = await srv.call('thread/list', {
-    cwd: opts.workdir,
-    limit,
-    archived: false,
-  });
-
-  if (resp.error) {
-    return { ok: false, sessions: [], error: resp.error.message || 'thread/list failed' };
-  }
-
-  const threads: any[] = resp.result?.data ?? [];
-  const sessions: SessionInfo[] = [];
-  for (const t of threads) {
-    const statusType = t.status?.type;
-    const running = statusType === 'active';
-    sessions.push({
-      sessionId: t.id,
-      agent: 'codex',
-      workdir: t.cwd ?? null,
-      model: null, // thread/list doesn't include model per-thread
-      createdAt: t.createdAt ? new Date(t.createdAt * 1000).toISOString() : null,
-      title: t.name || t.preview || null,
-      running,
-    });
-  }
+  const sessions = listCodeclawSessions(opts.workdir, 'codex', opts.limit).map(record => ({
+    sessionId: record.engineSessionId,
+    localSessionId: record.localSessionId,
+    engineSessionId: record.engineSessionId,
+    agent: 'codex' as Agent,
+    workdir: record.workdir,
+    workspacePath: record.workspacePath,
+    model: record.model,
+    createdAt: record.createdAt,
+    title: record.title,
+    running: Date.now() - Date.parse(record.updatedAt) < 10_000,
+  }));
   return { ok: true, sessions, error: null };
 }
 
@@ -1357,7 +1926,7 @@ export interface SessionTailOpts {
  */
 function stripInjectedPrompts(text: string): string {
   // Cut at known injection markers
-  const markers = ['\n[Telegram Artifact Return]', '\n[Artifact Return]'];
+  const markers = ['\n[Session Workspace]', '\n[Telegram Artifact Return]', '\n[Artifact Return]'];
   for (const m of markers) {
     const idx = text.indexOf(m);
     if (idx >= 0) return text.slice(0, idx).trim();
@@ -1472,6 +2041,14 @@ async function getCodexSessionTail(opts: SessionTailOpts): Promise<SessionTailRe
 }
 
 export function getSessionTail(opts: SessionTailOpts): Promise<SessionTailResult> {
+  const managed = findCodeclawSessionByLocalId(opts.workdir, opts.agent, opts.sessionId);
+  if (managed) {
+    if (!managed.engineSessionId) return Promise.resolve({ ok: true, messages: [], error: null });
+    const resolvedOpts = { ...opts, sessionId: managed.engineSessionId };
+    return opts.agent === 'codex'
+      ? getCodexSessionTail(resolvedOpts)
+      : Promise.resolve(getClaudeSessionTail(resolvedOpts));
+  }
   return opts.agent === 'codex'
     ? getCodexSessionTail(opts)
     : Promise.resolve(getClaudeSessionTail(opts));

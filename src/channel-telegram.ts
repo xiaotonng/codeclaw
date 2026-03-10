@@ -54,6 +54,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 import { Channel, BotInfo, SendOpts, splitText, sleep } from './channel-base.js';
 
@@ -126,6 +128,61 @@ export interface TelegramOpts {
 const TG_MAX = 4096;
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
+function previewText(value: string, max = 280): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (!normalized) return '(empty)';
+  return normalized.length > max ? `${normalized.slice(0, max)}...` : normalized;
+}
+
+function addErrorMetadata(parts: string[], err: any) {
+  for (const key of ['code', 'errno', 'syscall', 'address', 'port', 'host', 'hostname', 'path']) {
+    const value = err?.[key];
+    if (value != null && value !== '') parts.push(`${key}=${value}`);
+  }
+}
+
+function describeError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err ?? 'unknown error');
+
+  const parts = [`${err.name}: ${err.message}`];
+  addErrorMetadata(parts, err);
+
+  if (err instanceof AggregateError && Array.isArray(err.errors) && err.errors.length) {
+    parts.push(`errors=[${err.errors.slice(0, 3).map(item => describeError(item)).join(' | ')}]`);
+  }
+
+  const cause = (err as any).cause;
+  if (cause && cause !== err) {
+    parts.push(`cause=${describeError(cause)}`);
+  }
+
+  return parts.join(' | ');
+}
+
+async function parseJsonResponse(resp: Response, label: string): Promise<any> {
+  const raw = await resp.text();
+  const bodyPreview = previewText(raw);
+
+  let data: any = null;
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch (err) {
+      throw new Error(
+        `${label} returned invalid JSON: HTTP ${resp.status} ${resp.statusText || ''}`.trim() +
+        `; body=${bodyPreview}; parse=${describeError(err)}`,
+      );
+    }
+  }
+
+  if (!resp.ok) {
+    const detail = data != null ? previewText(JSON.stringify(data)) : bodyPreview;
+    throw new Error(`${label} failed: HTTP ${resp.status} ${resp.statusText || ''}`.trim() + `; body=${detail}`);
+  }
+
+  return data;
+}
+
 function mimeTypeForFilename(filename: string): string {
   switch (path.extname(filename).toLowerCase()) {
     case '.png': return 'image/png';
@@ -158,6 +215,7 @@ class TelegramChannel extends Channel {
   private offset = 0;
   private running = false;
   private ac = new AbortController();
+  private messageChains = new Map<string, Promise<void>>();
 
   private _hCommand: CommandHandler | null = null;
   private _hMessage: MessageHandler | null = null;
@@ -246,17 +304,45 @@ class TelegramChannel extends Channel {
     this.ac.abort();
   }
 
+  private _logOutgoingText(action: string, meta: string, text: string) {
+    const ts = new Date().toTimeString().slice(0, 8);
+    process.stdout.write(`[telegram ${ts}] [send] ${action} ${meta}\n${text}\n`);
+  }
+
+  private _logOutgoingFile(action: string, meta: string) {
+    this._log(`[send] ${action} ${meta}`);
+  }
+
+  private _requestSignal(timeoutMs: number): AbortSignal {
+    return this.running
+      ? AbortSignal.any([AbortSignal.timeout(timeoutMs), this.ac.signal])
+      : AbortSignal.timeout(timeoutMs);
+  }
+
+  private async _fetchResponse(label: string, url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+    try {
+      return await fetch(url, { ...init, signal: this._requestSignal(timeoutMs) });
+    } catch (err) {
+      throw new Error(`${label} request failed after ${Math.ceil(timeoutMs / 1000)}s: ${describeError(err)}`, {
+        cause: err instanceof Error ? err : undefined,
+      });
+    }
+  }
+
   // ========================================================================
   // Outgoing primitives (Channel interface)
   // ========================================================================
 
   async send(chatId: number | string, text: string, opts: SendOpts = {}): Promise<number | null> {
     let msgId: number | null = null;
-    for (const chunk of splitText(text.trim() || '(empty)', TG_MAX - 200)) {
+    const chunks = splitText(text.trim() || '(empty)', TG_MAX - 200);
+    for (let index = 0; index < chunks.length; index++) {
+      const chunk = chunks[index]!;
       const p: any = { chat_id: chatId, text: chunk, disable_web_page_preview: true };
       if (opts.parseMode) p.parse_mode = opts.parseMode;
       if (opts.replyTo != null) p.reply_to_message_id = opts.replyTo;
       if (opts.keyboard != null) p.reply_markup = opts.keyboard;
+      this._logOutgoingText('sendMessage', `chat=${chatId} chunk=${index + 1}/${chunks.length}${opts.replyTo != null ? ` reply_to=${opts.replyTo}` : ''}${opts.parseMode ? ` parse=${opts.parseMode}` : ''}`, chunk);
       let res: any;
       try { res = await this.api('sendMessage', p); } catch {
         if (opts.parseMode) { delete p.parse_mode; res = await this.api('sendMessage', p); }
@@ -273,6 +359,7 @@ class TelegramChannel extends Channel {
     const p: any = { chat_id: chatId, message_id: msgId, text: t, disable_web_page_preview: true };
     if (opts.parseMode) p.parse_mode = opts.parseMode;
     if (opts.keyboard != null) p.reply_markup = opts.keyboard;
+    this._logOutgoingText('editMessageText', `chat=${chatId} msg_id=${msgId}${opts.parseMode ? ` parse=${opts.parseMode}` : ''}`, t);
     try { await this.api('editMessageText', p); } catch (exc: any) {
       const s = String(exc).toLowerCase();
       if (s.includes('not modified') || s.includes("can't be edited")) return;
@@ -295,7 +382,18 @@ class TelegramChannel extends Channel {
   // ========================================================================
 
   async answerCallback(callbackId: string, text?: string) {
+    if (text) this._logOutgoingText('answerCallbackQuery', `callback_id=${callbackId}`, text);
     await this.api('answerCallbackQuery', { callback_query_id: callbackId, ...(text ? { text } : {}) }).catch(() => {});
+  }
+
+  async setMessageReaction(chatId: number | string, msgId: number | string, reactions: string[]) {
+    const payload = {
+      chat_id: chatId,
+      message_id: msgId,
+      reaction: reactions.map(emoji => ({ type: 'emoji', emoji })),
+      is_big: false,
+    };
+    await this.api('setMessageReaction', payload).catch(() => {});
   }
 
   async sendPhoto(
@@ -315,14 +413,21 @@ class TelegramChannel extends Channel {
     add(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${filename}"\r\nContent-Type: ${mimeType}\r\n\r\n`);
     parts.push(photo);
     add(`\r\n--${boundary}--\r\n`);
-    try {
-      const resp = await fetch(`${this.base}/sendPhoto`, {
-        method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` }, body: Buffer.concat(parts),
-      });
-      const data: any = await resp.json();
-      if (!data.ok) throw new Error(`Telegram API sendPhoto: ${JSON.stringify(data)}`);
-      return data?.result?.message_id ?? null;
-    } catch (e) { throw e; }
+    this._logOutgoingFile('sendPhoto', `chat=${chatId} file=${filename} bytes=${photo.byteLength}${opts.replyTo != null ? ` reply_to=${opts.replyTo}` : ''}`);
+    if (opts.caption) this._logOutgoingText('sendPhoto.caption', `chat=${chatId} file=${filename}`, opts.caption.slice(0, 1024));
+    const resp = await this._fetchResponse(
+      'Telegram API sendPhoto',
+      `${this.base}/sendPhoto`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+        body: Buffer.concat(parts),
+      },
+      this.apiTimeout * 1000,
+    );
+    const data = await parseJsonResponse(resp, 'Telegram API sendPhoto');
+    if (!data?.ok) throw new Error(`Telegram API sendPhoto: ${previewText(JSON.stringify(data))}`);
+    return data?.result?.message_id ?? null;
   }
 
   async sendDocument(chatId: number | string, content: string | Buffer, filename: string, opts: { caption?: string; replyTo?: number | string } = {}): Promise<number | null> {
@@ -337,14 +442,22 @@ class TelegramChannel extends Channel {
     add(`--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`);
     parts.push(buf);
     add(`\r\n--${boundary}--\r\n`);
-    try {
-      const resp = await fetch(`${this.base}/sendDocument`, {
-        method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` }, body: Buffer.concat(parts),
-      });
-      const data: any = await resp.json();
-      if (!data.ok) throw new Error(`Telegram API sendDocument: ${JSON.stringify(data)}`);
-      return data?.result?.message_id ?? null;
-    } catch (e) { throw e; }
+    this._logOutgoingFile('sendDocument', `chat=${chatId} file=${filename} bytes=${buf.byteLength}${opts.replyTo != null ? ` reply_to=${opts.replyTo}` : ''}`);
+    if (opts.caption) this._logOutgoingText('sendDocument.caption', `chat=${chatId} file=${filename}`, opts.caption.slice(0, 1024));
+    if (typeof content === 'string') this._logOutgoingText('sendDocument.body', `chat=${chatId} file=${filename}`, content);
+    const resp = await this._fetchResponse(
+      'Telegram API sendDocument',
+      `${this.base}/sendDocument`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+        body: Buffer.concat(parts),
+      },
+      this.apiTimeout * 1000,
+    );
+    const data = await parseJsonResponse(resp, 'Telegram API sendDocument');
+    if (!data?.ok) throw new Error(`Telegram API sendDocument: ${previewText(JSON.stringify(data))}`);
+    return data?.result?.message_id ?? null;
   }
 
   async sendFile(
@@ -430,12 +543,21 @@ class TelegramChannel extends Channel {
     const meta = await this.api('getFile', { file_id: fileId });
     const filePath = meta.result.file_path;
     const url = `https://api.telegram.org/file/bot${this.token}/${filePath}`;
-    const resp = await fetch(url);
-    const buf = Buffer.from(await resp.arrayBuffer());
+    const resp = await this._fetchResponse('Telegram file download', url, { method: 'GET' }, this.apiTimeout * 1000);
+    if (!resp.ok) {
+      const raw = await resp.text().catch(() => '');
+      throw new Error(`Telegram file download failed: HTTP ${resp.status} ${resp.statusText || ''}`.trim() + `; body=${previewText(raw)}`);
+    }
     const ext = path.extname(filePath) || '.bin';
     const name = destFilename || `tg_${fileId.slice(-8)}${ext}`;
     const localPath = path.join(this.workdir, name);
-    fs.writeFileSync(localPath, buf);
+    fs.mkdirSync(this.workdir, { recursive: true });
+    if (resp.body) {
+      await pipeline(Readable.fromWeb(resp.body as any), fs.createWriteStream(localPath));
+    } else {
+      const buf = Buffer.from(await resp.arrayBuffer());
+      fs.writeFileSync(localPath, buf);
+    }
     return localPath;
   }
 
@@ -445,14 +567,17 @@ class TelegramChannel extends Channel {
 
   async api(method: string, payload?: any): Promise<any> {
     const timeout = method === 'getUpdates' ? (this.pollTimeout + 10) * 1000 : this.apiTimeout * 1000;
-    const signal = this.running
-      ? AbortSignal.any([AbortSignal.timeout(timeout), this.ac.signal])
-      : AbortSignal.timeout(timeout);
-    const resp = await fetch(`${this.base}/${method}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload ?? {}), signal,
-    });
-    const data = await resp.json();
+    const resp = await this._fetchResponse(
+      `Telegram API ${method}`,
+      `${this.base}/${method}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload ?? {}),
+      },
+      timeout,
+    );
+    const data = await parseJsonResponse(resp, `Telegram API ${method}`);
     if (!data.ok) {
       if (method === 'getUpdates' && Number(data.error_code) === 409) {
         const detail = typeof data.description === 'string' && data.description.trim()
@@ -470,6 +595,33 @@ class TelegramChannel extends Channel {
   // ========================================================================
 
   private async _dispatch(update: any) {
+    const key = this._queueKey(update);
+    if (!key) {
+      await this._dispatchNow(update);
+      return;
+    }
+
+    const prev = this.messageChains.get(key) || Promise.resolve();
+    const current = prev
+      .catch(() => {})
+      .then(() => this._dispatchNow(update));
+    const settled = current.finally(() => {
+      if (this.messageChains.get(key) === settled) this.messageChains.delete(key);
+    });
+    this.messageChains.set(key, settled);
+    await settled;
+  }
+
+  private _queueKey(update: any): string | null {
+    const raw = update.message || update.edited_message;
+    if (!raw?.chat?.id) return null;
+    const entities = raw.entities || [];
+    const cmdEntity = entities.find((e: any) => e.type === 'bot_command' && e.offset === 0);
+    if (cmdEntity) return null;
+    return String(raw.chat.id);
+  }
+
+  private async _dispatchNow(update: any) {
     // callback query
     if (update.callback_query) {
       const cq = update.callback_query;

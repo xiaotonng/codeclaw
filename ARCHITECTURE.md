@@ -33,7 +33,7 @@ src/
 │  ├ Keyboards      PathRegistry, buildDirKeyboard, quickReply │
 │  ├ Commands       cmdStart/Status/Host/Sessions/Switch/Agents│
 │  ├ Streaming UI   placeholder → throttled editMessage        │
-│  ├ Artifacts      per-turn dir, manifest validation, uploads │
+│  ├ Artifacts      session workspace, manifest validation, uploads │
 │  ├ Callbacks      sw:/sess:/ag:/qr: routing                  │
 │  └ Lifecycle      run() — connect, drain, menu, poll, signal │
 ├──────────────────────────────────────────────────────────────┤

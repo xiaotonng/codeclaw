@@ -160,7 +160,8 @@ async function main() {
         const date = s.createdAt ? s.createdAt.replace('T', ' ').slice(0, 19) : '?';
         const model = s.model ? ` model=${s.model}` : '';
         const title = s.title ? `  ${s.title}` : '';
-        process.stdout.write(`  ${s.sessionId}  ${date}${model}${run}\n`);
+        const displayId = s.localSessionId || s.sessionId || s.engineSessionId || '(none)';
+        process.stdout.write(`  ${displayId}  ${date}${model}${run}\n`);
         if (title) process.stdout.write(`    ${title}\n`);
       }
       process.exit(0);
@@ -176,7 +177,13 @@ async function main() {
           process.stderr.write(`No ${agent} sessions found for ${workdir}\n`);
           process.exit(1);
         }
-        sessionId = sessions.sessions[0].sessionId;
+        sessionId = sessions.sessions[0].localSessionId
+          || sessions.sessions[0].sessionId
+          || sessions.sessions[0].engineSessionId;
+        if (!sessionId) {
+          process.stderr.write(`Latest ${agent} session has no usable session ID\n`);
+          process.exit(1);
+        }
       }
 
       const tail = await getSessionTail({ agent, sessionId, workdir, limit: args.n });

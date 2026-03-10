@@ -5,7 +5,7 @@
  * This avoids hitting real APIs while testing all parsing and control flow.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { doStream, doCodexStream, doClaudeStream, getUsage, listModels, buildCodexTurnInput, shutdownCodexServer, type StreamOpts } from '../src/code-agent.ts';
+import { doStream, doCodexStream, doClaudeStream, getUsage, listModels, buildCodexTurnInput, shutdownCodexServer, stageSessionFiles, type StreamOpts } from '../src/code-agent.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -44,7 +44,7 @@ beforeEach(() => {
 });
 
 describe('buildCodexTurnInput', () => {
-  it('uses localImage for local image attachments', () => {
+  it('uses localImage for images and explicit file references for documents', () => {
     const imagePath = path.join(tmpDir, 'shot.png');
     const docPath = path.join(tmpDir, 'notes.txt');
 
@@ -52,8 +52,69 @@ describe('buildCodexTurnInput', () => {
 
     expect(input).toEqual([
       { type: 'localImage', path: imagePath },
+      { type: 'text', text: `[Attached file: ${docPath}]` },
       { type: 'text', text: 'inspect this' },
     ]);
+  });
+});
+
+describe('stageSessionFiles', () => {
+  it('stores uploaded files under the managed session workspace', () => {
+    const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-upload-'));
+    const uploadPath = path.join(uploadDir, 'report.txt');
+    fs.writeFileSync(uploadPath, 'hello');
+
+    const result = stageSessionFiles({
+      agent: 'claude',
+      workdir: tmpDir,
+      files: [uploadPath],
+    });
+
+    const sessionDir = path.join(tmpDir, '.codeclaw', 'sessions', 'claude', result.localSessionId);
+    expect(result.workspacePath).toBe(path.join(sessionDir, 'workspace'));
+    expect(fs.existsSync(path.join(result.workspacePath, 'report.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(sessionDir, 'session.json'))).toBe(true);
+  });
+
+  it('migrates legacy workspace sessions into the managed session directory', () => {
+    const localSessionId = 'sess_legacy_layout';
+    const legacyWorkspacePath = path.join(tmpDir, '.codeclaw', 'workspaces', 'claude', localSessionId);
+    const legacyMetaDir = path.join(legacyWorkspacePath, '.codeclaw');
+    fs.mkdirSync(legacyMetaDir, { recursive: true });
+    fs.writeFileSync(path.join(legacyWorkspacePath, 'legacy.txt'), 'legacy');
+    fs.writeFileSync(path.join(legacyMetaDir, 'return.json'), JSON.stringify({
+      files: [{ path: 'legacy.txt', kind: 'document' }],
+    }));
+    fs.mkdirSync(path.join(tmpDir, '.codeclaw', 'sessions'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.codeclaw', 'sessions', 'index.json'), JSON.stringify({
+      version: 1,
+      sessions: [{
+        localSessionId,
+        agent: 'claude',
+        workdir: tmpDir,
+        engineSessionId: 'engine-legacy',
+        workspacePath: legacyWorkspacePath,
+        createdAt: '2026-03-10T00:00:00.000Z',
+        updatedAt: '2026-03-10T00:00:00.000Z',
+        title: 'legacy session',
+        model: 'claude-opus-4-6',
+        stagedFiles: [],
+      }],
+    }, null, 2));
+
+    const result = stageSessionFiles({
+      agent: 'claude',
+      workdir: tmpDir,
+      files: [],
+      localSessionId,
+    });
+
+    const sessionDir = path.join(tmpDir, '.codeclaw', 'sessions', 'claude', localSessionId);
+    expect(result.workspacePath).toBe(path.join(sessionDir, 'workspace'));
+    expect(fs.existsSync(path.join(result.workspacePath, 'legacy.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(sessionDir, 'return.json'))).toBe(true);
+    expect(fs.existsSync(path.join(sessionDir, 'session.json'))).toBe(true);
+    expect(fs.existsSync(legacyWorkspacePath)).toBe(false);
   });
 });
 

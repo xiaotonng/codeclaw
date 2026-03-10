@@ -350,6 +350,8 @@ function getHostMemoryUsageData(totalMem: number, freeMem: number): HostMemoryUs
 export interface ChatState {
   agent: Agent;
   sessionId: string | null;
+  localSessionId?: string | null;
+  workspacePath?: string | null;
   codexCumulative?: CodexCumulativeUsage;
 }
 
@@ -445,6 +447,7 @@ export class Bot {
       version: VERSION, uptime: Date.now() - this.startedAt,
       memRss: mem.rss, memHeap: mem.heapUsed, pid: process.pid,
       workdir: this.workdir, agent: cs.agent, model: this.modelForAgent(cs.agent), sessionId: cs.sessionId,
+      localSessionId: cs.localSessionId ?? null, workspacePath: cs.workspacePath ?? null,
       running: this.activeTasks.get(chatId) ?? null, stats: this.stats,
       usage: getUsage({ agent: cs.agent, model: this.modelForAgent(cs.agent) }),
     };
@@ -479,7 +482,12 @@ export class Bot {
   switchWorkdir(newPath: string) {
     const old = this.workdir;
     this.workdir = newPath;
-    for (const [, cs] of this.chats) { cs.sessionId = null; cs.codexCumulative = undefined; }
+    for (const [, cs] of this.chats) {
+      cs.sessionId = null;
+      cs.localSessionId = null;
+      cs.workspacePath = null;
+      cs.codexCumulative = undefined;
+    }
     this.log(`switch workdir: ${old} -> ${newPath}`);
     this.afterSwitchWorkdir(old, newPath);
     return old;
@@ -501,7 +509,7 @@ export class Bot {
     const snapshotSessionId = cs.sessionId;
     const opts: StreamOpts = {
       agent: cs.agent, prompt, workdir: this.workdir, timeout: this.runTimeout,
-      sessionId: snapshotSessionId, model: null, thinkingEffort: this.codexReasoningEffort, onText,
+      sessionId: snapshotSessionId, localSessionId: cs.localSessionId ?? null, model: null, thinkingEffort: this.codexReasoningEffort, onText,
       attachments: attachments.length ? attachments : undefined,
       codexModel: this.codexModel, codexFullAccess: this.codexFullAccess,
       codexDeveloperInstructions: systemPrompt || undefined,
@@ -519,6 +527,8 @@ export class Bot {
     if (result.codexCumulative) cs.codexCumulative = result.codexCumulative;
     // Only update sessionId if it hasn't been changed externally (e.g. user switched session during run)
     if (result.sessionId && cs.sessionId === snapshotSessionId) cs.sessionId = result.sessionId;
+    if (result.localSessionId) cs.localSessionId = result.localSessionId;
+    if (result.workspacePath) cs.workspacePath = result.workspacePath;
     this.log(`[runStream] completed turn=${this.stats.totalTurns} cumulative: in=${fmtTokens(this.stats.totalInputTokens)} out=${fmtTokens(this.stats.totalOutputTokens)} cached=${fmtTokens(this.stats.totalCachedTokens)}`);
     return result;
   }
