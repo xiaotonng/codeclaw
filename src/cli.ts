@@ -5,6 +5,7 @@
 
 import { VERSION, envBool } from './bot.js';
 import { TelegramBot } from './bot-telegram.js';
+import { hasConfiguredChannelToken, resolveConfiguredChannels } from './cli-channels.js';
 import { listAgents } from './code-agent.js';
 import { startDashboard, type DashboardServer } from './dashboard.js';
 import { buildSetupGuide, collectSetupState, hasReadyAgent, isSetupReady } from './onboarding.js';
@@ -58,31 +59,14 @@ export async function main() {
   // Apply config early so managed env vars are populated from setting.json.
   applyUserConfig({ ...userConfig, ...configOverrides }, undefined, { overwrite: true, clearMissing: true });
 
-  // Detect which channels have credentials configured (config file is authoritative)
-  function hasChannelToken(ch: ChannelName): boolean {
-    const config = { ...userConfig, ...configOverrides };
-    switch (ch) {
-      case 'telegram': return !!(config.telegramBotToken || args.token);
-      case 'feishu': return !!(config.feishuAppId || args.token);
-      case 'whatsapp': return !!(args.token);
-    }
-  }
+  const effectiveConfig = () => ({ ...userConfig, ...configOverrides });
 
   // Resolve channels: explicit flag > config > auto-detect from tokens
-  let channels: ChannelName[];
-  const rawChannels = args.channel || '';
-  if (rawChannels) {
-    channels = rawChannels.split(',').map((c: string) => c.trim().toLowerCase()) as ChannelName[];
-  } else if (userConfig.channels?.length) {
-    channels = userConfig.channels;
-  } else {
-    // Auto-detect: launch all channels that have tokens configured
-    const detected: ChannelName[] = [];
-    // Feishu first (default priority)
-    if (hasChannelToken('feishu')) detected.push('feishu');
-    if (hasChannelToken('telegram')) detected.push('telegram');
-    channels = detected.length ? detected : [];
-  }
+  let channels = resolveConfiguredChannels({
+    explicitChannels: args.channel,
+    config: effectiveConfig(),
+    tokenOverride: args.token,
+  });
   for (const ch of channels) {
     if (!VALID_CHANNELS.has(ch)) {
       process.stderr.write(`Unknown channel: ${ch}. Available: ${[...VALID_CHANNELS].join(', ')}\n`);
@@ -90,8 +74,8 @@ export async function main() {
     }
   }
   // Primary channel used for setup wizard / doctor checks (feishu preferred)
-  const channel: ChannelName = channels[0] || 'feishu';
-  const tokenProvided = channels.length > 0 && hasChannelToken(channel);
+  let channel: ChannelName = channels[0] || 'feishu';
+  const tokenProvided = channels.length > 0 && hasConfiguredChannelToken(effectiveConfig(), channel, args.token);
   if (args.help) {
     process.stdout.write(
 `codeclaw v${VERSION} — Run local coding agents through IM.
@@ -160,7 +144,6 @@ Environment variables (Feishu):
   FEISHU_APP_ID              Feishu app ID (from Feishu Open Platform)
   FEISHU_APP_SECRET          Feishu app secret
   FEISHU_DOMAIN              API domain (default: https://open.feishu.cn)
-  FEISHU_USE_PROXY           Force Feishu APIs and WS to use process proxy settings
   FEISHU_ALLOWED_CHAT_IDS    Comma-separated allowed Feishu chat IDs
 
 Notes:
@@ -208,12 +191,38 @@ Docs: https://github.com/xiaotonng/codeclaw
     });
 
     if (needsSetup) {
-      // Dashboard is showing the config page. Wait for user to configure and restart.
+      // Dashboard is showing the config page. Wait until configuration becomes ready,
+      // then continue startup without requiring a manual restart.
       const ts = new Date().toTimeString().slice(0, 8);
       process.stdout.write(`[codeclaw ${ts}] waiting for configuration via dashboard...\n`);
-      process.stdout.write(`[codeclaw ${ts}] configure at ${dashboard.url}, then restart codeclaw.\n`);
-      // Keep process alive so dashboard remains accessible
-      await new Promise<void>(() => {}); // block forever
+      process.stdout.write(`[codeclaw ${ts}] configure at ${dashboard.url}; startup will continue automatically once ready.\n`);
+
+      while (true) {
+        await new Promise(resolve => setTimeout(resolve, 1_000));
+        userConfig = loadUserConfig();
+        channels = resolveConfiguredChannels({
+          explicitChannels: args.channel,
+          config: { ...userConfig, ...configOverrides },
+          tokenOverride: args.token,
+        });
+        channel = channels[0] || 'feishu';
+
+        const nextSetupState = collectSetupState({
+          agents: listAgents().agents,
+          channel,
+          tokenProvided: channels.length > 0 && hasConfiguredChannelToken({ ...userConfig, ...configOverrides }, channel, args.token),
+        });
+        const nextNeedsAgentAttention = nextSetupState.agents
+          .filter(agent => agent.installed)
+          .every(agent => agent.authStatus !== 'ready');
+        const nextNeedsSetup = channels.length === 0
+          || !hasReadyAgent(nextSetupState)
+          || nextNeedsAgentAttention;
+        if (!nextNeedsSetup) break;
+      }
+
+      const resumeTs = new Date().toTimeString().slice(0, 8);
+      process.stdout.write(`[codeclaw ${resumeTs}] configuration detected, starting bot channels...\n`);
     }
   } else if (args.setup) {
     // Explicit --setup: use the terminal-based wizard
@@ -237,13 +246,13 @@ Docs: https://github.com/xiaotonng/codeclaw
     process.exit(0);
   }
 
-  // Re-detect channels after wizard/dashboard may have set tokens
-  if (channels.length === 0) {
-    const detected: ChannelName[] = [];
-    if (hasChannelToken('feishu')) detected.push('feishu');
-    if (hasChannelToken('telegram')) detected.push('telegram');
-    channels = detected;
-  }
+  // Re-resolve channels after wizard/dashboard may have changed configuration.
+  channels = resolveConfiguredChannels({
+    explicitChannels: args.channel,
+    config: effectiveConfig(),
+    tokenOverride: args.token,
+  });
+  channel = channels[0] || 'feishu';
   const refreshedTokenProvided = channels.length > 0;
   if (!refreshedTokenProvided) {
     const refreshedSetupState = collectSetupState({

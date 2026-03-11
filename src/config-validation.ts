@@ -1,7 +1,7 @@
+import * as lark from '@larksuiteoapi/node-sdk';
 import { validateTelegramToken, type TelegramBotIdentity } from './setup-wizard.js';
 import type { ChannelSetupState } from './onboarding.js';
 import type { UserConfig } from './user-config.js';
-import { feishuApiDomain, feishuNoProxyEnabled, withFeishuDirectFetch } from './feishu-network.js';
 
 export interface TelegramConfigCheckResult {
   state: ChannelSetupState;
@@ -213,7 +213,7 @@ export async function validateFeishuConfig(
   const trimmedAppId = String(appId || '').trim();
   const trimmedSecret = String(appSecret || '').trim();
   const appLabel = maskAppId(trimmedAppId);
-  const apiDomain = feishuApiDomain();
+  const apiDomain = String(process.env.FEISHU_DOMAIN || 'https://open.feishu.cn').trim().replace(/\/+$/, '');
   const timeoutMs = Number.isFinite(options.timeoutMs) && Number(options.timeoutMs) > 0
     ? Math.round(Number(options.timeoutMs))
     : DEFAULT_FEISHU_VALIDATION_TIMEOUT_MS;
@@ -232,36 +232,25 @@ export async function validateFeishuConfig(
 
   try {
     const startedAt = Date.now();
-    const controller = new AbortController();
-    feishuValidationLog(appLabel, `start domain=${apiDomain} timeoutMs=${timeoutMs} direct=${feishuNoProxyEnabled()}`);
-    const resp = await withTimeout(fetch(`${apiDomain}/open-apis/auth/v3/tenant_access_token/internal`, withFeishuDirectFetch({
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: trimmedAppId, app_secret: trimmedSecret }),
-      signal: controller.signal,
-    })), timeoutMs, 'Feishu validation', () => controller.abort());
-    feishuValidationLog(appLabel, `response status=${resp.status} ok=${resp.ok} elapsedMs=${Date.now() - startedAt}`);
-    const raw = await withTimeout(resp.text(), Math.min(timeoutMs, 4_000), 'Feishu validation response', () => controller.abort());
-    feishuValidationLog(appLabel, `body bytes=${raw.length} elapsedMs=${Date.now() - startedAt}`);
-    let parsed: any = null;
-    try {
-      parsed = raw ? JSON.parse(raw) : null;
-    } catch {
-      feishuValidationLog(appLabel, `invalid-json status=${resp.status} elapsedMs=${Date.now() - startedAt}`);
-      return {
-        state: errorChannelState('feishu', `Feishu returned invalid JSON (HTTP ${resp.status}).`),
-        app: null,
-      };
-    }
-
-    if (!resp.ok) {
-      const detail = typeof parsed?.msg === 'string' ? parsed.msg : `HTTP ${resp.status}`;
-      feishuValidationLog(appLabel, `http-error detail=${detail} elapsedMs=${Date.now() - startedAt}`);
-      return {
-        state: errorChannelState('feishu', `Feishu validation failed: ${detail}`),
-        app: null,
-      };
-    }
+    feishuValidationLog(appLabel, `start domain=${apiDomain} timeoutMs=${timeoutMs}`);
+    const sdkDomain = apiDomain.includes('larksuite.com')
+      ? lark.Domain.Lark
+      : apiDomain === 'https://open.feishu.cn'
+        ? lark.Domain.Feishu
+        : apiDomain as any;
+    const client = new lark.Client({
+      appId: trimmedAppId,
+      appSecret: trimmedSecret,
+      domain: sdkDomain,
+      loggerLevel: lark.LoggerLevel.warn,
+    });
+    const parsed: any = await withTimeout(client.auth.tenantAccessToken.internal({
+      data: { app_id: trimmedAppId, app_secret: trimmedSecret },
+    }), timeoutMs, 'Feishu validation');
+    feishuValidationLog(
+      appLabel,
+      `response code=${String(parsed?.code ?? '')} hasToken=${typeof parsed?.tenant_access_token === 'string'} elapsedMs=${Date.now() - startedAt}`,
+    );
 
     if (parsed?.code !== 0 || typeof parsed?.tenant_access_token !== 'string' || !parsed.tenant_access_token) {
       const detail = typeof parsed?.msg === 'string' && parsed.msg.trim() ? parsed.msg.trim() : 'credentials rejected';

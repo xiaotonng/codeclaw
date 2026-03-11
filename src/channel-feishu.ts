@@ -21,7 +21,6 @@ import {
   type SendOpts,
   sleep,
 } from './channel-base.js';
-import { createFeishuHttpInstance, createFeishuWsAgent } from './feishu-network.js';
 
 export { FeishuChannel };
 export type FeishuCardActionItem = lark.InteractiveCardActionItem;
@@ -237,8 +236,6 @@ class FeishuChannel extends Channel {
   private client: lark.Client;
   private wsClient: lark.WSClient | null = null;
   private eventDispatcher: lark.EventDispatcher;
-  private httpInstance = createFeishuHttpInstance();
-  private wsAgent = createFeishuWsAgent();
 
   private running = false;
   private messageChains = new Map<string, Promise<void>>();
@@ -278,7 +275,6 @@ class FeishuChannel extends Channel {
       appId: this.appId,
       appSecret: this.appSecret,
       domain: sdkDomain,
-      ...(this.httpInstance ? { httpInstance: this.httpInstance } : {}),
       loggerLevel: lark.LoggerLevel.warn,
     });
 
@@ -332,8 +328,6 @@ class FeishuChannel extends Channel {
         appId: this.appId,
         appSecret: this.appSecret,
         domain: sdkDomain,
-        ...(this.httpInstance ? { httpInstance: this.httpInstance } : {}),
-        ...(this.wsAgent ? { agent: this.wsAgent } : {}),
         loggerLevel: lark.LoggerLevel.warn,
         autoReconnect: true,
       });
