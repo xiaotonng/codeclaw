@@ -370,7 +370,7 @@ export function buildStreamPreviewHtml(input: StreamPreviewRenderInput): string 
   const thinkDisplay = formatThinkingForDisplay(input.thinking, maxBody);
   const planDisplay = renderPlanForPreview(input.plan ?? null);
   const activityDisplay = summarizeActivityForPreview(input.activity);
-  const maxActivity = !display && !thinkDisplay && !planDisplay ? 1800 : 900;
+  const maxActivity = !display && !thinkDisplay && !planDisplay ? 2400 : 1400;
   const parts: string[] = [];
   const label = thinkLabel(input.agent);
 
@@ -385,7 +385,10 @@ export function buildStreamPreviewHtml(input: StreamPreviewRenderInput): string 
   if (thinkDisplay && !display) {
     parts.push(`<blockquote><b>${escapeHtml(label)}</b>\n${escapeHtml(thinkDisplay)}</blockquote>`);
   } else if (display) {
-    if (rawThinking) parts.push(`<i>${escapeHtml(`${label} (${rawThinking.length} chars)`)}</i>`);
+    if (rawThinking) {
+      const thinkSnippet = formatThinkingForDisplay(input.thinking, 600);
+      parts.push(`<blockquote><b>${escapeHtml(label)}</b>\n${escapeHtml(thinkSnippet)}</blockquote>`);
+    }
     const preview = display.length > maxBody ? '(...truncated)\n' + display.slice(-maxBody) : display;
     parts.push(mdToTgHtml(preview));
   }
@@ -405,7 +408,7 @@ export function buildFinalReplyRender(agent: Agent, result: StreamResult): Final
     const narrative = summary.narrative.join('\n');
     if (narrative) {
       let display = narrative;
-      if (display.length > 800) display = '...\n' + display.slice(-800);
+      if (display.length > 1600) display = '...\n' + display.slice(-1600);
       activityHtml = `<blockquote><b>Activity</b>\n${escapeHtml(display)}</blockquote>\n\n`;
     }
     const commandSummary = formatActivityCommandSummary(
@@ -418,7 +421,7 @@ export function buildFinalReplyRender(agent: Agent, result: StreamResult): Final
 
   let thinkingHtml = '';
   if (result.thinking) {
-    thinkingHtml = `<blockquote><b>${thinkLabel(agent)}</b>\n${escapeHtml(formatThinkingForDisplay(result.thinking, 800))}</blockquote>\n\n`;
+    thinkingHtml = `<blockquote><b>${thinkLabel(agent)}</b>\n${escapeHtml(formatThinkingForDisplay(result.thinking, 1600))}</blockquote>\n\n`;
   }
 
   let statusHtml = '';

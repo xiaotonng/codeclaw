@@ -13,8 +13,10 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -65,9 +67,39 @@ export interface McpBridgeOpts {
  * Find the compiled mcp-session-server.js next to this file's compiled output.
  * Falls back to running via the CLI entry point with --mcp-serve.
  */
-function resolveMcpServerCommand(): { command: string; args: string[] } {
+interface McpServerRuntimeInfo {
+  execPath: string;
+  execArgv: string[];
+  argv: string[];
+  moduleUrl: string;
+}
+
+function sanitizeExecArgv(execArgv: string[]): string[] {
+  return execArgv.filter(arg => !/^--inspect(?:-brk)?(?:=.*)?$/.test(arg));
+}
+
+function resolveCurrentProcessCommand(runtime: McpServerRuntimeInfo): { command: string; args: string[] } | null {
+  const entryScript = runtime.argv[1] ? path.resolve(runtime.argv[1]) : '';
+  const base = path.basename(entryScript).toLowerCase();
+  if (!entryScript || !fs.existsSync(entryScript)) return null;
+  if (base !== 'cli.js' && base !== 'cli.ts') return null;
+  return {
+    command: runtime.execPath,
+    args: [...sanitizeExecArgv(runtime.execArgv), entryScript, '--mcp-serve'],
+  };
+}
+
+export function resolveMcpServerCommand(runtime: McpServerRuntimeInfo = {
+  execPath: process.execPath,
+  execArgv: process.execArgv,
+  argv: process.argv,
+  moduleUrl: import.meta.url,
+}): { command: string; args: string[] } {
+  const currentProcess = resolveCurrentProcessCommand(runtime);
+  if (currentProcess) return currentProcess;
+
   // Try to find the compiled JS file in the same directory as this module
-  const thisDir = path.dirname(new URL(import.meta.url).pathname);
+  const thisDir = path.dirname(fileURLToPath(runtime.moduleUrl));
   const serverScript = path.join(thisDir, 'mcp-session-server.js');
   if (fs.existsSync(serverScript)) {
     return { command: 'node', args: [serverScript] };
@@ -86,6 +118,7 @@ function resolveMcpServerCommand(): { command: string; args: string[] } {
 // ---------------------------------------------------------------------------
 
 const ARTIFACT_MAX_BYTES = 20 * 1024 * 1024;
+const SEND_FILE_TIMEOUT_MS = 60_000; // 60s timeout for sendFile callback
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
 function isPhotoFile(filePath: string): boolean {
@@ -104,13 +137,38 @@ function isInsideAllowedRoot(realFile: string, allowedRoots: string[]): boolean 
   return false;
 }
 
+export function resolveSendFilePath(
+  inputPath: string,
+  workspacePath: string,
+  workdir?: string,
+): string | null {
+  const requested = String(inputPath || '').trim();
+  if (!requested) return null;
+  if (path.isAbsolute(requested)) return requested;
+
+  const candidates = [
+    path.resolve(workspacePath, requested),
+    ...(workdir ? [path.resolve(workdir, requested)] : []),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      fs.realpathSync(candidate);
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return candidates[0] || null;
+}
+
 export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHandle> {
   const { sessionDir, workspacePath, stagedFiles, sendFile } = opts;
 
   // Build allowed roots: workspace + workdir + /tmp
   const allowedRoots = [workspacePath];
   if (opts.workdir) allowedRoots.push(opts.workdir);
-  allowedRoots.push('/tmp');
+  allowedRoots.push('/tmp', os.tmpdir());
 
   // ── HTTP callback server ──
   const server = http.createServer((req, res) => {
@@ -122,7 +180,14 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
 
     let body = '';
     req.on('data', (chunk: Buffer) => { body += chunk; });
+
+    // Timeout for receiving the request body
+    const bodyTimer = setTimeout(() => {
+      req.destroy(new Error('request body timeout'));
+    }, 10_000);
+
     req.on('end', async () => {
+      clearTimeout(bodyTimer);
       try {
         const data = JSON.parse(body);
         const relPath = String(data.path || '').trim();
@@ -133,9 +198,9 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
         }
 
         // Resolve and validate path
-        const absPath = path.isAbsolute(relPath) ? relPath : path.resolve(workspacePath, relPath);
+        const absPath = resolveSendFilePath(relPath, workspacePath, opts.workdir);
         let realFile: string;
-        try { realFile = fs.realpathSync(absPath); } catch {
+        try { realFile = fs.realpathSync(String(absPath || '')); } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: `file not found: ${relPath}` }));
           return;
@@ -167,7 +232,12 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
 
         const caption = typeof data.caption === 'string' ? data.caption.trim().slice(0, 1024) || undefined : undefined;
 
-        const result = await sendFile(realFile, { caption, kind });
+        const result = await Promise.race([
+          sendFile(realFile, { caption, kind }),
+          new Promise<McpSendFileResult>((_, reject) =>
+            setTimeout(() => reject(new Error(`sendFile timed out after ${SEND_FILE_TIMEOUT_MS / 1000}s`)), SEND_FILE_TIMEOUT_MS),
+          ),
+        ]);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (e: any) {
@@ -176,6 +246,10 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       }
     });
   });
+
+  // Set server-level timeouts to prevent hanging connections
+  server.requestTimeout = 90_000;   // 90s max for entire request lifecycle
+  server.headersTimeout = 10_000;   // 10s to receive headers
 
   await new Promise<void>((resolve, reject) => {
     server.on('error', reject);
@@ -213,7 +287,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     configPath = path.join(sessionDir, 'mcp-config.json');
     const config = {
       mcpServers: {
-        pikiclaw: { command, args, env: envVars },
+        pikiclaw: { type: 'stdio', command, args, env: envVars },
       },
     };
     fs.mkdirSync(sessionDir, { recursive: true });

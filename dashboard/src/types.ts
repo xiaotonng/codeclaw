@@ -117,6 +117,7 @@ export interface AppState {
   runtimeWorkdir: string;
   setupState: SetupState | null;
   permissions: Record<string, PermissionStatus>;
+  hostApp?: string | null;
   platform: string;
   pid: number;
   nodeVersion?: string;

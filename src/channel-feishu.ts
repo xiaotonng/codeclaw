@@ -106,6 +106,7 @@ export interface FeishuOpts {
 }
 
 const FEISHU_CARD_MAX = 28_000; // card markdown budget (card JSON limit ~30KB)
+const FILE_MAX_BYTES = 20 * 1024 * 1024; // 20MB max for file send/receive
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 const FEISHU_WS_START_RETRY_MAX_DELAY_MS = 60_000;
 
@@ -755,7 +756,8 @@ class FeishuChannel extends Channel {
       cardId = createResp?.data?.card_id;
       if (!cardId) throw new Error('no card_id returned');
     } catch (e: any) {
-      this._log(`[streaming] CardKit create failed: ${e?.message || e}, falling back to regular card`);
+      const detail = e?.response?.data ? ` resp=${JSON.stringify(e.response.data)}` : '';
+      this._log(`[streaming] CardKit create failed: ${e?.message || e}${detail}, falling back to regular card`);
       return this.send(chatId, initialContent);
     }
 
@@ -785,6 +787,11 @@ class FeishuChannel extends Channel {
       this._log(`[streaming] send card message failed: ${e?.message || e}`);
       return this.send(chatId, initialContent);
     }
+  }
+
+  /** Check if a message is currently a streaming card (CardKit v2). */
+  isStreamingCard(messageId: string): boolean {
+    return this.cardStates.has(messageId);
   }
 
   /**
@@ -876,21 +883,23 @@ class FeishuChannel extends Channel {
     filePath: string,
     opts: { caption?: string; replyTo?: number | string; asPhoto?: boolean } = {},
   ): Promise<string | null> {
+    const stat = fs.statSync(filePath);
+    if (stat.size > FILE_MAX_BYTES) {
+      throw new Error(`file too large (${(stat.size / 1024 / 1024).toFixed(1)}MB, max ${FILE_MAX_BYTES / 1024 / 1024}MB)`);
+    }
     const content = fs.readFileSync(filePath);
     const filename = path.basename(filePath);
     const isPhoto = opts.asPhoto ?? PHOTO_EXTS.has(path.extname(filename).toLowerCase());
 
+    const replyTo = opts.replyTo ? String(opts.replyTo) : undefined;
+
     if (isPhoto) {
       try {
         const imageKey = await this.uploadImage(content);
-        const resp = await this.client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: {
-            receive_id: String(chatId),
-            msg_type: 'image',
-            content: JSON.stringify({ image_key: imageKey }),
-          },
-        });
+        const msgContent = JSON.stringify({ image_key: imageKey });
+        const resp = replyTo
+          ? await this.client.im.message.reply({ path: { message_id: replyTo }, data: { msg_type: 'image', content: msgContent } })
+          : await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: String(chatId), msg_type: 'image', content: msgContent } });
         return resp?.data?.message_id ?? null;
       } catch (err) {
         if (isRetryableUploadError(err)) throw err;
@@ -899,14 +908,10 @@ class FeishuChannel extends Channel {
     }
 
     const fileKey = await this.uploadFile(content, filename);
-    const resp = await this.client.im.message.create({
-      params: { receive_id_type: 'chat_id' },
-      data: {
-        receive_id: String(chatId),
-        msg_type: 'file',
-        content: JSON.stringify({ file_key: fileKey }),
-      },
-    });
+    const msgContent = JSON.stringify({ file_key: fileKey });
+    const resp = replyTo
+      ? await this.client.im.message.reply({ path: { message_id: replyTo }, data: { msg_type: 'file', content: msgContent } })
+      : await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: String(chatId), msg_type: 'file', content: msgContent } });
     return resp?.data?.message_id ?? null;
   }
 
@@ -926,6 +931,14 @@ class FeishuChannel extends Channel {
     fs.mkdirSync(this.workdir, { recursive: true });
 
     await (resp as any).writeFile(localPath);
+
+    // Check downloaded file size
+    const stat = fs.statSync(localPath);
+    if (stat.size > FILE_MAX_BYTES) {
+      fs.rmSync(localPath, { force: true });
+      throw new Error(`file too large (${(stat.size / 1024 / 1024).toFixed(1)}MB, max ${FILE_MAX_BYTES / 1024 / 1024}MB)`);
+    }
+
     return localPath;
   }
 

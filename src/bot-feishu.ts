@@ -536,18 +536,21 @@ export class FeishuBot extends Bot {
         }, undefined, mcpSendFile);
         await livePreview?.settle();
 
-        // End streaming mode — finalize the card before sending final reply
-        if (placeholderId) {
-          const summary = result.message.slice(0, 80).replace(/\s+/g, ' ').trim() || 'Response complete.';
-          await this.channel.endStreaming(placeholderId, summary);
-        }
-
         this.log(
           `[handleMessage] done agent=${session.agent} ok=${result.ok} elapsed=${result.elapsedS.toFixed(1)}s ` +
           `tokens=in:${fmtTokens(result.inputTokens)}/out:${fmtTokens(result.outputTokens)}`,
         );
 
-        const finalReplyIds = await this.sendFinalReply(ctx, placeholderId, session.agent, result);
+        // For streaming cards: push final content via CardKit before ending stream,
+        // then send any overflow chunks as new messages.
+        // Regular cards: edit placeholder with final content as before.
+        const wasStreaming = placeholderId && this.channel.isStreamingCard(placeholderId);
+        let finalReplyIds: string[];
+        if (wasStreaming) {
+          finalReplyIds = await this.finalizeStreamingCard(ctx, placeholderId, session.agent, result);
+        } else {
+          finalReplyIds = await this.sendFinalReply(ctx, placeholderId, session.agent, result);
+        }
         this.registerSessionMessages(ctx.chatId, finalReplyIds, session);
 
         this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
@@ -558,6 +561,10 @@ export class FeishuBot extends Bot {
         if (placeholderId) {
           try {
             await this.channel.editMessage(ctx.chatId, placeholderId, errorText);
+            // End streaming if this was a streaming card
+            if (this.channel.isStreamingCard(placeholderId)) {
+              await this.channel.endStreaming(placeholderId, 'Error');
+            }
           } catch {
             await this.channel.send(ctx.chatId, errorText).catch(() => null);
           }
@@ -573,6 +580,59 @@ export class FeishuBot extends Bot {
       this.log(`[handleMessage] queue execution failed: ${e}`);
       this.finishTask(taskId);
     });
+  }
+
+  /**
+   * Finalize a streaming card: push final content via CardKit, end streaming,
+   * then send any overflow chunks as new messages.
+   * This avoids the "schemaV2 card can not change schemaV1" error that occurs
+   * when trying to PATCH a CardKit v2 card with a v1 interactive card.
+   */
+  private async finalizeStreamingCard(
+    ctx: FeishuContext,
+    placeholderId: string,
+    agent: Agent,
+    result: StreamResult,
+  ): Promise<string[]> {
+    const rendered = buildFinalReplyRender(agent, result);
+    const messageIds: string[] = [placeholderId];
+
+    const MAX_CARD = 25_000;
+    let firstText: string;
+    let remaining = '';
+
+    if (rendered.fullText.length <= MAX_CARD) {
+      firstText = rendered.fullText;
+    } else {
+      const maxFirst = MAX_CARD - rendered.headerText.length - rendered.footerText.length;
+      if (maxFirst > 200) {
+        let cut = rendered.bodyText.lastIndexOf('\n', maxFirst);
+        if (cut < maxFirst * 0.3) cut = maxFirst;
+        firstText = `${rendered.headerText}${rendered.bodyText.slice(0, cut)}${rendered.footerText}`;
+        remaining = rendered.bodyText.slice(cut);
+      } else {
+        firstText = `${rendered.headerText}${rendered.footerText}`;
+        remaining = rendered.bodyText;
+      }
+    }
+
+    // Push final content while card is still in streaming mode (CardKit v2 API)
+    await this.channel.editMessage(ctx.chatId, placeholderId, firstText);
+
+    // Finalize the streaming card
+    const summary = result.message.slice(0, 80).replace(/\s+/g, ' ').trim() || 'Response complete.';
+    await this.channel.endStreaming(placeholderId, summary);
+
+    // Send overflow chunks as new messages
+    if (remaining.trim()) {
+      const chunks = splitText(remaining, MAX_CARD);
+      for (const chunk of chunks) {
+        const sent = await this.channel.send(ctx.chatId, chunk);
+        if (sent) messageIds.push(sent);
+      }
+    }
+
+    return messageIds;
   }
 
   private async sendFinalReply(
@@ -643,6 +703,7 @@ export class FeishuBot extends Bot {
       try {
         await this.channel.sendFile(ctx.chatId, filePath, {
           caption: opts?.caption,
+          replyTo: ctx.messageId,
           asPhoto: opts?.kind === 'photo',
         });
         return { ok: true };

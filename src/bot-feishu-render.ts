@@ -206,7 +206,7 @@ export function buildStreamPreviewMarkdown(input: StreamPreviewRenderInput): str
   const thinkDisplay = formatThinkingForDisplay(input.thinking, maxBody);
   const planDisplay = renderPlanForPreview(input.plan ?? null);
   const activityDisplay = summarizeActivityForPreview(input.activity);
-  const maxActivity = !display && !thinkDisplay && !planDisplay ? 1800 : 900;
+  const maxActivity = !display && !thinkDisplay && !planDisplay ? 2400 : 1400;
   const parts: string[] = [];
   const label = thinkLabel(input.agent);
 
@@ -221,7 +221,10 @@ export function buildStreamPreviewMarkdown(input: StreamPreviewRenderInput): str
   if (thinkDisplay && !display) {
     parts.push(`**${label}**\n${thinkDisplay}`);
   } else if (display) {
-    if (rawThinking) parts.push(`*${label} (${rawThinking.length} chars)*`);
+    if (rawThinking) {
+      const thinkSnippet = formatThinkingForDisplay(input.thinking, 600);
+      parts.push(`**${label}**\n${thinkSnippet}`);
+    }
     const preview = display.length > maxBody ? '(...truncated)\n' + display.slice(-maxBody) : display;
     parts.push(preview);
   }
@@ -257,7 +260,7 @@ export function buildFinalReplyRender(agent: Agent, result: StreamResult): Feish
     const narrative = summary.narrative.join('\n');
     if (narrative) {
       let display = narrative;
-      if (display.length > 800) display = '...\n' + display.slice(-800);
+      if (display.length > 1600) display = '...\n' + display.slice(-1600);
       activityText = `**Activity**\n${display}\n\n`;
     }
     const commandSummary = formatActivityCommandSummary(
@@ -270,7 +273,7 @@ export function buildFinalReplyRender(agent: Agent, result: StreamResult): Feish
 
   let thinkingText = '';
   if (result.thinking) {
-    thinkingText = `**${thinkLabel(agent)}**\n${formatThinkingForDisplay(result.thinking, 800)}\n\n`;
+    thinkingText = `**${thinkLabel(agent)}**\n${formatThinkingForDisplay(result.thinking, 1600)}\n\n`;
   }
 
   let statusText = '';

@@ -138,6 +138,7 @@ interface ThreadedOpts {
 }
 
 const TG_MAX = 4096;
+const FILE_MAX_BYTES = 20 * 1024 * 1024; // 20MB max for file send/receive
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
 function previewText(value: string, max = 280): string {
@@ -592,6 +593,10 @@ class TelegramChannel extends Channel {
     filePath: string,
     opts: { caption?: string; replyTo?: number | string; asPhoto?: boolean; messageThreadId?: number } = {},
   ): Promise<number | null> {
+    const stat = fs.statSync(filePath);
+    if (stat.size > FILE_MAX_BYTES) {
+      throw new Error(`file too large (${(stat.size / 1024 / 1024).toFixed(1)}MB, max ${FILE_MAX_BYTES / 1024 / 1024}MB)`);
+    }
     const content = fs.readFileSync(filePath);
     const filename = path.basename(filePath);
     const wantsPhoto = opts.asPhoto ?? PHOTO_EXTS.has(path.extname(filename).toLowerCase());
@@ -690,6 +695,14 @@ class TelegramChannel extends Channel {
       const buf = Buffer.from(await resp.arrayBuffer());
       fs.writeFileSync(localPath, buf);
     }
+
+    // Check downloaded file size
+    const stat = fs.statSync(localPath);
+    if (stat.size > FILE_MAX_BYTES) {
+      fs.rmSync(localPath, { force: true });
+      throw new Error(`file too large (${(stat.size / 1024 / 1024).toFixed(1)}MB, max ${FILE_MAX_BYTES / 1024 / 1024}MB)`);
+    }
+
     return localPath;
   }
 

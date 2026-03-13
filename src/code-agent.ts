@@ -180,7 +180,7 @@ export function numberOrNull(...values: unknown[]): number | null {
 
 export function normalizeActivityLine(text: string): string { return text.replace(/\s+/g, ' ').trim(); }
 
-export function pushRecentActivity(lines: string[], line: string, maxLines = 12) {
+export function pushRecentActivity(lines: string[], line: string, maxLines = 50) {
   const cleaned = normalizeActivityLine(line);
   if (!cleaned) return;
   if (lines[lines.length - 1] === cleaned) return;
@@ -926,10 +926,12 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
 
   // Start MCP bridge if sendFile callback is provided
   let bridge: import('./mcp-bridge.js').McpBridgeHandle | null = null;
+  let mcpLogPath: string | null = null;
   if (opts.mcpSendFile) {
     try {
       const { startMcpBridge } = await import('./mcp-bridge.js');
       const sessionDir = path.dirname(session.workspacePath);
+      mcpLogPath = path.join(sessionDir, 'mcp-server.log');
       bridge = await startMcpBridge({
         sessionDir,
         workspacePath: session.workspacePath,
@@ -940,6 +942,8 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       });
       prepared.mcpConfigPath = bridge.configPath;
       agentLog(`[mcp] bridge started on ${bridge.configPath}`);
+      agentLog(`[mcp] server log file: ${mcpLogPath}`);
+      try { agentLog(`[mcp] config content:\n${fs.readFileSync(bridge.configPath, 'utf-8')}`); } catch {};
     } catch (e: any) {
       agentLog(`[mcp] bridge start failed: ${e.message} — proceeding without MCP`);
     }
@@ -952,6 +956,10 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
   } finally {
     if (bridge) {
       await bridge.stop().catch(() => {});
+      if (mcpLogPath && fs.existsSync(mcpLogPath)) {
+        const tail = readTailLines(mcpLogPath, 16 * 1024).slice(-20).join('\n').trim();
+        if (tail) agentLog(`[mcp] server log tail:\n${tail}`);
+      }
       agentLog('[mcp] bridge stopped');
     }
   }
@@ -1096,49 +1104,8 @@ function listRelativeFiles(dirPath: string, prefix = ''): string[] {
   return files;
 }
 
-interface ProjectSkillCandidate {
-  source: 'canonical' | 'agents' | 'claude';
-  dirPath: string;
-  skillFile: string;
-  mtimeMs: number;
-}
-
-function listProjectSkillCandidates(rootDir: string, source: ProjectSkillCandidate['source']): Map<string, ProjectSkillCandidate> {
-  const entries = new Map<string, ProjectSkillCandidate>();
-  for (const name of readSortedDir(rootDir)) {
-    const dirPath = path.join(rootDir, name);
-    const skillFile = path.join(dirPath, 'SKILL.md');
-    if (!hasDir(dirPath) || !hasFile(skillFile)) continue;
-    let mtimeMs = 0;
-    try { mtimeMs = fs.statSync(skillFile).mtimeMs; } catch {}
-    entries.set(name, { source, dirPath, skillFile, mtimeMs });
-  }
-  return entries;
-}
-
 function realPathOrNull(filePath: string): string | null {
   try { return fs.realpathSync(filePath); } catch { return null; }
-}
-
-function chooseProjectSkillCandidate(candidates: ProjectSkillCandidate[]): ProjectSkillCandidate | null {
-  if (!candidates.length) return null;
-  const priority: Record<ProjectSkillCandidate['source'], number> = {
-    canonical: 0,
-    agents: 1,
-    claude: 2,
-  };
-  return [...candidates].sort((a, b) => {
-    const byPriority = priority[a.source] - priority[b.source];
-    if (byPriority !== 0) return byPriority;
-    if (b.mtimeMs !== a.mtimeMs) return b.mtimeMs - a.mtimeMs;
-    return a.dirPath.localeCompare(b.dirPath);
-  })[0] || null;
-}
-
-function replaceDir(srcDir: string, destDir: string) {
-  try { fs.rmSync(destDir, { recursive: true, force: true }); } catch {}
-  fs.mkdirSync(path.dirname(destDir), { recursive: true });
-  fs.cpSync(srcDir, destDir, { recursive: true });
 }
 
 function ensureDirSymlink(linkPath: string, targetDir: string) {
@@ -1159,42 +1126,18 @@ function ensureDirSymlink(linkPath: string, targetDir: string) {
 
 export function initializeProjectSkills(workdir: string, opts: { log?: (message: string) => void } = {}): void {
   const canonicalRoot = path.join(workdir, '.pikiclaw', 'skills');
-  const agentsRoot = path.join(workdir, '.agents', 'skills');
   const claudeRoot = path.join(workdir, '.claude', 'skills');
-  const candidatesByName = new Map<string, ProjectSkillCandidate[]>();
-  const canonicalReal = realPathOrNull(canonicalRoot);
-  const roots: Array<{ rootDir: string; source: ProjectSkillCandidate['source'] }> = [
-    { rootDir: canonicalRoot, source: 'canonical' },
-    { rootDir: agentsRoot, source: 'agents' },
-    { rootDir: claudeRoot, source: 'claude' },
-  ];
 
-  for (const { rootDir, source } of roots) {
-    if (source !== 'canonical') {
-      const rootReal = realPathOrNull(rootDir);
-      if (rootReal && canonicalReal && rootReal === canonicalReal) continue;
-    }
-    for (const [name, candidate] of listProjectSkillCandidates(rootDir, source)) {
-      candidatesByName.set(name, [...(candidatesByName.get(name) || []), candidate]);
-    }
+  // Only create .pikiclaw/skills → .claude/skills symlink.
+  // Never modify files under .claude or .agents.
+  if (hasDir(claudeRoot)) {
+    ensureDirSymlink(canonicalRoot, claudeRoot);
+    opts.log?.(`skills linked: .pikiclaw/skills → .claude/skills workdir=${workdir}`);
+  } else {
+    // Remove stale symlink before creating real directory
+    try { if (fs.lstatSync(canonicalRoot).isSymbolicLink()) fs.unlinkSync(canonicalRoot); } catch {}
+    fs.mkdirSync(canonicalRoot, { recursive: true });
   }
-
-  fs.mkdirSync(canonicalRoot, { recursive: true });
-  let merged = 0;
-
-  for (const [name, candidates] of candidatesByName) {
-    const canonicalDir = path.join(canonicalRoot, name);
-    if (hasDir(canonicalDir)) continue;
-    const chosen = chooseProjectSkillCandidate(candidates);
-    if (!chosen || chosen.source === 'canonical') continue;
-    replaceDir(chosen.dirPath, canonicalDir);
-    merged += 1;
-  }
-
-  ensureDirSymlink(agentsRoot, canonicalRoot);
-  ensureDirSymlink(claudeRoot, canonicalRoot);
-
-  if (merged) opts.log?.(`skills initialized: merged=${merged} linked=2 workdir=${workdir}`);
 }
 
 export function getProjectSkillPaths(workdir: string, skillName: string): ProjectSkillPaths {

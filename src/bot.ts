@@ -13,14 +13,14 @@ import {
   doStream, getSessions, getSessionTail, getUsage, initializeProjectSkills, listAgents, listModels, listSkills,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
-  type SkillInfo, type SkillListResult, type AgentDetectOptions,
+  type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
 } from './code-agent.js';
 import { getDriver, hasDriver, allDriverIds } from './agent-driver.js';
 import { terminateProcessTree } from './process-control.js';
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
 export type ChatId = number | string;
-export const VERSION = '0.2.35';
+export const VERSION = '0.2.36';
 const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 
@@ -29,21 +29,21 @@ const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 // ---------------------------------------------------------------------------
 
 /**
- * If `dir` has a .gitignore, ensure runtime state is ignored while `.pikiclaw/skills`
- * stays trackable as the canonical project skill location.
+ * If `dir` has a .gitignore, ensure `.pikiclaw/` is ignored so it doesn't
+ * pollute the project. Never modify .claude or .agents gitignore entries.
  */
 function ensureGitignore(dir: string) {
   try {
     const gi = path.join(dir, '.gitignore');
     if (!fs.existsSync(gi)) return;
-    const managedLines = [
+    const managedLines = ['.pikiclaw/'];
+    const legacyLines = new Set([
       '.pikiclaw/*',
       '!.pikiclaw/skills/',
       '!.pikiclaw/skills/**',
       '.claude/skills/',
       '.agents/skills/',
-    ];
-    const legacyLines = new Set(['.pikiclaw/']);
+    ]);
     const rawLines = fs.readFileSync(gi, 'utf8').split(/\r?\n/);
     const normalized = rawLines.filter(line => {
       const trimmed = line.trim();
@@ -145,25 +145,19 @@ export function thinkLabel(agent: Agent): string {
   try { return getDriver(agent).thinkLabel; } catch { return 'Thinking'; }
 }
 
-export function extractThinkingTail(text: string, maxLines = 3): string {
+export function extractThinkingTail(text: string, maxLines = 10): string {
   const normalized = text.replace(/\r\n?/g, '\n').trim();
   if (!normalized) return '';
-
-  const blocks = normalized
-    .split(/\n\s*\n+/)
-    .map(block => block.trim())
-    .filter(Boolean);
-  if (blocks.length > 1) return blocks[blocks.length - 1];
 
   const lines = normalized
     .split('\n')
     .map(line => line.trimEnd())
     .filter(line => line.trim());
-  if (lines.length > 1) return lines.slice(-Math.min(maxLines, lines.length)).join('\n').trim();
+  if (lines.length > maxLines) return lines.slice(-maxLines).join('\n').trim();
   return normalized;
 }
 
-export function formatThinkingForDisplay(text: string, maxChars = 800): string {
+export function formatThinkingForDisplay(text: string, maxChars = 1600): string {
   let display = extractThinkingTail(text);
   if (display.length > maxChars) display = '...\n' + display.slice(-maxChars);
   return display;
@@ -172,6 +166,21 @@ export function formatThinkingForDisplay(text: string, maxChars = 800): string {
 export function buildPrompt(text: string, files: string[]): string {
   if (!files.length) return text;
   return `${text || 'Please analyze this.'}\n\n[Files: ${files.map(f => path.basename(f)).join(', ')}]`;
+}
+
+function appendExtraPrompt(base: string | undefined, extra: string): string {
+  const lhs = String(base || '').trim();
+  const rhs = String(extra || '').trim();
+  if (!lhs) return rhs;
+  if (!rhs) return lhs;
+  return `${lhs}\n\n${rhs}`;
+}
+
+function buildMcpDeliveryPrompt(): string {
+  return [
+    '[Artifact Return]',
+    'This is an IM conversation, so pay attention to the IM tools.',
+  ].join('\n');
 }
 
 function configModelValue(config: Record<string, any>, agent: Agent): string {
@@ -852,6 +861,10 @@ export class Bot {
     const extraArgs: string[] = agentConfig.extraArgs || [];
     this.log(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${this.workdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
     this.log(`[runStream] ${cs.agent} config: model=${resolvedModel} extraArgs=[${extraArgs.join(' ')}]`);
+    const isFirstTurnOfSession = !cs.sessionId || isPendingSessionId(cs.sessionId);
+    const effectiveSystemPrompt = isFirstTurnOfSession
+      ? (mcpSendFile ? appendExtraPrompt(systemPrompt, buildMcpDeliveryPrompt()) : systemPrompt)
+      : undefined;
     const opts: StreamOpts = {
       agent: cs.agent, prompt, workdir: this.workdir, timeout: this.runTimeout,
       sessionId: cs.sessionId, model: null,
@@ -860,13 +873,13 @@ export class Bot {
       // codex-specific
       codexModel: cs.agent === 'codex' ? resolvedModel : this.codexModel,
       codexFullAccess: this.codexFullAccess,
-      codexDeveloperInstructions: systemPrompt || undefined,
+      codexDeveloperInstructions: effectiveSystemPrompt || undefined,
       codexExtraArgs: this.codexExtraArgs.length ? this.codexExtraArgs : undefined,
       codexPrevCumulative: cs.codexCumulative,
       // claude-specific
       claudeModel: cs.agent === 'claude' ? resolvedModel : this.claudeModel,
       claudePermissionMode: this.claudePermissionMode,
-      claudeAppendSystemPrompt: systemPrompt || undefined,
+      claudeAppendSystemPrompt: effectiveSystemPrompt || undefined,
       claudeExtraArgs: this.claudeExtraArgs.length ? this.claudeExtraArgs : undefined,
       // gemini-specific
       geminiModel: cs.agent === 'gemini' ? resolvedModel : (this.agentConfigs.gemini?.model || ''),

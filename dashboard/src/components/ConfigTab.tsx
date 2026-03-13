@@ -118,10 +118,12 @@ function SettingRow({
 
 function PermissionGuideModal({
   guide,
+  hostApp,
   onClose,
   onRefresh,
 }: {
   guide: PermissionGuideState | null;
+  hostApp?: string | null;
   onClose: () => void;
   onRefresh: () => void | Promise<void>;
 }) {
@@ -142,11 +144,18 @@ function PermissionGuideModal({
     fullDiskAccess: 'perm.fullDiskAccess',
   };
 
+  const hostAppText = (key: string, fallbackKey: string) =>
+    hostApp ? t(key).replace('{hostApp}', hostApp) : t(fallbackKey);
+
+  const toggleOrGrant = guide.permission === 'fullDiskAccess'
+    ? hostAppText('perm.guideToggleHostApp', 'perm.guideToggleHostAppFallback')
+    : hostAppText('perm.guideGrantHostApp', 'perm.guideGrantHostAppFallback');
+
   const steps = [
     ...(guide.action === 'prompted' ? [t('perm.guideAllowPrompt')] : []),
     `${t('perm.guideOpenPathPrefix')}${t(pathKey[guide.permission])}`,
-    t(guide.permission === 'fullDiskAccess' ? 'perm.guideToggleHostApp' : 'perm.guideGrantHostApp'),
-    ...(guide.permission !== 'accessibility' ? [t('perm.guideMayNeedRestart')] : []),
+    toggleOrGrant,
+    ...(guide.permission !== 'accessibility' ? [hostAppText('perm.guideMayNeedRestart', 'perm.guideMayNeedRestartFallback')] : []),
     t('perm.guideBackRefresh'),
   ];
 
@@ -446,6 +455,7 @@ function SystemPermissions() {
       )}
       <PermissionGuideModal
         guide={guide}
+        hostApp={state?.hostApp}
         onClose={() => setGuide(null)}
         onRefresh={handleRefreshPermissionState}
       />

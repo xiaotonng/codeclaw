@@ -387,13 +387,13 @@ describe('TelegramBot.handleMessage streaming', () => {
       expect(previews).not.toContain('Ran:');
       expect(previews).not.toContain('npm run build');
       expect(previews).not.toContain('pwd');
-      expect(previews).not.toContain('先读代码路径');
+      expect(previews).toContain('先读代码路径');
       expect(vi.mocked(channel.sendTyping).mock.calls.length).toBeGreaterThanOrEqual(3);
 
       const final = edits[edits.length - 1];
       expect(final.text).toContain('Final answer.');
       expect(final.text).toContain('最后确认只需要展示 reasoning 的尾段就够了');
-      expect(final.text).not.toContain('先读代码路径');
+      expect(final.text).toContain('先读代码路径');
       expect(final.opts?.parseMode).toBe('HTML');
     } finally {
       vi.useRealTimers();

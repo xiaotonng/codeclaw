@@ -13,25 +13,66 @@
  *   MCP_STAGED_FILES   — JSON array of staged file relative paths
  *   MCP_CALLBACK_URL   — HTTP URL for the pikiclaw callback server
  *
- * Tools:
- *   pikiclaw_get_session_info    — returns workspace path and staged files
- *   pikiclaw_list_workspace_files — lists files in the workspace directory
- *   pikiclaw_send_file           — sends a workspace file back to the IM chat
+ * Tools are defined in src/tools/ — each module exports definitions + handlers.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import http from 'node:http';
+import type { McpToolModule, ToolContext } from './tools/types.js';
+import { workspaceTools } from './tools/workspace.js';
+import { captureTools } from './tools/capture.js';
+import { guiTools } from './tools/gui.js';
+
+// ---------------------------------------------------------------------------
+// Logging — writes to stderr + file so it doesn't interfere with stdio MCP transport
+// ---------------------------------------------------------------------------
+
+const _logFile = (() => {
+  try {
+    const ws = process.env.MCP_WORKSPACE_PATH || '';
+    if (!ws) return null;
+    const dir = path.dirname(ws);
+    const fp = path.join(dir, 'mcp-server.log');
+    return fs.openSync(fp, 'a');
+  } catch { return null; }
+})();
+
+function log(msg: string) {
+  const ts = new Date().toTimeString().slice(0, 8);
+  const line = `[mcp-server ${ts}] ${msg}\n`;
+  process.stderr.write(line);
+  if (_logFile != null) try { fs.writeSync(_logFile, line); } catch {}
+}
 
 // ---------------------------------------------------------------------------
 // Context from environment
 // ---------------------------------------------------------------------------
 
-const WORKSPACE = process.env.MCP_WORKSPACE_PATH || '';
-const STAGED_FILES: string[] = (() => {
-  try { return JSON.parse(process.env.MCP_STAGED_FILES || '[]'); } catch { return []; }
-})();
-const CALLBACK_URL = process.env.MCP_CALLBACK_URL || '';
+const ctx: ToolContext = {
+  workspace: process.env.MCP_WORKSPACE_PATH || '',
+  stagedFiles: (() => {
+    try { return JSON.parse(process.env.MCP_STAGED_FILES || '[]'); } catch { return []; }
+  })(),
+  callbackUrl: process.env.MCP_CALLBACK_URL || '',
+};
+
+log(`started workspace=${ctx.workspace} stagedFiles=${ctx.stagedFiles.length} callbackUrl=${ctx.callbackUrl ? 'set' : 'MISSING'}`);
+
+// ---------------------------------------------------------------------------
+// Tool registry — collect all tool modules
+// ---------------------------------------------------------------------------
+
+const TOOL_MODULES: McpToolModule[] = [workspaceTools, captureTools, guiTools];
+
+const ALL_TOOLS = TOOL_MODULES.flatMap(m => m.tools);
+
+/** Lookup: tool name → module that handles it. */
+const TOOL_HANDLERS = new Map<string, McpToolModule>();
+for (const mod of TOOL_MODULES) {
+  for (const t of mod.tools) {
+    TOOL_HANDLERS.set(t.name, mod);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // MCP protocol — auto-detect transport format
@@ -57,17 +98,12 @@ function respondError(id: unknown, code: number, message: string) {
   send({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
-function toolResult(text: string, isError = false) {
-  return { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) };
-}
-
 // ---------------------------------------------------------------------------
 // Stdio reader — auto-detecting Content-Length framed vs NDJSON
 // ---------------------------------------------------------------------------
 
 let buffer = '';
 
-/** Process buffer in Content-Length framed mode. */
 function processFramed() {
   while (true) {
     const headerEnd = buffer.indexOf('\r\n\r\n');
@@ -84,7 +120,6 @@ function processFramed() {
   }
 }
 
-/** Process buffer in newline-delimited JSON mode. */
 function processNdjson() {
   while (true) {
     const newlineIdx = buffer.indexOf('\n');
@@ -97,7 +132,6 @@ function processNdjson() {
 }
 
 function processBuffer() {
-  // Auto-detect transport from the first non-whitespace byte
   if (transport === null) {
     const trimmed = buffer.trimStart();
     if (!trimmed) return;
@@ -115,163 +149,6 @@ process.stdin.on('data', (chunk: string) => {
 process.stdin.on('end', () => process.exit(0));
 
 // ---------------------------------------------------------------------------
-// Tool definitions
-// ---------------------------------------------------------------------------
-
-const TOOLS = [
-  {
-    name: 'pikiclaw_get_session_info',
-    description: 'Get the current pikiclaw session workspace path and list of user-uploaded files.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {},
-    },
-  },
-  {
-    name: 'pikiclaw_list_workspace_files',
-    description: 'List files and directories in the pikiclaw session workspace.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        subdirectory: {
-          type: 'string',
-          description: 'Subdirectory relative to workspace root. Omit to list root.',
-        },
-      },
-    },
-  },
-  {
-    name: 'pikiclaw_send_file',
-    description: [
-      'Send a file back to the user via their IM chat.',
-      'IMPORTANT: You MUST call this tool to send any file (image, document, etc.) to the user. Do NOT just print the file path — the user cannot access local files.',
-      'Accepts absolute paths or paths relative to the session workspace.',
-      'Allowed locations: session workspace, agent workdir, and /tmp.',
-      'For images (png/jpg/jpeg/webp), set kind to "photo" for inline display.',
-    ].join(' '),
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        path: {
-          type: 'string',
-          description: 'File path (absolute, or relative to session workspace).',
-        },
-        caption: {
-          type: 'string',
-          description: 'Optional caption or description for the file.',
-        },
-        kind: {
-          type: 'string',
-          enum: ['photo', 'document'],
-          description: 'File display type. Auto-detected from extension if omitted.',
-        },
-      },
-      required: ['path'],
-    },
-  },
-];
-
-// ---------------------------------------------------------------------------
-// Tool handlers
-// ---------------------------------------------------------------------------
-
-function handleGetSessionInfo(id: unknown) {
-  respond(id, toolResult(JSON.stringify({
-    workspacePath: WORKSPACE,
-    stagedFiles: STAGED_FILES,
-  }, null, 2)));
-}
-
-function handleListWorkspaceFiles(id: unknown, args: Record<string, unknown>) {
-  const subdir = typeof args?.subdirectory === 'string' ? args.subdirectory : '';
-  const dir = subdir ? path.resolve(WORKSPACE, subdir) : WORKSPACE;
-
-  // Security: ensure we stay within workspace
-  const realWorkspace = safeRealpath(WORKSPACE);
-  const realDir = safeRealpath(dir);
-  if (!realWorkspace || !realDir || !realDir.startsWith(realWorkspace)) {
-    respond(id, toolResult('Error: path is outside the workspace', true));
-    return;
-  }
-
-  try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    const files = entries.map(e => {
-      const entry: Record<string, unknown> = { name: e.name, type: e.isDirectory() ? 'directory' : 'file' };
-      if (e.isFile()) {
-        try { entry.size = fs.statSync(path.join(dir, e.name)).size; } catch {}
-      }
-      return entry;
-    });
-    respond(id, toolResult(JSON.stringify(files, null, 2)));
-  } catch (e: any) {
-    respond(id, toolResult(`Error listing directory: ${e.message}`, true));
-  }
-}
-
-async function handleSendFile(id: unknown, args: Record<string, unknown>) {
-  const filePath = typeof args?.path === 'string' ? args.path.trim() : '';
-  if (!filePath) {
-    respond(id, toolResult('Error: "path" is required', true));
-    return;
-  }
-  if (!CALLBACK_URL) {
-    respond(id, toolResult('Error: MCP callback URL is not configured', true));
-    return;
-  }
-
-  try {
-    const result = await callbackSendFile(filePath, {
-      caption: typeof args?.caption === 'string' ? args.caption : undefined,
-      kind: typeof args?.kind === 'string' ? args.kind : undefined,
-    });
-    if (result.ok) {
-      respond(id, toolResult(`File sent successfully: ${filePath}`));
-    } else {
-      respond(id, toolResult(`Failed to send file: ${result.error || 'unknown error'}`, true));
-    }
-  } catch (e: any) {
-    respond(id, toolResult(`Error sending file: ${e.message}`, true));
-  }
-}
-
-// ---------------------------------------------------------------------------
-// HTTP callback to pikiclaw main process
-// ---------------------------------------------------------------------------
-
-function callbackSendFile(
-  filePath: string,
-  opts: { caption?: string; kind?: string },
-): Promise<{ ok: boolean; error?: string }> {
-  const body = JSON.stringify({ path: filePath, ...opts });
-  const url = new URL('/send-file', CALLBACK_URL);
-
-  return new Promise((resolve, reject) => {
-    const req = http.request(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-    }, res => {
-      let data = '';
-      res.on('data', (chunk: Buffer) => { data += chunk; });
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); } catch { resolve({ ok: false, error: 'invalid callback response' }); }
-      });
-    });
-    req.on('error', e => reject(e));
-    req.write(body);
-    req.end();
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function safeRealpath(p: string): string | null {
-  try { return fs.realpathSync(p); } catch { return null; }
-}
-
-// ---------------------------------------------------------------------------
 // Message dispatcher
 // ---------------------------------------------------------------------------
 
@@ -280,6 +157,7 @@ function handleMessage(msg: any) {
 
   switch (method) {
     case 'initialize':
+      log(`initialize protocolVersion=${params?.protocolVersion || '?'}`);
       respond(id, {
         protocolVersion: params?.protocolVersion || '2024-11-05',
         capabilities: { tools: {} },
@@ -288,34 +166,45 @@ function handleMessage(msg: any) {
       break;
 
     case 'notifications/initialized':
-      // Notification — no response needed
+      log('initialized notification received');
       break;
 
     case 'tools/list':
-      respond(id, { tools: TOOLS });
+      log(`tools/list → ${ALL_TOOLS.length} tools: ${ALL_TOOLS.map(t => t.name).join(', ')}`);
+      respond(id, { tools: ALL_TOOLS });
       break;
 
     case 'tools/call': {
       const name = params?.name;
       const args = params?.arguments || {};
-      switch (name) {
-        case 'pikiclaw_get_session_info':
-          handleGetSessionInfo(id);
-          break;
-        case 'pikiclaw_list_workspace_files':
-          handleListWorkspaceFiles(id, args);
-          break;
-        case 'pikiclaw_send_file':
-          void handleSendFile(id, args);
-          break;
-        default:
-          respondError(id, -32601, `Unknown tool: ${name}`);
+      const mod = TOOL_HANDLERS.get(name);
+      if (!mod) {
+        log(`tools/call UNKNOWN tool="${name}"`);
+        respondError(id, -32601, `Unknown tool: ${name}`);
+        break;
       }
+      const argsSummary = JSON.stringify(args).slice(0, 200);
+      log(`tools/call tool="${name}" args=${argsSummary}`);
+      const callStart = Date.now();
+      void Promise.resolve(mod.handle(name, args, ctx)).then(
+        result => {
+          const elapsed = Date.now() - callStart;
+          const text = result.content?.[0]?.text || '';
+          log(`tools/call tool="${name}" ${result.isError ? 'ERROR' : 'OK'} ${elapsed}ms result=${text.slice(0, 150)}`);
+          respond(id, result);
+        },
+        err => {
+          const elapsed = Date.now() - callStart;
+          log(`tools/call tool="${name}" EXCEPTION ${elapsed}ms error=${err?.message || err}`);
+          respond(id, { content: [{ type: 'text', text: `Tool error: ${err?.message || err}` }], isError: true });
+        },
+      );
       break;
     }
 
     default:
       if (id !== undefined) {
+        log(`unknown method="${method}"`);
         respondError(id, -32601, `Method not found: ${method}`);
       }
   }

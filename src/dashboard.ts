@@ -265,6 +265,66 @@ function openPermissionSettings(permission: DashboardPermissionKey): boolean {
   }
 }
 
+/** Walk the process tree upward to find the host terminal / IDE that launched pikiclaw. Works on macOS and Linux. */
+function detectHostTerminalApp(): string | null {
+  if (process.platform !== 'darwin' && process.platform !== 'linux') return null;
+  try {
+    // Patterns to match in the comm/exe name (case-insensitive on Linux where names vary)
+    // macOS: Terminal, iTerm2, Warp; Linux: gnome-terminal, konsole, xfce4-terminal, xterm, tilix, foot, sakura, terminology
+    // Cross-platform: Alacritty, kitty, WezTerm, Hyper, VS Code, Cursor, Windsurf
+    const patterns = [
+      'Terminal', 'iTerm', 'Warp',
+      'Alacritty', 'alacritty', 'kitty', 'WezTerm', 'wezterm', 'Hyper',
+      'Code', 'Cursor', 'Windsurf',
+      'konsole', 'xfce4-terminal', 'xterm', 'tilix', 'foot', 'sakura', 'terminology', 'tmux', 'screen',
+    ];
+    const caseList = patterns.map(p => `*${p}*`).join('|');
+    const output = execSync(
+      `pid=${process.pid} ; while [ "$pid" != "1" ] && [ -n "$pid" ]; do pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' '); comm=$(ps -o comm= -p "$pid" 2>/dev/null); case "$comm" in ${caseList}) echo "$comm"; exit 0;; esac; done`,
+      { encoding: 'utf8', timeout: 3_000, shell: '/bin/sh' },
+    ).trim();
+    if (!output) return null;
+    const base = path.basename(output);
+    // Map comm name → human-readable display name
+    const nameMap: [string, string][] = [
+      // macOS
+      ['iTerm', 'iTerm2'],
+      ['Code Helper', 'VS Code'],
+      ['Cursor Helper', 'Cursor'],
+      ['Windsurf Helper', 'Windsurf'],
+      // Cross-platform IDE wrappers (Linux uses "code" binary directly)
+      ['code', 'VS Code'],
+      ['cursor', 'Cursor'],
+      ['windsurf', 'Windsurf'],
+      // Terminal emulators
+      ['gnome-terminal', 'GNOME Terminal'],
+      ['xfce4-terminal', 'Xfce Terminal'],
+      ['Terminal', 'Terminal'],
+      ['Warp', 'Warp'],
+      ['Alacritty', 'Alacritty'],
+      ['alacritty', 'Alacritty'],
+      ['kitty', 'kitty'],
+      ['WezTerm', 'WezTerm'],
+      ['wezterm', 'WezTerm'],
+      ['Hyper', 'Hyper'],
+      ['konsole', 'Konsole'],
+      ['xterm', 'xterm'],
+      ['tilix', 'Tilix'],
+      ['foot', 'foot'],
+      ['sakura', 'Sakura'],
+      ['terminology', 'Terminology'],
+      ['tmux', 'tmux'],
+      ['screen', 'screen'],
+    ];
+    for (const [key, name] of nameMap) {
+      if (base.includes(key)) return name;
+    }
+    return base;
+  } catch {
+    return null;
+  }
+}
+
 function checkPermissions(): Record<string, PermissionStatus> {
   const r: Record<string, PermissionStatus> = {};
   if (process.platform !== 'darwin') {
@@ -631,6 +691,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
           runtimeWorkdir: getRuntimeWorkdir(config),
           setupState,
           permissions,
+          hostApp: detectHostTerminalApp(),
           platform: process.platform,
           pid: process.pid,
           nodeVersion: process.versions.node,
@@ -731,7 +792,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
 
       // Permissions
       if (url.pathname === '/api/permissions' && method === 'GET') {
-        return json(res, checkPermissions());
+        return json(res, { ...checkPermissions(), hostApp: detectHostTerminalApp() });
       }
 
       // Save config (to ~/.pikiclaw/setting.json)
