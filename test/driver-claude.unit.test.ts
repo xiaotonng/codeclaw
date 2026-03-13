@@ -22,7 +22,7 @@ describe('Claude usage resolution', () => {
   beforeEach(() => {
     vi.resetModules();
     execSyncMock.mockReset();
-    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-claude-usage-'));
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-claude-usage-'));
     process.env.HOME = homeDir;
   });
 

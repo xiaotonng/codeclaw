@@ -68,11 +68,11 @@ describe('bot-telegram render helpers', () => {
   });
 
   it('builds compact selection copy and middle-truncated labels for mobile layouts', () => {
-    const shortened = truncateMiddle('/Users/xiaoxiao/Desktop/work/codeclaw/project', 24);
+    const shortened = truncateMiddle('/Users/xiaoxiao/Desktop/work/pikiclaw/project', 24);
     expect(shortened).toContain('...');
     expect(shortened.startsWith('/Users')).toBe(true);
     expect(shortened.endsWith('project')).toBe(true);
-    expect(compactCode('/Users/xiaoxiao/Desktop/work/codeclaw/project', 24)).toContain('<code>');
+    expect(compactCode('/Users/xiaoxiao/Desktop/work/pikiclaw/project', 24)).toContain('<code>');
     expect(buildCompactSelectionTitle('Agents', 'codex')).toBe('<b>Agents</b> · <code>codex</code>');
     expect(buildCompactSelectionNotice('Model', 'claude-sonnet-4-6[1m]', 'claude · session reset')).toContain('<b>Model</b>');
   });
@@ -83,7 +83,7 @@ describe('bot-telegram render helpers', () => {
       'Updated 4 files',
       'The version bump is in place: 0.2.25 in runtime, package metadata, and the install skill examples. Next I am running the build and link verification commands.',
       'The build has started cleanly. I am waiting for TypeScript to finish before linking and version verification.',
-      'The skill build/install verification passed: node dist/cli.js --version reports codeclaw 0.2.25. I am checking the exact repo delta and the staged release workflow before cutting the tag.',
+      'The skill build/install verification passed: node dist/cli.js --version reports pikiclaw 0.2.25. I am checking the exact repo delta and the staged release workflow before cutting the tag.',
       'The worktree is large enough that building alone is a weak release gate. I am running the test suite before I cut the tag; if anything is red, I will stop and inspect the failure instead of pushing through.',
       'The release job succeeded on GitHub, and the Publish to npm step is explicitly green. I am replacing the auto-generated GitHub release text with a concise changelog and then I will wrap up.',
       'commands: 47 done',

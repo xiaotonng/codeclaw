@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 
 export const PROCESS_RESTART_EXIT_CODE = 75;
-export const PROCESS_RESTART_STATE_FILE_ENV = 'CODECLAW_RESTART_STATE_FILE';
+export const PROCESS_RESTART_STATE_FILE_ENV = 'PIKICLAW_RESTART_STATE_FILE';
 
 interface RestartStateFile {
   version: 1;
@@ -79,10 +79,10 @@ export function getDefaultRestartCmd(): string {
     const parts = isTsxLoader ? ['tsx', argv1] : process.argv.slice(0, 2);
     return parts.map(arg => arg.includes(' ') ? `"${arg}"` : arg).join(' ');
   }
-  return 'npx --yes codeclaw@latest';
+  return 'npx --yes pikiclaw@latest';
 }
 
-export function buildRestartCommand(argv: string[], restartCmd = process.env.CODECLAW_RESTART_CMD || getDefaultRestartCmd()) {
+export function buildRestartCommand(argv: string[], restartCmd = process.env.PIKICLAW_RESTART_CMD || getDefaultRestartCmd()) {
   const [bin, ...rawArgs] = shellSplit(restartCmd);
   return {
     bin,
@@ -115,7 +115,7 @@ export function formatActiveTaskRestartError(activeTasks: number): string {
 }
 
 export function createRestartStateFilePath(ownerPid = process.pid): string {
-  const dir = path.join(os.tmpdir(), 'codeclaw');
+  const dir = path.join(os.tmpdir(), 'pikiclaw');
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, `restart-${ownerPid}.json`);
 }
@@ -192,7 +192,7 @@ function buildRestartEnvForSpawn(extraEnv: Record<string, string>) {
     ...extraEnv,
     npm_config_yes: process.env.npm_config_yes || 'true',
   } as Record<string, string>;
-  delete env.CODECLAW_DAEMON_CHILD;
+  delete env.PIKICLAW_DAEMON_CHILD;
   delete env[PROCESS_RESTART_STATE_FILE_ENV];
   return env;
 }
@@ -235,7 +235,7 @@ export async function requestProcessRestart(opts: ProcessRestartOptions = {}): P
     const extraEnv = collectRestartEnv();
     await prepareRuntimesForRestart(log);
 
-    if (process.env.CODECLAW_DAEMON_CHILD === '1') {
+    if (process.env.PIKICLAW_DAEMON_CHILD === '1') {
       const restartStateFile = process.env[PROCESS_RESTART_STATE_FILE_ENV];
       if (restartStateFile) {
         if (Object.keys(extraEnv).length) writeRestartStateFile(restartStateFile, extraEnv);

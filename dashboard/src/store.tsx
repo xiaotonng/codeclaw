@@ -37,7 +37,7 @@ let _toastId = 0;
 
 function getInitialTheme(): Theme {
   try {
-    const stored = localStorage.getItem('codeclaw-theme');
+    const stored = localStorage.getItem('pikiclaw-theme');
     if (stored === 'light' || stored === 'dark') return stored;
   } catch {}
   return 'dark';
@@ -45,7 +45,7 @@ function getInitialTheme(): Theme {
 
 function getInitialLocale(): Locale {
   try {
-    const stored = localStorage.getItem('codeclaw-locale');
+    const stored = localStorage.getItem('pikiclaw-locale');
     if (stored === 'en' || stored === 'zh-CN') return stored;
   } catch {}
   return 'zh-CN';
@@ -63,12 +63,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const setTheme = useCallback((t: Theme) => {
     setThemeState(t);
     document.documentElement.dataset.theme = t;
-    try { localStorage.setItem('codeclaw-theme', t); } catch {}
+    try { localStorage.setItem('pikiclaw-theme', t); } catch {}
   }, []);
 
   const setLocale = useCallback((l: Locale) => {
     setLocaleState(l);
-    try { localStorage.setItem('codeclaw-locale', l); } catch {}
+    try { localStorage.setItem('pikiclaw-locale', l); } catch {}
   }, []);
 
   // Apply theme on mount

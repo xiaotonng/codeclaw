@@ -1,6 +1,6 @@
-# Codeclaw
+# Pikiclaw
 
-IM-driven bridge for AI coding agents (Claude Code, Codex CLI). Users send messages via IM, codeclaw streams them to a local agent and returns results.
+IM-driven bridge for AI coding agents (Claude Code, Codex CLI). Users send messages via IM, pikiclaw streams them to a local agent and returns results.
 
 ## Project Structure
 
@@ -22,7 +22,7 @@ src/
   bot-telegram-live-preview.ts  LivePreview controller (channel-agnostic with renderer injection)
   bot-telegram-directory.ts     Telegram workdir browser UI
 
-  user-config.ts                User config persistence (~/.config/codeclaw/config.json)
+  user-config.ts                User config persistence (~/.config/pikiclaw/config.json)
   onboarding.ts                 Setup checks and guide
   setup-wizard.ts               Interactive setup wizard
   run.ts                        Standalone CLI commands
@@ -116,13 +116,13 @@ See [INTEGRATION.md](INTEGRATION.md) for detailed examples.
 npm run build          # TypeScript compile
 npm test               # Run unit tests
 npx vitest run <file>  # Run specific test
-npx codeclaw --doctor  # Check setup
-npx codeclaw --setup   # Interactive setup wizard
+npx pikiclaw --doctor  # Check setup
+npx pikiclaw --setup   # Interactive setup wizard
 ```
 
 ## Environment Variables
 
-**Channel-agnostic:** `DEFAULT_AGENT`, `CODECLAW_WORKDIR`, `CODECLAW_TIMEOUT`, `CODECLAW_ALLOWED_IDS`
+**Channel-agnostic:** `DEFAULT_AGENT`, `PIKICLAW_WORKDIR`, `PIKICLAW_TIMEOUT`, `PIKICLAW_ALLOWED_IDS`
 **Telegram:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`
 **Claude agent:** `CLAUDE_MODEL`, `CLAUDE_PERMISSION_MODE`, `CLAUDE_EXTRA_ARGS`
 **Codex agent:** `CODEX_MODEL`, `CODEX_REASONING_EFFORT`, `CODEX_FULL_ACCESS`, `CODEX_EXTRA_ARGS`

@@ -19,7 +19,7 @@ import {
   buildStreamPreviewMeta, pushRecentActivity, normalizeActivityLine,
   firstNonEmptyLine, shortValue, numberOrNull,
   IMAGE_EXTS,
-  listCodeclawSessions, findCodeclawSession, isPendingSessionId,
+  listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   stripInjectedPrompts, computeContext, readTailLines,
   roundPercent, toIsoFromEpochSeconds, labelFromWindowMinutes,
   usageWindowFromRateLimit, parseJsonTail, emptyUsage,
@@ -93,7 +93,7 @@ export class CodexAppServer {
       proc.on('error', () => { clearTimeout(timer); this.ready = false; resolve(false); });
       proc.on('close', () => { this.ready = false; this.proc = null; });
 
-      this.call('initialize', { clientInfo: { name: 'codeclaw', version: '0.2.0' } })
+      this.call('initialize', { clientInfo: { name: 'pikiclaw', version: '0.2.0' } })
         .then(resp => {
           clearTimeout(timer);
           if (resp.error) { agentLog(`[codex-rpc] init error: ${resp.error.message}`); resolve(false); return; }
@@ -740,8 +740,8 @@ function getCodexSessionTailFromRollout(opts: SessionTailOpts): SessionTailResul
 
 function getCodexSessions(workdir: string, limit?: number): SessionListResult {
   const resolvedWorkdir = path.resolve(workdir);
-  // Merge codeclaw-tracked sessions with native Codex sessions
-  const codeclawSessions = listCodeclawSessions(resolvedWorkdir, 'codex').map(record => ({
+  // Merge pikiclaw-tracked sessions with native Codex sessions
+  const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'codex').map(record => ({
     sessionId: record.sessionId,
     agent: 'codex' as const,
     workdir: record.workdir,
@@ -753,11 +753,11 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
   }));
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);
 
-  // Merge: codeclaw records take precedence
+  // Merge: pikiclaw records take precedence
   // Filter out pending sessions — they haven't been confirmed by the agent yet
   const seen = new Set<string>();
   const merged: SessionInfo[] = [];
-  for (const s of codeclawSessions) {
+  for (const s of pikiclawSessions) {
     if (isPendingSessionId(s.sessionId)) continue;
     if (s.sessionId) seen.add(s.sessionId);
     merged.push(s);
@@ -771,7 +771,7 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
   const sessionsDir = path.join(process.env.HOME || '', '.codex', 'sessions');
   agentLog(
     `[sessions:codex] workdir=${resolvedWorkdir} sessionsDir=${sessionsDir} sessionsDirExists=${fs.existsSync(sessionsDir)} ` +
-    `codeclaw=${codeclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
+    `pikiclaw=${pikiclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
   );
   return { ok: true, sessions, error: null };
 }

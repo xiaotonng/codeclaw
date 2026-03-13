@@ -38,8 +38,8 @@ interface SyncUserConfigOptions {
 type UserConfigChangeListener = (config: Partial<UserConfig>, changedKeys: string[]) => void;
 
 const MANAGED_ENV_KEYS = [
-  'CODECLAW_CHANNEL',
-  'CODECLAW_WORKDIR',
+  'PIKICLAW_CHANNEL',
+  'PIKICLAW_WORKDIR',
   'DEFAULT_AGENT',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_ALLOWED_CHAT_IDS',
@@ -59,13 +59,13 @@ function expandHomeDir(value: string): string {
 }
 
 /**
- * Single canonical config path: ~/.codeclaw/setting.json
+ * Single canonical config path: ~/.pikiclaw/setting.json
  * Both CLI and dashboard read/write this file exclusively.
  */
 export function getUserConfigPath(): string {
-  const custom = (process.env.CODECLAW_CONFIG || '').trim();
+  const custom = (process.env.PIKICLAW_CONFIG || '').trim();
   if (custom) return path.resolve(custom);
-  return path.join(os.homedir(), '.codeclaw', 'setting.json');
+  return path.join(os.homedir(), '.pikiclaw', 'setting.json');
 }
 
 function loadJsonFile(filePath: string): Partial<UserConfig> {
@@ -121,7 +121,7 @@ export function resolveUserWorkdir(opts: {
   const raw = String(
     opts.workdir
     || opts.config?.workdir
-    || process.env.CODECLAW_WORKDIR
+    || process.env.PIKICLAW_WORKDIR
     || opts.cwd
     || process.cwd(),
   ).trim();
@@ -131,8 +131,8 @@ export function resolveUserWorkdir(opts: {
 function buildManagedEnv(config: Partial<UserConfig>): Record<(typeof MANAGED_ENV_KEYS)[number], string> {
   const configuredWorkdir = config.workdir || '';
   return {
-    CODECLAW_CHANNEL: String(config.channel || '').trim(),
-    CODECLAW_WORKDIR: configuredWorkdir ? resolveUserWorkdir({ workdir: configuredWorkdir }) : '',
+    PIKICLAW_CHANNEL: String(config.channel || '').trim(),
+    PIKICLAW_WORKDIR: configuredWorkdir ? resolveUserWorkdir({ workdir: configuredWorkdir }) : '',
     DEFAULT_AGENT: String(config.defaultAgent || '').trim(),
     TELEGRAM_BOT_TOKEN: String(config.telegramBotToken || '').trim(),
     TELEGRAM_ALLOWED_CHAT_IDS: String(config.telegramAllowedChatIds || '').trim(),

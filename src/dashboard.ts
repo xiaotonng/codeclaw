@@ -1,7 +1,7 @@
 /**
- * dashboard.ts — Web dashboard server for codeclaw configuration and monitoring.
+ * dashboard.ts — Web dashboard server for pikiclaw configuration and monitoring.
  *
- * All config is read from / written to ~/.codeclaw/setting.json (no env vars).
+ * All config is read from / written to ~/.pikiclaw/setting.json (no env vars).
  */
 
 import http from 'node:http';
@@ -232,7 +232,7 @@ function requestAccessibilityPermission(): boolean {
 }
 
 function checkScreenRecordingPermission(): boolean | null {
-  const screenshotPath = path.join(os.tmpdir(), `.codeclaw_perm_test_${process.pid}_${Date.now()}.png`);
+  const screenshotPath = path.join(os.tmpdir(), `.pikiclaw_perm_test_${process.pid}_${Date.now()}.png`);
   try {
     execFileSync('screencapture', ['-x', screenshotPath], { stdio: 'ignore', timeout: 5_000 });
     return true;
@@ -734,7 +734,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
         return json(res, checkPermissions());
       }
 
-      // Save config (to ~/.codeclaw/setting.json)
+      // Save config (to ~/.pikiclaw/setting.json)
       if (url.pathname === '/api/config' && method === 'POST') {
         const body = await parseJsonBody(req);
         const merged = { ...loadUserConfig(), ...body };
@@ -914,7 +914,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
       const actualPort = typeof addr === 'object' && addr ? addr.port : preferredPort;
       const dashUrl = `http://localhost:${actualPort}`;
       const ts = new Date().toTimeString().slice(0, 8);
-      process.stdout.write(`[codeclaw ${ts}] dashboard: ${dashUrl}\n`);
+      process.stdout.write(`[pikiclaw ${ts}] dashboard: ${dashUrl}\n`);
       if (opts.open !== false) {
         const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
         exec(`${cmd} ${dashUrl}`);

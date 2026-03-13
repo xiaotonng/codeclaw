@@ -24,9 +24,9 @@ beforeEach(() => {
   spawnMock.mockReset();
   spawnMock.mockReturnValue({ pid: 4321, unref: vi.fn() } as any);
   process.env = { ...ORIGINAL_ENV };
-  delete process.env.CODECLAW_DAEMON_CHILD;
-  delete process.env.CODECLAW_RESTART_STATE_FILE;
-  delete process.env.CODECLAW_RESTART_CMD;
+  delete process.env.PIKICLAW_DAEMON_CHILD;
+  delete process.env.PIKICLAW_RESTART_STATE_FILE;
+  delete process.env.PIKICLAW_RESTART_CMD;
   delete process.env.TELEGRAM_ALLOWED_CHAT_IDS;
   delete process.env.FEISHU_ALLOWED_CHAT_IDS;
   delete process.env.npm_config_yes;
@@ -65,10 +65,10 @@ describe('process-control restart flow', () => {
 
   it('hands restart requests from daemon children back to the supervisor via state file + exit code', async () => {
     const mod = await loadModule();
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-restart-'));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-restart-'));
     const stateFile = path.join(tmpDir, 'restart.json');
-    process.env.CODECLAW_DAEMON_CHILD = '1';
-    process.env.CODECLAW_RESTART_STATE_FILE = stateFile;
+    process.env.PIKICLAW_DAEMON_CHILD = '1';
+    process.env.PIKICLAW_RESTART_STATE_FILE = stateFile;
 
     const cleanupSpy = vi.fn();
     const unregister = mod.registerProcessRuntime({
@@ -134,8 +134,8 @@ describe('process-control restart flow', () => {
         }),
       );
       const env = spawnMock.mock.calls[0]?.[2]?.env ?? {};
-      expect(env.CODECLAW_DAEMON_CHILD).toBeUndefined();
-      expect(env.CODECLAW_RESTART_STATE_FILE).toBeUndefined();
+      expect(env.PIKICLAW_DAEMON_CHILD).toBeUndefined();
+      expect(env.PIKICLAW_RESTART_STATE_FILE).toBeUndefined();
     } finally {
       unregisterFeishu();
       unregisterTelegram();

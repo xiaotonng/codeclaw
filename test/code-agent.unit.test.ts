@@ -20,7 +20,7 @@ import {
 } from '../src/code-agent.ts';
 import { makeTmpDir, withTempHome } from './support/env.ts';
 
-const tmpDir = path.join(os.tmpdir(), 'codeclaw-test-' + process.pid);
+const tmpDir = path.join(os.tmpdir(), 'pikiclaw-test-' + process.pid);
 const fakeBin = path.join(tmpDir, 'bin');
 
 function writeFakeScript(name: string, jsonLines: object[]) {
@@ -74,7 +74,7 @@ describe('usage helpers', () => {
 
 describe('stageSessionFiles', () => {
   it('stores uploads in managed workspaces and migrates legacy sessions', () => {
-    const uploadDir = makeTmpDir('codeclaw-upload-');
+    const uploadDir = makeTmpDir('pikiclaw-upload-');
     const uploadPath = path.join(uploadDir, 'report.txt');
     fs.writeFileSync(uploadPath, 'hello');
 
@@ -84,21 +84,21 @@ describe('stageSessionFiles', () => {
       files: [uploadPath],
     });
 
-    const stagedDir = path.join(tmpDir, '.codeclaw', 'sessions', 'claude', staged.sessionId);
+    const stagedDir = path.join(tmpDir, '.pikiclaw', 'sessions', 'claude', staged.sessionId);
     expect(staged.workspacePath).toBe(path.join(stagedDir, 'workspace'));
     expect(fs.existsSync(path.join(staged.workspacePath, 'report.txt'))).toBe(true);
     expect(fs.existsSync(path.join(stagedDir, 'session.json'))).toBe(true);
 
     const legacySessionId = 'sess_legacy_layout';
-    const legacyWorkspacePath = path.join(tmpDir, '.codeclaw', 'workspaces', 'claude', legacySessionId);
-    const legacyMetaDir = path.join(legacyWorkspacePath, '.codeclaw');
+    const legacyWorkspacePath = path.join(tmpDir, '.pikiclaw', 'workspaces', 'claude', legacySessionId);
+    const legacyMetaDir = path.join(legacyWorkspacePath, '.pikiclaw');
     fs.mkdirSync(legacyMetaDir, { recursive: true });
     fs.writeFileSync(path.join(legacyWorkspacePath, 'legacy.txt'), 'legacy');
     fs.writeFileSync(path.join(legacyMetaDir, 'return.json'), JSON.stringify({
       files: [{ path: 'legacy.txt', kind: 'document' }],
     }));
-    fs.mkdirSync(path.join(tmpDir, '.codeclaw', 'sessions'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, '.codeclaw', 'sessions', 'index.json'), JSON.stringify({
+    fs.mkdirSync(path.join(tmpDir, '.pikiclaw', 'sessions'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.pikiclaw', 'sessions', 'index.json'), JSON.stringify({
       version: 1,
       sessions: [{
         sessionId: legacySessionId,
@@ -120,7 +120,7 @@ describe('stageSessionFiles', () => {
       sessionId: legacySessionId,
     });
 
-    const migratedDir = path.join(tmpDir, '.codeclaw', 'sessions', 'claude', legacySessionId);
+    const migratedDir = path.join(tmpDir, '.pikiclaw', 'sessions', 'claude', legacySessionId);
     expect(migrated.workspacePath).toBe(path.join(migratedDir, 'workspace'));
     expect(fs.existsSync(path.join(migrated.workspacePath, 'legacy.txt'))).toBe(true);
     expect(fs.existsSync(path.join(migratedDir, 'session.json'))).toBe(true);
@@ -584,7 +584,7 @@ describe('doStream and attachments', () => {
       workdir: tmpDir,
       files: [],
     });
-    const manifestPath = path.join(tmpDir, '.codeclaw', 'sessions', 'claude', staged.sessionId, 'return.json');
+    const manifestPath = path.join(tmpDir, '.pikiclaw', 'sessions', 'claude', staged.sessionId, 'return.json');
     fs.writeFileSync(manifestPath, JSON.stringify({
       files: [{ path: 'README.md', kind: 'document', caption: 'stale artifact' }],
     }, null, 2));
@@ -760,7 +760,7 @@ exit 0`;
 describe('getSessionTail', () => {
   it('falls back to Codex rollout files when app-server history is unavailable', async () => {
     await withTempHome(async homeDir => {
-      const emptyBin = makeTmpDir('codeclaw-empty-bin-');
+      const emptyBin = makeTmpDir('pikiclaw-empty-bin-');
       const oldPath = process.env.PATH;
       process.env.PATH = emptyBin;
       try {

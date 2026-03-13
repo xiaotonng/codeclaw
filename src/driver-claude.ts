@@ -17,7 +17,7 @@ import {
   appendSystemPrompt, buildStreamPreviewMeta, pushRecentActivity,
   summarizeClaudeToolUse, summarizeClaudeToolResult,
   IMAGE_EXTS, mimeForExt,
-  listCodeclawSessions, findCodeclawSession, isPendingSessionId,
+  listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   readTailLines, stripInjectedPrompts,
   roundPercent, toIsoFromEpochSeconds, modelFamily, emptyUsage, normalizeUsageStatus,
 } from './code-agent.js';
@@ -237,8 +237,8 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
 
 function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
   const resolvedWorkdir = path.resolve(workdir);
-  // Merge codeclaw-tracked sessions with native Claude sessions
-  const codeclawSessions = listCodeclawSessions(resolvedWorkdir, 'claude').map(record => ({
+  // Merge pikiclaw-tracked sessions with native Claude sessions
+  const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'claude').map(record => ({
     sessionId: record.sessionId,
     agent: 'claude' as const,
     workdir: record.workdir,
@@ -250,11 +250,11 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
   }));
   const nativeSessions = getNativeClaudeSessions(resolvedWorkdir);
 
-  // Merge: codeclaw records take precedence (they have workspacePath etc.)
+  // Merge: pikiclaw records take precedence (they have workspacePath etc.)
   // Filter out pending sessions — they haven't been confirmed by the agent yet
   const seen = new Set<string>();
   const merged: SessionInfo[] = [];
-  for (const s of codeclawSessions) {
+  for (const s of pikiclawSessions) {
     if (isPendingSessionId(s.sessionId)) continue;
     if (s.sessionId) seen.add(s.sessionId);
     merged.push(s);
@@ -269,7 +269,7 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
   const projectDir = path.join(process.env.HOME || '', '.claude', 'projects', claudeProjectDirName(resolvedWorkdir));
   agentLog(
     `[sessions:claude] workdir=${resolvedWorkdir} projectDir=${projectDir} projectDirExists=${fs.existsSync(projectDir)} ` +
-    `codeclaw=${codeclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
+    `pikiclaw=${pikiclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
   );
   return { ok: true, sessions, error: null };
 }

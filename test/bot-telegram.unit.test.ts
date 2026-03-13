@@ -58,9 +58,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   const tmpDir = makeTmpDir('bot-tg-unit-');
   process.env.TELEGRAM_BOT_TOKEN = 'test-token';
-  process.env.CODECLAW_WORKDIR = tmpDir;
+  process.env.PIKICLAW_WORKDIR = tmpDir;
   process.env.DEFAULT_AGENT = 'claude';
-  delete process.env.CODECLAW_RESTART_CMD;
+  delete process.env.PIKICLAW_RESTART_CMD;
   delete process.env.npm_config_yes;
 });
 
@@ -119,8 +119,8 @@ describe('TelegramBot.run shutdown handling', () => {
 
     const connectSpy = vi.spyOn(TelegramChannel.prototype, 'connect').mockResolvedValue({
       id: 1,
-      username: 'codeclaw_test_bot',
-      displayName: 'Codeclaw Test Bot',
+      username: 'pikiclaw_test_bot',
+      displayName: 'Pikiclaw Test Bot',
     });
     const skipPendingSpy = vi.spyOn(TelegramChannel.prototype, 'skipPendingUpdatesOnNextListen').mockImplementation(() => {});
     const listenSpy = vi.spyOn(TelegramChannel.prototype, 'listen').mockImplementation(async () => {
@@ -272,8 +272,8 @@ describe('TelegramBot status and session previews', () => {
       sessions: [{
         sessionId,
         agent: 'claude',
-        workdir: process.env.CODECLAW_WORKDIR!,
-        workspacePath: path.join(process.env.CODECLAW_WORKDIR!, '.codeclaw', 'sessions', 'claude', sessionId, 'workspace'),
+        workdir: process.env.PIKICLAW_WORKDIR!,
+        workspacePath: path.join(process.env.PIKICLAW_WORKDIR!, '.pikiclaw', 'sessions', 'claude', sessionId, 'workspace'),
         model: 'claude-opus-4-6',
         createdAt: new Date().toISOString(),
         title: 'history preview',
@@ -594,7 +594,7 @@ describe('TelegramBot.performRestart', () => {
   it('uses non-interactive npx restarts for both default and custom commands and shuts down all drivers', () => {
     const spawnMock = vi.mocked(spawn);
     const oldArgv = process.argv;
-    process.argv = ['node', 'codeclaw', '-c', 'telegram'];
+    process.argv = ['node', 'pikiclaw', '-c', 'telegram'];
     const shutdownSpy = vi.spyOn(agentDriver, 'shutdownAllDrivers').mockImplementation(() => {});
 
     const defaultBot = createBot().bot;
@@ -608,7 +608,7 @@ describe('TelegramBot.performRestart', () => {
       expect(shutdownSpy).toHaveBeenCalledTimes(1);
       expect(spawnMock).toHaveBeenCalledWith(
         'npx',
-        ['--yes', 'codeclaw@latest', '-c', 'telegram'],
+        ['--yes', 'pikiclaw@latest', '-c', 'telegram'],
         expect.objectContaining({
           stdio: 'inherit',
           detached: true,
@@ -616,7 +616,7 @@ describe('TelegramBot.performRestart', () => {
         }),
       );
 
-      process.env.CODECLAW_RESTART_CMD = 'npx tsx src/cli.ts';
+      process.env.PIKICLAW_RESTART_CMD = 'npx tsx src/cli.ts';
       const customBot = createBot().bot;
       const customExitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as any);
       const customStopKeepAliveSpy = vi.spyOn(customBot as any, 'stopKeepAlive').mockImplementation(() => {});

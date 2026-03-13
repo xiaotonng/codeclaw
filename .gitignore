@@ -5,8 +5,8 @@ dist/
 dashboard/dist/
 *.tgz
 .agents
-.codeclaw/*
-!.codeclaw/skills/
-!.codeclaw/skills/**
+.pikiclaw/*
+!.pikiclaw/skills/
+!.pikiclaw/skills/**
 .claude/skills/
 .agents/skills/

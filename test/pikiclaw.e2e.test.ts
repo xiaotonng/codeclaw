@@ -1,5 +1,5 @@
 /**
- * E2E tests for codeclaw.ts command logic — no mocks.
+ * E2E tests for pikiclaw.ts command logic — no mocks.
  *
  * Retained commands (per design):
  *   /start     — Telegram 入口，精简帮助
@@ -9,15 +9,15 @@
  *   /host      — 宿主机信息
  *   /agents    — 列出/切换 agent (ag: callback 切换)
  *
- * Creates a real CodeClaw instance and invokes command handlers directly
+ * Creates a real PikiClaw instance and invokes command handlers directly
  * with capturing TgContext objects. All underlying logic (getSessions,
  * listAgents, fs, os, etc.) runs for real — zero mocks.
  *
  * Requires env:
- *   TELEGRAM_BOT_TOKEN (or CODECLAW_TOKEN)
+ *   TELEGRAM_BOT_TOKEN (or PIKICLAW_TOKEN)
  *
  * Run:
- *   TELEGRAM_BOT_TOKEN=xxx npx vitest run test/codeclaw.e2e.test.ts
+ *   TELEGRAM_BOT_TOKEN=xxx npx vitest run test/pikiclaw.e2e.test.ts
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
@@ -25,13 +25,13 @@ import os from 'node:os';
 import path from 'node:path';
 import type { TgContext, TgCallbackContext } from '../src/channel-telegram.ts';
 
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.CODECLAW_TOKEN || '';
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.PIKICLAW_TOKEN || '';
 const SKIP = !TOKEN;
 
 if (SKIP) {
   console.warn(
-    '\n  TELEGRAM_BOT_TOKEN not set — codeclaw command E2E tests will be SKIPPED.\n' +
-    '   To run: TELEGRAM_BOT_TOKEN=xxx npx vitest run test/codeclaw.e2e.test.ts\n',
+    '\n  TELEGRAM_BOT_TOKEN not set — pikiclaw command E2E tests will be SKIPPED.\n' +
+    '   To run: TELEGRAM_BOT_TOKEN=xxx npx vitest run test/pikiclaw.e2e.test.ts\n',
   );
 }
 
@@ -75,7 +75,7 @@ function createCallbackCtx(chatId = 100, messageId = 1) {
 }
 
 // ---------------------------------------------------------------------------
-// Shared CodeClaw instance
+// Shared PikiClaw instance
 // ---------------------------------------------------------------------------
 
 let claw: any;
@@ -83,9 +83,9 @@ let tmpWorkdir: string;
 
 beforeAll(async () => {
   if (SKIP) return;
-  tmpWorkdir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-cmd-e2e-'));
+  tmpWorkdir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-cmd-e2e-'));
   process.env.TELEGRAM_BOT_TOKEN = TOKEN;
-  process.env.CODECLAW_WORKDIR = tmpWorkdir;
+  process.env.PIKICLAW_WORKDIR = tmpWorkdir;
   process.env.DEFAULT_AGENT = 'claude';
   const { TelegramBot } = await import('../src/bot-telegram.ts');
   claw = new TelegramBot();
@@ -102,7 +102,7 @@ describe.skipIf(SKIP)('/start', () => {
 
     expect(replies.length).toBeGreaterThanOrEqual(1);
     const text = replies[0].text;
-    expect(text).toContain('codeclaw');
+    expect(text).toContain('pikiclaw');
     expect(text).toContain('/sessions');
     expect(text).toContain('/status');
     expect(text).toContain('/switch');
@@ -192,7 +192,7 @@ describe.skipIf(SKIP)('/status', () => {
 
     expect(replies.length).toBe(1);
     const text = replies[0].text;
-    expect(text).toContain('codeclaw');
+    expect(text).toContain('pikiclaw');
     expect(text).toContain('Uptime');
     expect(text).toContain('Memory');
     expect(text).toContain('PID');

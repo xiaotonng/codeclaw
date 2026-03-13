@@ -323,11 +323,11 @@ class FeishuChannel extends Channel {
       const info = (resp as any)?.bot;
       this.bot = {
         id: info?.open_id || this.appId,
-        username: info?.app_name || 'codeclaw',
-        displayName: info?.app_name || 'codeclaw',
+        username: info?.app_name || 'pikiclaw',
+        displayName: info?.app_name || 'pikiclaw',
       };
     } catch {
-      this.bot = { id: this.appId, username: 'codeclaw', displayName: 'codeclaw' };
+      this.bot = { id: this.appId, username: 'pikiclaw', displayName: 'pikiclaw' };
     }
     return this.bot;
   }
@@ -547,9 +547,11 @@ class FeishuChannel extends Channel {
     const openId = event.operator?.operator_id?.open_id;
     if (!eventKey || !openId || !this._hCommand) return;
 
-    const chatId = this._openIdToChat.get(openId);
+    // Try: event payload → cache → API resolve
+    const chatId = this._openIdToChat.get(openId)
+      ?? await this._resolveP2pChatId(openId);
     if (!chatId) {
-      this._log(`[menu] no chat_id for open_id=${openId}, event_key=${eventKey}`);
+      this._log(`[menu] cannot resolve chat_id for open_id=${openId}, event_key=${eventKey}`);
       return;
     }
     if (!this._isAllowed(chatId)) return;
@@ -558,6 +560,38 @@ class FeishuChannel extends Channel {
     const from: FeishuFrom = { openId, userId: event.operator?.operator_id?.user_id };
     const ctx = this._makeCtx(chatId, '', from, 'p2p', event);
     await this._hCommand(eventKey, '', ctx);
+  }
+
+  /**
+   * Resolve a p2p chat_id for a given open_id by sending a minimal message
+   * via open_id and extracting the chat_id from the API response.
+   */
+  private async _resolveP2pChatId(openId: string): Promise<string | null> {
+    try {
+      const resp = await this.client.im.message.create({
+        params: { receive_id_type: 'open_id' },
+        data: {
+          receive_id: openId,
+          msg_type: 'text',
+          content: JSON.stringify({ text: '...' }),
+        },
+      });
+      const chatId = (resp?.data as any)?.chat_id ?? null;
+      const msgId = resp?.data?.message_id;
+      // Clean up the placeholder message
+      if (msgId) {
+        try { await this.client.im.message.delete({ path: { message_id: msgId } }); } catch {}
+      }
+      if (chatId) {
+        this._openIdToChat.set(openId, chatId);
+        this.knownChats.add(chatId);
+        this._log(`[menu] resolved chat_id=${chatId} for open_id=${openId}`);
+      }
+      return chatId;
+    } catch (e: any) {
+      this._log(`[menu] resolve chat_id failed for open_id=${openId}: ${e?.message || e}`);
+      return null;
+    }
   }
 
   // ========================================================================
@@ -591,10 +625,27 @@ class FeishuChannel extends Channel {
 
   async send(chatId: number | string, text: string, opts: SendOpts = {}): Promise<string | null> {
     const rows = keyboardToRows(opts.keyboard);
-    return await this.sendCard(chatId, {
-      markdown: text.trim() || '(empty)',
-      rows,
+    const view: FeishuCardView = { markdown: text.trim() || '(empty)', rows };
+
+    // Reply to a specific message if replyTo is set
+    if (opts.replyTo) {
+      return await this.replyCard(String(opts.replyTo), view);
+    }
+
+    return await this.sendCard(chatId, view);
+  }
+
+  async replyCard(replyToMsgId: string, view: FeishuCardView): Promise<string | null> {
+    const card = buildCardFromView(view);
+    this._logOutgoing('reply', `reply_to=${replyToMsgId} chars=${view.markdown.length} rows=${view.rows?.length || 0}`);
+    const resp = await this.client.im.message.reply({
+      path: { message_id: replyToMsgId },
+      data: {
+        msg_type: 'interactive',
+        content: JSON.stringify(card),
+      },
     });
+    return resp?.data?.message_id ?? null;
   }
 
   async editCard(chatId: number | string, msgId: number | string, view: FeishuCardView): Promise<void> {
@@ -672,7 +723,7 @@ class FeishuChannel extends Channel {
    * While streaming is active, `editMessage()` transparently pushes content
    * via the CardKit API instead of PATCH. Call `endStreaming()` to finalize.
    */
-  async sendStreamingCard(chatId: string, initialContent: string): Promise<string | null> {
+  async sendStreamingCard(chatId: string, initialContent: string, opts?: { replyTo?: string }): Promise<string | null> {
     const cardData = {
       schema: '2.0',
       config: {
@@ -708,17 +759,22 @@ class FeishuChannel extends Channel {
       return this.send(chatId, initialContent);
     }
 
-    // Step 2: Send card as message
+    // Step 2: Send card as message (reply to user's message if replyTo is set)
+    const cardContent = JSON.stringify({ type: 'card', data: { card_id: cardId } });
     try {
-      this._logOutgoing('sendStreamingCard', `chat=${chatId} card=${cardId}`);
-      const sendResp = await this.client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: 'interactive',
-          content: JSON.stringify({ type: 'card', data: { card_id: cardId } }),
-        },
-      });
+      this._logOutgoing('sendStreamingCard', `chat=${chatId} card=${cardId}${opts?.replyTo ? ` reply_to=${opts.replyTo}` : ''}`);
+      let sendResp: any;
+      if (opts?.replyTo) {
+        sendResp = await this.client.im.message.reply({
+          path: { message_id: opts.replyTo },
+          data: { msg_type: 'interactive', content: cardContent },
+        });
+      } else {
+        sendResp = await this.client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: { receive_id: chatId, msg_type: 'interactive', content: cardContent },
+        });
+      }
       const messageId = sendResp?.data?.message_id;
       if (!messageId) throw new Error('no message_id returned');
 
@@ -883,7 +939,7 @@ class FeishuChannel extends Channel {
       messageId,
       from,
       chatType,
-      reply: (text: string, opts?: SendOpts) => this.send(chatId, text, opts),
+      reply: (text: string, opts?: SendOpts) => this.send(chatId, text, { ...opts, replyTo: messageId || opts?.replyTo }),
       editReply: (msgId: string, text: string, opts?: SendOpts) => this.editMessage(chatId, msgId, text, opts),
       channel: this,
       raw,

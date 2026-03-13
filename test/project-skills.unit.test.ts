@@ -6,7 +6,7 @@ import { initializeProjectSkills, listSkills } from '../src/code-agent.ts';
 import { getSkillsListData, resolveSkillPrompt } from '../src/bot-commands.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 
-const envSnapshot = captureEnv(['CODECLAW_CONFIG', 'CODECLAW_WORKDIR']);
+const envSnapshot = captureEnv(['PIKICLAW_CONFIG', 'PIKICLAW_WORKDIR']);
 
 function writeFile(filePath: string, content: string) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -19,7 +19,7 @@ function writeSkill(root: string, name: string, body: string) {
 
 beforeEach(() => {
   restoreEnv(envSnapshot);
-  process.env.CODECLAW_CONFIG = path.join(makeTmpDir('codeclaw-config-'), 'setting.json');
+  process.env.PIKICLAW_CONFIG = path.join(makeTmpDir('pikiclaw-config-'), 'setting.json');
 });
 
 afterEach(() => {
@@ -28,8 +28,8 @@ afterEach(() => {
 
 describe('project skills', () => {
   it('lists canonical project skills plus legacy command skills without duplicates', () => {
-    const workdir = makeTmpDir('codeclaw-skills-');
-    writeSkill(path.join(workdir, '.codeclaw', 'skills'), 'ship', '---\nlabel: Shared Ship\ndescription: shared\n---\n');
+    const workdir = makeTmpDir('pikiclaw-skills-');
+    writeSkill(path.join(workdir, '.pikiclaw', 'skills'), 'ship', '---\nlabel: Shared Ship\ndescription: shared\n---\n');
     writeSkill(path.join(workdir, '.agents', 'skills'), 'ship', '---\nlabel: Agents Ship\ndescription: agents\n---\n');
     writeSkill(path.join(workdir, '.claude', 'skills'), 'review', '---\nlabel: Claude Review\ndescription: claude\n---\n');
     writeFile(path.join(workdir, '.claude', 'commands', 'deploy.md'), '---\nlabel: Deploy Cmd\ndescription: legacy\n---\n');
@@ -43,8 +43,8 @@ describe('project skills', () => {
   });
 
   it('builds a stable skills view and prefers claude native skill execution when available', () => {
-    const workdir = makeTmpDir('codeclaw-claude-skill-');
-    writeSkill(path.join(workdir, '.codeclaw', 'skills'), 'install', '---\nlabel: Install\ndescription: shared\n---\n');
+    const workdir = makeTmpDir('pikiclaw-claude-skill-');
+    writeSkill(path.join(workdir, '.pikiclaw', 'skills'), 'install', '---\nlabel: Install\ndescription: shared\n---\n');
     writeSkill(path.join(workdir, '.claude', 'skills'), 'install', '---\nlabel: Install\ndescription: claude\n---\n');
 
     const bot = new Bot();
@@ -70,8 +70,8 @@ describe('project skills', () => {
   });
 
   it('routes codex skills to project skill files instead of hard-coding .claude paths', () => {
-    const workdir = makeTmpDir('codeclaw-codex-skill-');
-    writeSkill(path.join(workdir, '.codeclaw', 'skills'), 'fixup', '---\nlabel: Fixup\ndescription: shared\n---\n');
+    const workdir = makeTmpDir('pikiclaw-codex-skill-');
+    writeSkill(path.join(workdir, '.pikiclaw', 'skills'), 'fixup', '---\nlabel: Fixup\ndescription: shared\n---\n');
     writeSkill(path.join(workdir, '.agents', 'skills'), 'fixup', '---\nlabel: Fixup\ndescription: agents\n---\n');
 
     const bot = new Bot();
@@ -80,27 +80,27 @@ describe('project skills', () => {
 
     const resolved = resolveSkillPrompt(bot, 2, 'sk_fixup', '');
     expect(resolved).toEqual({
-      prompt: 'In this project, the fixup skill is defined in `.codeclaw/skills/fixup/SKILL.md`. Please read that SKILL.md file and execute the instructions.',
+      prompt: 'In this project, the fixup skill is defined in `.pikiclaw/skills/fixup/SKILL.md`. Please read that SKILL.md file and execute the instructions.',
       skillName: 'fixup',
     });
   });
 
-  it('migrates project skills into .codeclaw/skills and links claude/agents roots to it', () => {
-    const workdir = makeTmpDir('codeclaw-migrate-skill-');
-    writeSkill(path.join(workdir, '.codeclaw', 'skills'), 'ship', '---\nlabel: Ship\ndescription: canonical\n---\n');
+  it('migrates project skills into .pikiclaw/skills and links claude/agents roots to it', () => {
+    const workdir = makeTmpDir('pikiclaw-migrate-skill-');
+    writeSkill(path.join(workdir, '.pikiclaw', 'skills'), 'ship', '---\nlabel: Ship\ndescription: canonical\n---\n');
     writeSkill(path.join(workdir, '.claude', 'skills'), 'ship', '---\nlabel: Ship\ndescription: claude\n---\n');
     writeFile(path.join(workdir, '.claude', 'skills', 'ship', 'references', 'claude.txt'), 'ignored because canonical wins\n');
     writeSkill(path.join(workdir, '.agents', 'skills'), 'package', '---\nlabel: Package\ndescription: agents\n---\n');
 
     initializeProjectSkills(workdir);
 
-    expect(fs.readFileSync(path.join(workdir, '.codeclaw', 'skills', 'ship', 'SKILL.md'), 'utf8')).toContain('description: canonical');
-    expect(fs.existsSync(path.join(workdir, '.codeclaw', 'skills', 'ship', 'references', 'claude.txt'))).toBe(false);
-    expect(fs.readFileSync(path.join(workdir, '.codeclaw', 'skills', 'package', 'SKILL.md'), 'utf8')).toContain('description: agents');
+    expect(fs.readFileSync(path.join(workdir, '.pikiclaw', 'skills', 'ship', 'SKILL.md'), 'utf8')).toContain('description: canonical');
+    expect(fs.existsSync(path.join(workdir, '.pikiclaw', 'skills', 'ship', 'references', 'claude.txt'))).toBe(false);
+    expect(fs.readFileSync(path.join(workdir, '.pikiclaw', 'skills', 'package', 'SKILL.md'), 'utf8')).toContain('description: agents');
     expect(fs.lstatSync(path.join(workdir, '.claude', 'skills')).isSymbolicLink()).toBe(true);
     expect(fs.lstatSync(path.join(workdir, '.agents', 'skills')).isSymbolicLink()).toBe(true);
-    expect(fs.realpathSync(path.join(workdir, '.claude', 'skills'))).toBe(fs.realpathSync(path.join(workdir, '.codeclaw', 'skills')));
-    expect(fs.realpathSync(path.join(workdir, '.agents', 'skills'))).toBe(fs.realpathSync(path.join(workdir, '.codeclaw', 'skills')));
+    expect(fs.realpathSync(path.join(workdir, '.claude', 'skills'))).toBe(fs.realpathSync(path.join(workdir, '.pikiclaw', 'skills')));
+    expect(fs.realpathSync(path.join(workdir, '.agents', 'skills'))).toBe(fs.realpathSync(path.join(workdir, '.pikiclaw', 'skills')));
     expect(fs.readFileSync(path.join(workdir, '.agents', 'skills', 'ship', 'SKILL.md'), 'utf8')).toContain('description: canonical');
   });
 });

@@ -96,8 +96,8 @@ beforeAll(async () => {
   if (SKIP) return;
   tmpDir = makeTmpDir('bot-tg-e2e-');
 
-  process.env.CODECLAW_TOKEN = TOKEN;
-  process.env.CODECLAW_WORKDIR = process.cwd();
+  process.env.PIKICLAW_TOKEN = TOKEN;
+  process.env.PIKICLAW_WORKDIR = process.cwd();
   process.env.DEFAULT_AGENT = HAS_CLAUDE ? 'claude' : 'codex';
 
   bot = new TelegramBot();
@@ -156,7 +156,7 @@ describe.skipIf(SKIP)('/start', () => {
 
     expect(ctx.sentTexts.length).toBeGreaterThanOrEqual(1);
     const text = ctx.sentTexts[0];
-    expect(text).toContain('codeclaw');
+    expect(text).toContain('pikiclaw');
     expect(text).toContain('Agent:');
     expect(text).toContain('Workdir:');
   }, TIMEOUT);

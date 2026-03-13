@@ -1,9 +1,9 @@
 /**
  * mcp-bridge.ts — MCP session bridge orchestrator.
  *
- * Runs inside the main codeclaw process. For each agent stream:
+ * Runs inside the main pikiclaw process. For each agent stream:
  *   1. Starts a tiny HTTP callback server on localhost (random port).
- *   2. Writes an MCP config JSON pointing to `codeclaw --mcp-serve`.
+ *   2. Writes an MCP config JSON pointing to `pikiclaw --mcp-serve`.
  *   3. The agent CLI spawns the MCP server via --mcp-config.
  *   4. When the agent calls `send_file`, the MCP server POSTs to our callback.
  *   5. We forward the request to the IM channel and respond with success/failure.
@@ -72,13 +72,13 @@ function resolveMcpServerCommand(): { command: string; args: string[] } {
   if (fs.existsSync(serverScript)) {
     return { command: 'node', args: [serverScript] };
   }
-  // Fallback: use codeclaw CLI with --mcp-serve flag
+  // Fallback: use pikiclaw CLI with --mcp-serve flag
   const cliScript = path.join(thisDir, 'cli.js');
   if (fs.existsSync(cliScript)) {
     return { command: 'node', args: [cliScript, '--mcp-serve'] };
   }
-  // Last resort: assume codeclaw is in PATH
-  return { command: 'codeclaw', args: ['--mcp-serve'] };
+  // Last resort: assume pikiclaw is in PATH
+  return { command: 'pikiclaw', args: ['--mcp-serve'] };
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
 
   if (opts.agent === 'codex') {
     // Codex: register MCP server via `codex mcp add/remove`
-    const codexArgs = ['mcp', 'add', 'codeclaw'];
+    const codexArgs = ['mcp', 'add', 'pikiclaw'];
     for (const [k, v] of Object.entries(envVars)) codexArgs.push('--env', `${k}=${v}`);
     codexArgs.push('--', command, ...args);
     try {
@@ -204,7 +204,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       codexRegistered = true;
     } catch (e: any) {
       // If already exists, remove and retry
-      try { execFileSync('codex', ['mcp', 'remove', 'codeclaw'], { stdio: 'pipe', timeout: 5_000 }); } catch {}
+      try { execFileSync('codex', ['mcp', 'remove', 'pikiclaw'], { stdio: 'pipe', timeout: 5_000 }); } catch {}
       execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: 10_000 });
       codexRegistered = true;
     }
@@ -213,7 +213,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     configPath = path.join(sessionDir, 'mcp-config.json');
     const config = {
       mcpServers: {
-        codeclaw: { command, args, env: envVars },
+        pikiclaw: { command, args, env: envVars },
       },
     };
     fs.mkdirSync(sessionDir, { recursive: true });
@@ -225,7 +225,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     stop: async () => {
       await new Promise<void>(resolve => server.close(() => resolve()));
       if (codexRegistered) {
-        try { execFileSync('codex', ['mcp', 'remove', 'codeclaw'], { stdio: 'pipe', timeout: 5_000 }); } catch {}
+        try { execFileSync('codex', ['mcp', 'remove', 'pikiclaw'], { stdio: 'pipe', timeout: 5_000 }); } catch {}
       }
       if (configPath) {
         try { fs.rmSync(configPath, { force: true }); } catch {}

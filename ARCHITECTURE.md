@@ -119,7 +119,7 @@ and composition of smaller Telegram-specific helpers.
 stateful UI concerns, so they live in `bot-telegram-live-preview.ts` instead of being
 inlined inside `handleMessage()`.
 
-**Env var scoping** — bot.ts only reads channel-agnostic env vars (`CODECLAW_*`).
+**Env var scoping** — bot.ts only reads channel-agnostic env vars (`PIKICLAW_*`).
 Channel-specific env vars (`TELEGRAM_*`, `FEISHU_*`) are read in the corresponding
 bot-xxx.ts constructor.
 
@@ -139,7 +139,7 @@ import {
   type SessionListResult, type SessionTailOpts, type SessionTailResult,
   type ModelListOpts, type ModelListResult,
   type UsageOpts, type UsageResult,
-  run, detectAgentBin, listCodeclawSessions, emptyUsage,
+  run, detectAgentBin, listPikiclawSessions, emptyUsage,
 } from './code-agent.js';
 
 function xxxCmd(o: StreamOpts): string[] {
@@ -169,7 +169,7 @@ class XxxDriver implements AgentDriver {
 
   async getSessions(workdir: string, limit?: number): Promise<SessionListResult> {
     // Session workspace is managed by code-agent.ts; just read the local index
-    const sessions = listCodeclawSessions(workdir, 'xxx', limit).map(r => ({
+    const sessions = listPikiclawSessions(workdir, 'xxx', limit).map(r => ({
       sessionId: r.engineSessionId, localSessionId: r.localSessionId,
       engineSessionId: r.engineSessionId, agent: 'xxx' as const,
       workdir: r.workdir, workspacePath: r.workspacePath,
@@ -254,8 +254,8 @@ xxxModel: cs.agent === 'xxx' ? resolvedModel : (this.agentConfigs.xxx?.model || 
 |---|---|
 | `run(cmd, opts, parseLine)` | Spawn CLI, readline stdout, timeout, parse JSON events |
 | `detectAgentBin(cmd, id)` | `which` + `--version` detection |
-| `listCodeclawSessions(workdir, agent)` | Read local session index |
-| `findCodeclawSessionByLocalId(...)` | Lookup by local ID |
+| `listPikiclawSessions(workdir, agent)` | Read local session index |
+| `findPikiclawSessionByLocalId(...)` | Lookup by local ID |
 | `collectArtifacts(workspacePath)` | Read return manifest, validate files |
 | `buildArtifactSystemPrompt(...)` | Artifact return instructions for system prompt |
 | `buildStreamPreviewMeta(s)` | Token usage → preview metadata |
@@ -289,7 +289,7 @@ Direct messages (no command prefix) are forwarded to the current AI agent.
 
 | File                              | Tests                              | API calls? |
 |-----------------------------------|------------------------------------|------------|
-| `test/e2e/codeclaw.e2e.test.ts`       | Bot commands + callbacks (real fs)  | No         |
+| `test/e2e/pikiclaw.e2e.test.ts`       | Bot commands + callbacks (real fs)  | No         |
 | `test/e2e/channel-telegram.e2e.test.ts` | Telegram channel (real API)       | Yes        |
 | `test/channel-telegram.unit.test.ts` | Telegram channel (mocked)        | No         |
 | `test/e2e/code-agent.e2e.test.ts`     | Real claude/codex CLI              | Yes        |

@@ -20,7 +20,7 @@ import { terminateProcessTree } from './process-control.js';
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
 export type ChatId = number | string;
-export const VERSION = '0.2.34';
+export const VERSION = '0.2.35';
 const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 
@@ -29,7 +29,7 @@ const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 // ---------------------------------------------------------------------------
 
 /**
- * If `dir` has a .gitignore, ensure runtime state is ignored while `.codeclaw/skills`
+ * If `dir` has a .gitignore, ensure runtime state is ignored while `.pikiclaw/skills`
  * stays trackable as the canonical project skill location.
  */
 function ensureGitignore(dir: string) {
@@ -37,13 +37,13 @@ function ensureGitignore(dir: string) {
     const gi = path.join(dir, '.gitignore');
     if (!fs.existsSync(gi)) return;
     const managedLines = [
-      '.codeclaw/*',
-      '!.codeclaw/skills/',
-      '!.codeclaw/skills/**',
+      '.pikiclaw/*',
+      '!.pikiclaw/skills/',
+      '!.pikiclaw/skills/**',
       '.claude/skills/',
       '.agents/skills/',
     ];
-    const legacyLines = new Set(['.codeclaw/']);
+    const legacyLines = new Set(['.pikiclaw/']);
     const rawLines = fs.readFileSync(gi, 'utf8').split(/\r?\n/);
     const normalized = rawLines.filter(line => {
       const trimmed = line.trim();
@@ -494,15 +494,15 @@ export class Bot {
     };
 
     this.defaultAgent = normalizeAgent('codex');
-    this.runTimeout = envInt('CODECLAW_TIMEOUT', 1800);
-    this.allowedChatIds = parseAllowedChatIds(process.env.CODECLAW_ALLOWED_IDS || '');
+    this.runTimeout = envInt('PIKICLAW_TIMEOUT', 1800);
+    this.allowedChatIds = parseAllowedChatIds(process.env.PIKICLAW_ALLOWED_IDS || '');
     this.refreshManagedConfig(getActiveUserConfig(), { initial: true });
     this.userConfigUnsubscribe = onUserConfigChange(config => this.refreshManagedConfig(config));
   }
 
   log(msg: string) {
     const ts = new Date().toTimeString().slice(0, 8);
-    process.stdout.write(`[codeclaw ${ts}] ${msg}\n`);
+    process.stdout.write(`[pikiclaw ${ts}] ${msg}\n`);
   }
 
   chat(chatId: ChatId): ChatState {
@@ -790,7 +790,7 @@ export class Bot {
     if (opts.persist !== false) {
       setUserWorkdir(resolvedPath, { notify: false });
     } else {
-      process.env.CODECLAW_WORKDIR = resolvedPath;
+      process.env.PIKICLAW_WORKDIR = resolvedPath;
     }
     this.workdir = resolvedPath;
     for (const [, cs] of this.chats) {
@@ -927,7 +927,7 @@ export class Bot {
       const bin = whichSync('systemd-inhibit');
       if (bin) {
         this.keepAliveProc = spawn('systemd-inhibit', [
-          '--what=idle', '--who=codeclaw', '--why=AI coding agent running', 'sleep', 'infinity',
+          '--what=idle', '--who=pikiclaw', '--why=AI coding agent running', 'sleep', 'infinity',
         ], { stdio: 'ignore', detached: true });
         this.keepAliveProc.unref();
         this.log(`keep-alive: systemd-inhibit (PID ${this.keepAliveProc.pid})`);

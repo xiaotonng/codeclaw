@@ -31,7 +31,7 @@ export function Sidebar({
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-fg" strokeWidth="2.2" strokeLinecap="round"><path d="M13 2L3 14h8l-1 8 11-13h-8l1-7z"/></svg>
           </div>
           <div className="leading-none">
-            <div className="text-[15px] font-semibold tracking-tight text-gradient">Codeclaw</div>
+            <div className="text-[15px] font-semibold tracking-tight text-gradient">Pikiclaw</div>
           </div>
           <span className="rounded-md border border-edge bg-panel px-2 py-0.5 text-[11px] font-mono text-fg-4">
             v{version}

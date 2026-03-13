@@ -1,6 +1,6 @@
 # Integrating a New IM Platform
 
-This guide explains how to add a new IM platform (e.g., Feishu/Lark, Discord, WhatsApp) to codeclaw.
+This guide explains how to add a new IM platform (e.g., Feishu/Lark, Discord, WhatsApp) to pikiclaw.
 
 ## Architecture Overview
 

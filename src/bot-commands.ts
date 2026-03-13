@@ -363,7 +363,7 @@ export function resolveSkillPrompt(bot: Bot, chatId: ChatId, cmd: string, args: 
   } else {
     const canonicalPath = paths.sharedSkillFile
       ? `\`${relSkillPath(bot.workdir, paths.sharedSkillFile)}\``
-      : `\`.codeclaw/skills/${skill.name}/SKILL.md\``;
+      : `\`.pikiclaw/skills/${skill.name}/SKILL.md\``;
     const locationText = paths.sharedSkillFile
       ? canonicalPath
       : paths.agentsSkillFile || paths.claudeSkillFile

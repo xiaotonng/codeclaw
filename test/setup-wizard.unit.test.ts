@@ -47,7 +47,7 @@ describe('setup wizard', () => {
   beforeEach(() => {
     restoreEnv(envSnapshot);
     delete process.env.OPENAI_API_KEY;
-    process.env.HOME = makeTmpDir('codeclaw-setup-home-');
+    process.env.HOME = makeTmpDir('pikiclaw-setup-home-');
   });
 
   afterEach(() => {
@@ -83,7 +83,7 @@ describe('setup wizard', () => {
       if (token === '123:good-token') {
         return {
           ok: true,
-          bot: { id: 1, username: 'codeclaw_test_bot', displayName: 'Codeclaw Test' },
+          bot: { id: 1, username: 'pikiclaw_test_bot', displayName: 'Pikiclaw Test' },
           error: null,
         };
       }
@@ -101,14 +101,14 @@ describe('setup wizard', () => {
       validateTelegramToken: validate,
       persistConfig(config) {
         saved.push({ config });
-        return '/tmp/codeclaw-config.json';
+        return '/tmp/pikiclaw-config.json';
       },
     });
 
     expect(result.completed).toBe(true);
     expect(result.agent).toBe('codex');
     expect(result.token).toBe('123:good-token');
-    expect(result.configPath).toBe('/tmp/codeclaw-config.json');
+    expect(result.configPath).toBe('/tmp/pikiclaw-config.json');
     expect(saved[0]?.config).toMatchObject({
       channel: 'telegram',
       defaultAgent: 'codex',
@@ -118,7 +118,7 @@ describe('setup wizard', () => {
       { command: 'npm', args: ['install', '-g', '@openai/codex'] },
     ]);
     expect(io.output).toContain('Telegram rejected this token: Unauthorized');
-    expect(io.output).toContain('Telegram bot verified: @codeclaw_test_bot (Codeclaw Test)');
+    expect(io.output).toContain('Telegram bot verified: @pikiclaw_test_bot (Pikiclaw Test)');
   });
 
   it('can abort before installation', async () => {

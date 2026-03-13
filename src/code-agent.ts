@@ -525,24 +525,24 @@ interface SessionWorkspaceInfo {
   record: LocalSessionRecord;
 }
 
-const CODECLAW_DIR = '.codeclaw';
-const CODECLAW_SESSIONS_DIR = path.join(CODECLAW_DIR, 'sessions');
-const CODECLAW_SESSION_INDEX = path.join(CODECLAW_SESSIONS_DIR, 'index.json');
-const CODECLAW_LEGACY_WORKSPACES_DIR = path.join(CODECLAW_DIR, 'workspaces');
+const PIKICLAW_DIR = '.pikiclaw';
+const PIKICLAW_SESSIONS_DIR = path.join(PIKICLAW_DIR, 'sessions');
+const PIKICLAW_SESSION_INDEX = path.join(PIKICLAW_SESSIONS_DIR, 'index.json');
+const PIKICLAW_LEGACY_WORKSPACES_DIR = path.join(PIKICLAW_DIR, 'workspaces');
 const SESSION_WORKSPACE_DIR = 'workspace';
 const SESSION_META_FILE = 'session.json';
 // return.json and artifact constants removed — file return is now handled by MCP bridge
 
-function sessionIndexPath(workdir: string): string { return path.join(workdir, CODECLAW_SESSION_INDEX); }
-function sessionDirPath(workdir: string, agent: Agent, sessionId: string): string { return path.join(workdir, CODECLAW_SESSIONS_DIR, agent, sessionId); }
-function legacySessionWorkspacePath(workdir: string, agent: Agent, sessionId: string): string { return path.join(workdir, CODECLAW_LEGACY_WORKSPACES_DIR, agent, sessionId); }
+function sessionIndexPath(workdir: string): string { return path.join(workdir, PIKICLAW_SESSION_INDEX); }
+function sessionDirPath(workdir: string, agent: Agent, sessionId: string): string { return path.join(workdir, PIKICLAW_SESSIONS_DIR, agent, sessionId); }
+function legacySessionWorkspacePath(workdir: string, agent: Agent, sessionId: string): string { return path.join(workdir, PIKICLAW_LEGACY_WORKSPACES_DIR, agent, sessionId); }
 function sessionWorkspacePath(workdir: string, agent: Agent, sessionId: string): string { return path.join(sessionDirPath(workdir, agent, sessionId), SESSION_WORKSPACE_DIR); }
 function sessionRootFromWorkspacePath(workspacePath: string): string {
   const resolved = path.resolve(workspacePath);
   return path.basename(resolved) === SESSION_WORKSPACE_DIR ? path.dirname(resolved) : resolved;
 }
 function sessionMetaPath(workspacePath: string): string { return path.join(sessionRootFromWorkspacePath(workspacePath), SESSION_META_FILE); }
-function legacySessionMetaPath(workspacePath: string): string { return path.join(workspacePath, CODECLAW_DIR, SESSION_META_FILE); }
+function legacySessionMetaPath(workspacePath: string): string { return path.join(workspacePath, PIKICLAW_DIR, SESSION_META_FILE); }
 
 /** Generate a temporary session ID for new sessions before the agent assigns one. */
 function nextPendingSessionId(): string { return `pending_${crypto.randomBytes(6).toString('hex')}`; }
@@ -613,7 +613,7 @@ function migrateSessionLayout(workdir: string, record: LocalSessionRecord): Loca
     if (sourceWorkspacePath === targetWorkspacePath || !fs.existsSync(sourceWorkspacePath)) continue;
     if (!fs.statSync(sourceWorkspacePath).isDirectory()) continue;
     for (const entry of fs.readdirSync(sourceWorkspacePath)) {
-      if (entry === CODECLAW_DIR) continue;
+      if (entry === PIKICLAW_DIR) continue;
       copyPath(path.join(sourceWorkspacePath, entry), path.join(targetWorkspacePath, entry));
     }
     if (sourceWorkspacePath === legacyWp) fs.rmSync(sourceWorkspacePath, { recursive: true, force: true });
@@ -721,15 +721,15 @@ function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): SessionWorksp
 }
 
 // Exported for drivers
-export function listCodeclawSessions(workdir: string, agent: Agent, limit?: number): LocalSessionRecord[] {
+export function listPikiclawSessions(workdir: string, agent: Agent, limit?: number): LocalSessionRecord[] {
   const records = loadSessionIndex(path.resolve(workdir)).sessions
     .filter(entry => entry.agent === agent)
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   return typeof limit === 'number' ? records.slice(0, limit) : records;
 }
 
-export function findCodeclawSession(workdir: string, agent: Agent, sessionId: string): LocalSessionRecord | null {
-  return listCodeclawSessions(workdir, agent).find(entry => entry.sessionId === sessionId) || null;
+export function findPikiclawSession(workdir: string, agent: Agent, sessionId: string): LocalSessionRecord | null {
+  return listPikiclawSessions(workdir, agent).find(entry => entry.sessionId === sessionId) || null;
 }
 
 export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFilesResult {
@@ -1158,7 +1158,7 @@ function ensureDirSymlink(linkPath: string, targetDir: string) {
 }
 
 export function initializeProjectSkills(workdir: string, opts: { log?: (message: string) => void } = {}): void {
-  const canonicalRoot = path.join(workdir, '.codeclaw', 'skills');
+  const canonicalRoot = path.join(workdir, '.pikiclaw', 'skills');
   const agentsRoot = path.join(workdir, '.agents', 'skills');
   const claudeRoot = path.join(workdir, '.claude', 'skills');
   const candidatesByName = new Map<string, ProjectSkillCandidate[]>();
@@ -1198,7 +1198,7 @@ export function initializeProjectSkills(workdir: string, opts: { log?: (message:
 }
 
 export function getProjectSkillPaths(workdir: string, skillName: string): ProjectSkillPaths {
-  const sharedSkillFile = path.join(workdir, '.codeclaw', 'skills', skillName, 'SKILL.md');
+  const sharedSkillFile = path.join(workdir, '.pikiclaw', 'skills', skillName, 'SKILL.md');
   const agentsSkillFile = path.join(workdir, '.agents', 'skills', skillName, 'SKILL.md');
   const claudeSkillFile = path.join(workdir, '.claude', 'skills', skillName, 'SKILL.md');
   const claudeCommandFile = path.join(workdir, '.claude', 'commands', `${skillName}.md`);
@@ -1225,7 +1225,7 @@ export function listSkills(workdir: string): SkillListResult {
   }
 
   const skillRoots = [
-    path.join(workdir, '.codeclaw', 'skills'),
+    path.join(workdir, '.pikiclaw', 'skills'),
   ];
   for (const skillsDir of skillRoots) {
     for (const entry of readSortedDir(skillsDir)) {

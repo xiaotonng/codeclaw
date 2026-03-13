@@ -6,7 +6,7 @@
 import { it, expect } from 'vitest';
 import { getSessions } from '../../src/code-agent.ts';
 
-const workdir = '/Users/admin/Desktop/project/codeclaw';
+const workdir = '/Users/admin/Desktop/project/pikiclaw';
 
 it('getSessions e2e — reads real claude sessions from disk', async () => {
   const result = await getSessions({ agent: 'claude', workdir, limit: 5 });

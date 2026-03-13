@@ -522,7 +522,7 @@ class TelegramChannel extends Channel {
     opts: { caption?: string; replyTo?: number | string; filename?: string; mimeType?: string; messageThreadId?: number } = {},
   ): Promise<number | null> {
     const hash = crypto.createHash('md5').update(photo).digest('hex').slice(0, 16);
-    const boundary = `----codeclaw${hash}`;
+    const boundary = `----pikiclaw${hash}`;
     const parts: Buffer[] = [];
     const add = (s: string) => parts.push(Buffer.from(s, 'utf-8'));
     const filename = opts.filename || 'photo.jpg';
@@ -559,7 +559,7 @@ class TelegramChannel extends Channel {
   ): Promise<number | null> {
     const buf = typeof content === 'string' ? Buffer.from(content, 'utf-8') : content;
     const hash = crypto.createHash('md5').update(buf).digest('hex').slice(0, 16);
-    const boundary = `----codeclaw${hash}`;
+    const boundary = `----pikiclaw${hash}`;
     const parts: Buffer[] = [];
     const add = (s: string) => parts.push(Buffer.from(s, 'utf-8'));
     add(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`);

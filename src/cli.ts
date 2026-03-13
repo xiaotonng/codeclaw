@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * cli.ts — CLI entry point for codeclaw.
+ * cli.ts — CLI entry point for pikiclaw.
  */
 
 import { spawn } from 'node:child_process';
@@ -44,7 +44,7 @@ const DAEMON_STRIP_ARGS = new Set(['--daemon', '--no-daemon']);
 async function runDaemon(userArgs: string[]): Promise<never> {
   // Forward user's CLI args (strip daemon-related flags).
   const forwardedArgs = userArgs.filter(a => !DAEMON_STRIP_ARGS.has(a));
-  const restartCmd = process.env.CODECLAW_RESTART_CMD;
+  const restartCmd = process.env.PIKICLAW_RESTART_CMD;
   const restartStateFile = createRestartStateFilePath(process.pid);
 
   let restartDelay = DAEMON_RESTART_DELAY_MS;
@@ -60,8 +60,8 @@ async function runDaemon(userArgs: string[]): Promise<never> {
       env: {
         ...process.env,
         ...extraEnv,
-        CODECLAW_DAEMON_CHILD: '1',
-        CODECLAW_RESTART_STATE_FILE: restartStateFile,
+        PIKICLAW_DAEMON_CHILD: '1',
+        PIKICLAW_RESTART_STATE_FILE: restartStateFile,
         npm_config_yes: 'true',
       },
     });
@@ -173,18 +173,18 @@ export async function main() {
   const args = parseArgs(process.argv.slice(2));
   let userConfig = loadUserConfig();
 
-  if (args.version) { process.stdout.write(`codeclaw ${VERSION}\n`); process.exit(0); }
+  if (args.version) { process.stdout.write(`pikiclaw ${VERSION}\n`); process.exit(0); }
 
   // Daemon mode (default): become a watchdog that supervises the real bot process.
-  // The child is spawned via `npx codeclaw@latest` so restarts always pull latest code.
+  // The child is spawned via `npx pikiclaw@latest` so restarts always pull latest code.
   // Use --no-daemon to disable.
-  if (args.daemon && !process.env.CODECLAW_DAEMON_CHILD) {
+  if (args.daemon && !process.env.PIKICLAW_DAEMON_CHILD) {
     await runDaemon(process.argv.slice(2));
   }
 
   const processLog = (message: string) => {
     const ts = new Date().toTimeString().slice(0, 8);
-    process.stdout.write(`[codeclaw ${ts}] ${message}\n`);
+    process.stdout.write(`[pikiclaw ${ts}] ${message}\n`);
   };
   const onSigusr2 = () => {
     processLog('SIGUSR2 received, restarting...');
@@ -197,7 +197,7 @@ export async function main() {
 
   const configOverrides: Partial<UserConfig> = {};
   if (args.agent) configOverrides.defaultAgent = args.agent;
-  if (args.workdir) process.env.CODECLAW_WORKDIR = path.resolve(args.workdir);
+  if (args.workdir) process.env.PIKICLAW_WORKDIR = path.resolve(args.workdir);
 
   // Apply config early so managed env vars are populated from setting.json.
   applyUserConfig({ ...userConfig, ...configOverrides }, undefined, { overwrite: true, clearMissing: true });
@@ -214,7 +214,7 @@ export async function main() {
   const tokenProvided = channels.length > 0 && hasConfiguredChannelToken(effectiveConfig(), channel, args.token);
   if (args.help) {
     process.stdout.write(
-`codeclaw v${VERSION} — Run local coding agents through IM.
+`pikiclaw v${VERSION} — Run local coding agents through IM.
 
 Run a bot that forwards IM messages to a local AI coding agent
 (Claude Code or Codex CLI), streams responses in real-time, and manages
@@ -224,11 +224,11 @@ Channels are auto-detected from configured tokens. If both Feishu and
 Telegram tokens are present, both channels launch simultaneously.
 
 Usage:
-  npx codeclaw                              # auto-detect from config/env
-  npx codeclaw -w ~/project                 # set working directory
+  npx pikiclaw                              # auto-detect from config/env
+  npx pikiclaw -w ~/project                 # set working directory
 
 Options:
-  -t, --token <token>       Channel auth token (env: CODECLAW_TOKEN)
+  -t, --token <token>       Channel auth token (env: PIKICLAW_TOKEN)
   -a, --agent <agent>       AI agent: claude | codex  [default: codex]
   -m, --model <model>       Default model, switchable in chat via /models
   -w, --workdir <dir>       Working directory for the agent  [default: current process cwd]
@@ -245,12 +245,12 @@ Options:
   -h, --help                Print this help
 
 Environment variables (general):
-  CODECLAW_TOKEN             Channel auth token (same as -t, channel-agnostic)
+  PIKICLAW_TOKEN             Channel auth token (same as -t, channel-agnostic)
   DEFAULT_AGENT              Default agent (same as -a)
-  CODECLAW_WORKDIR           Working directory (same as -w)
-  CODECLAW_TIMEOUT           Timeout in seconds (same as --timeout)
-  CODECLAW_ALLOWED_IDS       Comma-separated chat/user ID whitelist
-  CODECLAW_FULL_ACCESS       Default full-access behavior (true/false)
+  PIKICLAW_WORKDIR           Working directory (same as -w)
+  PIKICLAW_TIMEOUT           Timeout in seconds (same as --timeout)
+  PIKICLAW_ALLOWED_IDS       Comma-separated chat/user ID whitelist
+  PIKICLAW_FULL_ACCESS       Default full-access behavior (true/false)
 
 Environment variables (Telegram):
   TELEGRAM_BOT_TOKEN         Telegram bot token (from @BotFather)
@@ -283,10 +283,10 @@ Environment variables (Feishu):
 Notes:
   - whatsapp is planned but not implemented yet.
   - --safe-mode delegates to the agent's own permission model; it does not add
-    a codeclaw-specific approval workflow.
+    a pikiclaw-specific approval workflow.
 
 Prerequisites: Node.js >= 18, and at least one agent CLI installed (claude or codex).
-Docs: https://github.com/xiaotonng/codeclaw
+Docs: https://github.com/xiaotonng/pikiclaw
 `);
     process.exit(0);
   }
@@ -329,8 +329,8 @@ Docs: https://github.com/xiaotonng/codeclaw
       // Dashboard is showing the config page. Wait until configuration becomes ready,
       // then continue startup without requiring a manual restart.
       const ts = new Date().toTimeString().slice(0, 8);
-      process.stdout.write(`[codeclaw ${ts}] waiting for configuration via dashboard...\n`);
-      process.stdout.write(`[codeclaw ${ts}] configure at ${dashboard.url}; startup will continue automatically once ready.\n`);
+      process.stdout.write(`[pikiclaw ${ts}] waiting for configuration via dashboard...\n`);
+      process.stdout.write(`[pikiclaw ${ts}] configure at ${dashboard.url}; startup will continue automatically once ready.\n`);
 
       while (true) {
         await new Promise(resolve => setTimeout(resolve, 1_000));
@@ -352,7 +352,7 @@ Docs: https://github.com/xiaotonng/codeclaw
       }
 
       const resumeTs = new Date().toTimeString().slice(0, 8);
-      process.stdout.write(`[codeclaw ${resumeTs}] configuration detected, starting bot channels...\n`);
+      process.stdout.write(`[pikiclaw ${resumeTs}] configuration detected, starting bot channels...\n`);
     }
   } else if (args.setup) {
     // Explicit --setup: use the terminal-based wizard
@@ -420,11 +420,11 @@ Docs: https://github.com/xiaotonng/codeclaw
     else if (ag === 'gemini') process.env.GEMINI_MODEL = args.model;
     else process.env.CLAUDE_MODEL = args.model;
   }
-  if (args.timeout != null) process.env.CODECLAW_TIMEOUT = String(args.timeout);
+  if (args.timeout != null) process.env.PIKICLAW_TIMEOUT = String(args.timeout);
   if (args.safeMode) {
     process.env.CODEX_FULL_ACCESS = 'false';
     process.env.CLAUDE_PERMISSION_MODE = 'default';
-  } else if (args.fullAccess || envBool('CODECLAW_FULL_ACCESS', true)) {
+  } else if (args.fullAccess || envBool('PIKICLAW_FULL_ACCESS', true)) {
     process.env.CODEX_FULL_ACCESS = 'true';
     process.env.CLAUDE_PERMISSION_MODE = 'bypassPermissions';
   }
@@ -432,7 +432,7 @@ Docs: https://github.com/xiaotonng/codeclaw
     overrides: runtimeConfig,
     log: message => {
       const ts = new Date().toTimeString().slice(0, 8);
-      process.stdout.write(`[codeclaw ${ts}] ${message}\n`);
+      process.stdout.write(`[pikiclaw ${ts}] ${message}\n`);
     },
   });
   process.once('exit', stopUserConfigSync);
@@ -464,7 +464,7 @@ Docs: https://github.com/xiaotonng/codeclaw
     await launchChannel(channels[0]);
   } else {
     const ts = new Date().toTimeString().slice(0, 8);
-    process.stdout.write(`[codeclaw ${ts}] launching channels: ${channels.join(', ')}\n`);
+    process.stdout.write(`[pikiclaw ${ts}] launching channels: ${channels.join(', ')}\n`);
     await Promise.all(channels.map(ch => launchChannel(ch)));
   }
 }

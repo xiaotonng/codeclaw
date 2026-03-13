@@ -15,7 +15,7 @@ import {
   type UsageOpts, type UsageResult,
   run, agentLog, detectAgentBin, buildStreamPreviewMeta,
   pushRecentActivity,
-  listCodeclawSessions, findCodeclawSession, isPendingSessionId,
+  listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   emptyUsage,
 } from './code-agent.js';
 
@@ -158,8 +158,8 @@ function getNativeGeminiSessions(workdir: string): SessionInfo[] {
 
 function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
   const resolvedWorkdir = path.resolve(workdir);
-  // Merge codeclaw-tracked sessions with native Gemini sessions
-  const codeclawSessions = listCodeclawSessions(resolvedWorkdir, 'gemini').map(record => ({
+  // Merge pikiclaw-tracked sessions with native Gemini sessions
+  const pikiclawSessions = listPikiclawSessions(resolvedWorkdir, 'gemini').map(record => ({
     sessionId: record.sessionId,
     agent: 'gemini' as const,
     workdir: record.workdir,
@@ -171,11 +171,11 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
   }));
   const nativeSessions = getNativeGeminiSessions(resolvedWorkdir);
 
-  // Merge: codeclaw records take precedence
+  // Merge: pikiclaw records take precedence
   // Filter out pending sessions — they haven't been confirmed by the agent yet
   const seen = new Set<string>();
   const merged: SessionInfo[] = [];
-  for (const s of codeclawSessions) {
+  for (const s of pikiclawSessions) {
     if (isPendingSessionId(s.sessionId)) continue;
     if (s.sessionId) seen.add(s.sessionId);
     merged.push(s);
@@ -190,7 +190,7 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
   const chatsDir = projectName ? path.join(process.env.HOME || '', '.gemini', 'tmp', projectName, 'chats') : '';
   agentLog(
     `[sessions:gemini] workdir=${resolvedWorkdir} projectName=${projectName || '(none)'} chatsDir=${chatsDir || '(none)'} ` +
-    `chatsDirExists=${chatsDir ? fs.existsSync(chatsDir) : false} codeclaw=${codeclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
+    `chatsDirExists=${chatsDir ? fs.existsSync(chatsDir) : false} pikiclaw=${pikiclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
   );
   return { ok: true, sessions, error: null };
 }

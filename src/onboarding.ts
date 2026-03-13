@@ -120,11 +120,11 @@ export function buildSetupGuide(state: SetupState, version: string, options?: { 
   const isTelegram = state.channel === 'telegram';
   const channelLabel = isTelegram ? 'Telegram' : state.channel === 'feishu' ? 'Feishu' : state.channel === 'whatsapp' ? 'WhatsApp' : 'your chat app';
   const lines: string[] = [
-    `codeclaw v${version}`,
+    `pikiclaw v${version}`,
     '',
     doctor ? 'Setup check' : 'First-time setup',
     '',
-    `codeclaw connects ${channelLabel} to a local coding agent running on your machine.`,
+    `pikiclaw connects ${channelLabel} to a local coding agent running on your machine.`,
     'Before the bot can start, make sure these basics are ready:',
     '1. Claude Code, Codex, or Gemini CLI installed locally',
     isTelegram
@@ -145,18 +145,18 @@ export function buildSetupGuide(state: SetupState, version: string, options?: { 
     lines.push('OK       A Telegram token was provided.');
   } else if (isTelegram) {
     lines.push(
-      'MISSING  No Telegram token configured in ~/.codeclaw/setting.json',
-      '         Run `codeclaw` to open the dashboard and configure, or:',
+      'MISSING  No Telegram token configured in ~/.pikiclaw/setting.json',
+      '         Run `pikiclaw` to open the dashboard and configure, or:',
       '         1. Open Telegram and search for @BotFather',
       '         2. Send /newbot and copy the token',
-      '         3. Add to ~/.codeclaw/setting.json: { "telegramBotToken": "..." }',
+      '         3. Add to ~/.pikiclaw/setting.json: { "telegramBotToken": "..." }',
     );
   } else if (state.channel === 'feishu' && state.tokenProvided) {
     lines.push('OK       Feishu credentials provided (FEISHU_APP_ID + FEISHU_APP_SECRET).');
   } else if (state.channel === 'feishu') {
     lines.push(
-      'MISSING  No Feishu credentials configured in ~/.codeclaw/setting.json',
-      '         Run `codeclaw` to open the dashboard and configure, or add feishuAppId/feishuAppSecret to setting.json.',
+      'MISSING  No Feishu credentials configured in ~/.pikiclaw/setting.json',
+      '         Run `pikiclaw` to open the dashboard and configure, or add feishuAppId/feishuAppSecret to setting.json.',
     );
   } else if (state.channel === 'whatsapp') {
     lines.push('MISSING  WhatsApp setup is not available yet. Use `--channel telegram` for now.');
@@ -169,20 +169,20 @@ export function buildSetupGuide(state: SetupState, version: string, options?: { 
   lines.push('');
   if (state.tokenProvided) {
     lines.push('Start command:');
-    lines.push('  npx codeclaw@latest');
+    lines.push('  npx pikiclaw@latest');
   } else if (!isTelegram) {
     lines.push('Start command:');
-    lines.push('  npx codeclaw@latest --channel telegram -t <YOUR_BOT_TOKEN>');
+    lines.push('  npx pikiclaw@latest --channel telegram -t <YOUR_BOT_TOKEN>');
   } else {
     lines.push('Start command after you have the token:');
-    lines.push('  npx codeclaw@latest -t <YOUR_BOT_TOKEN>');
+    lines.push('  npx pikiclaw@latest -t <YOUR_BOT_TOKEN>');
   }
 
   lines.push(
     '',
     'Tips:',
-    '  - Run `npx codeclaw@latest --doctor` any time to re-check your setup.',
-    '  - Run `npx codeclaw@latest --help` for the full CLI reference.',
+    '  - Run `npx pikiclaw@latest --doctor` any time to re-check your setup.',
+    '  - Run `npx pikiclaw@latest --help` for the full CLI reference.',
   );
 
   if (!doctor && !hasInstalledAgent(state)) {

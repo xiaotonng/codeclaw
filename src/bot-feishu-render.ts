@@ -22,6 +22,8 @@ import type { LivePreviewRenderer } from './bot-telegram-live-preview.js';
 import type { StreamPreviewRenderInput } from './bot-telegram-render.js';
 import { formatActivityCommandSummary, parseActivitySummary, renderPlanForPreview, summarizeActivityForPreview } from './bot-streaming.js';
 import type { FeishuCardActionItem, FeishuCardActionRow, FeishuCardView } from './channel-feishu.js';
+import path from 'node:path';
+import { listSubdirs } from './bot.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -382,7 +384,7 @@ export function renderModelsList(d: ModelsListData): string {
 export function renderSkillsList(d: SkillsListData): string {
   const lines = [`**Project Skills** (${d.skills.length})`, '', `**Agent:** ${d.agent}`, `**Workdir:** \`${d.workdir}\``];
   if (!d.skills.length) {
-    lines.push('', '*No project skills found in `.codeclaw/skills/` or `.claude/commands/`.*');
+    lines.push('', '*No project skills found in `.pikiclaw/skills/` or `.claude/commands/`.*');
     return lines.join('\n');
   }
 
@@ -448,7 +450,7 @@ export function renderSkillsCard(d: SkillsListData): FeishuCardView {
 
 export function renderStatus(d: StatusData): string {
   const lines = [
-    `**codeclaw** v${d.version}`,
+    `**pikiclaw** v${d.version}`,
     '',
     `**Uptime:** ${fmtUptime(d.uptime)}`,
     `**Memory:** ${(d.memRss / 1024 / 1024).toFixed(0)}MB RSS / ${(d.memHeap / 1024 / 1024).toFixed(0)}MB heap`,
@@ -478,6 +480,92 @@ export function renderStatus(d: StatusData): string {
     if (d.stats.totalCachedTokens) lines.push(`  Cached: ${fmtTokens(d.stats.totalCachedTokens)}`);
   }
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Directory browser (interactive workdir switcher)
+// ---------------------------------------------------------------------------
+
+class PathRegistry {
+  private pathToId = new Map<string, number>();
+  private idToPath = new Map<number, string>();
+  private nextId = 1;
+
+  register(dirPath: string): number {
+    let id = this.pathToId.get(dirPath);
+    if (id != null) return id;
+    id = this.nextId++;
+    this.pathToId.set(dirPath, id);
+    this.idToPath.set(id, dirPath);
+    if (this.pathToId.size > 500) {
+      const oldest = [...this.pathToId.entries()].slice(0, 200);
+      for (const [oldPath, oldId] of oldest) {
+        this.pathToId.delete(oldPath);
+        this.idToPath.delete(oldId);
+      }
+    }
+    return id;
+  }
+
+  resolve(id: number): string | undefined {
+    return this.idToPath.get(id);
+  }
+}
+
+const feishuPathRegistry = new PathRegistry();
+const DIR_PAGE_SIZE = 8;
+
+export function resolveFeishuRegisteredPath(id: number): string | undefined {
+  return feishuPathRegistry.resolve(id);
+}
+
+export function buildSwitchWorkdirCard(currentWorkdir: string, browsePath: string, page = 0): FeishuCardView {
+  const dirs = listSubdirs(browsePath);
+  const totalPages = Math.max(1, Math.ceil(dirs.length / DIR_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(0, page), totalPages - 1);
+  const slice = dirs.slice(currentPage * DIR_PAGE_SIZE, (currentPage + 1) * DIR_PAGE_SIZE);
+
+  // Text
+  const lines = ['**Workdir**'];
+  lines.push(`● \`${currentWorkdir}\``);
+  if (browsePath !== currentWorkdir) lines.push(`○ \`${browsePath}\``);
+
+  // Directory buttons (2 per row)
+  const dirRows: FeishuCardActionRow[] = [];
+  for (let i = 0; i < slice.length; i += 2) {
+    const rowActions: FeishuCardActionItem[] = [];
+    for (let j = i; j < Math.min(i + 2, slice.length); j++) {
+      const fullPath = path.join(browsePath, slice[j]);
+      const id = feishuPathRegistry.register(fullPath);
+      rowActions.push(cardButton(slice[j], `sw:n:${id}:0`));
+    }
+    dirRows.push({ actions: rowActions });
+  }
+
+  // Nav row: parent + pagination
+  const navActions: FeishuCardActionItem[] = [];
+  const parent = path.dirname(browsePath);
+  if (parent !== browsePath) {
+    navActions.push(cardButton('⬆ ..', `sw:n:${feishuPathRegistry.register(parent)}:0`));
+  }
+  if (totalPages > 1) {
+    const browseId = feishuPathRegistry.register(browsePath);
+    if (currentPage > 0) navActions.push(cardButton(`◀ ${currentPage}/${totalPages}`, `sw:n:${browseId}:${currentPage - 1}`));
+    if (currentPage < totalPages - 1) navActions.push(cardButton(`${currentPage + 2}/${totalPages} ▶`, `sw:n:${browseId}:${currentPage + 1}`));
+  }
+
+  // Select button
+  const selectActions: FeishuCardActionItem[] = [
+    cardButton('✓ Use This', `sw:s:${feishuPathRegistry.register(browsePath)}`, true),
+  ];
+
+  const rows = [
+    ...dirRows,
+    ...(navActions.length ? [{ actions: navActions }] : []),
+    { actions: selectActions },
+  ];
+
+  return { markdown: lines.join('\n'), rows };
 }
 
 export function renderHost(d: HostData): string {

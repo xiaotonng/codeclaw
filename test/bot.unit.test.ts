@@ -13,14 +13,14 @@ import { Bot } from '../src/bot.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 import { makeStreamResult } from './support/stream-result.ts';
 
-const envSnapshot = captureEnv(['CODECLAW_CONFIG', 'CODECLAW_WORKDIR', 'DEFAULT_AGENT']);
+const envSnapshot = captureEnv(['PIKICLAW_CONFIG', 'PIKICLAW_WORKDIR', 'DEFAULT_AGENT']);
 
 beforeEach(() => {
   restoreEnv(envSnapshot);
   vi.clearAllMocks();
   const tmpConfig = makeTmpDir('bot-unit-config-');
-  process.env.CODECLAW_CONFIG = `${tmpConfig}/setting.json`;
-  process.env.CODECLAW_WORKDIR = makeTmpDir('bot-unit-workdir-');
+  process.env.PIKICLAW_CONFIG = `${tmpConfig}/setting.json`;
+  process.env.PIKICLAW_WORKDIR = makeTmpDir('bot-unit-workdir-');
   process.env.DEFAULT_AGENT = 'codex';
 });
 

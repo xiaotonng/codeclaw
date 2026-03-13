@@ -1,5 +1,5 @@
 /**
- * mcp-session-server.ts — MCP server process for codeclaw session bridge.
+ * mcp-session-server.ts — MCP server process for pikiclaw session bridge.
  *
  * Spawned by the agent CLI (claude/codex/gemini) via --mcp-config or codex mcp add.
  * Communicates with the agent over stdio using the MCP protocol (JSON-RPC 2.0).
@@ -11,12 +11,12 @@
  * Context is injected via environment variables:
  *   MCP_WORKSPACE_PATH — absolute path to the session workspace
  *   MCP_STAGED_FILES   — JSON array of staged file relative paths
- *   MCP_CALLBACK_URL   — HTTP URL for the codeclaw callback server
+ *   MCP_CALLBACK_URL   — HTTP URL for the pikiclaw callback server
  *
  * Tools:
- *   codeclaw_get_session_info    — returns workspace path and staged files
- *   codeclaw_list_workspace_files — lists files in the workspace directory
- *   codeclaw_send_file           — sends a workspace file back to the IM chat
+ *   pikiclaw_get_session_info    — returns workspace path and staged files
+ *   pikiclaw_list_workspace_files — lists files in the workspace directory
+ *   pikiclaw_send_file           — sends a workspace file back to the IM chat
  */
 
 import fs from 'node:fs';
@@ -120,16 +120,16 @@ process.stdin.on('end', () => process.exit(0));
 
 const TOOLS = [
   {
-    name: 'codeclaw_get_session_info',
-    description: 'Get the current codeclaw session workspace path and list of user-uploaded files.',
+    name: 'pikiclaw_get_session_info',
+    description: 'Get the current pikiclaw session workspace path and list of user-uploaded files.',
     inputSchema: {
       type: 'object' as const,
       properties: {},
     },
   },
   {
-    name: 'codeclaw_list_workspace_files',
-    description: 'List files and directories in the codeclaw session workspace.',
+    name: 'pikiclaw_list_workspace_files',
+    description: 'List files and directories in the pikiclaw session workspace.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -141,7 +141,7 @@ const TOOLS = [
     },
   },
   {
-    name: 'codeclaw_send_file',
+    name: 'pikiclaw_send_file',
     description: [
       'Send a file back to the user via their IM chat.',
       'IMPORTANT: You MUST call this tool to send any file (image, document, etc.) to the user. Do NOT just print the file path — the user cannot access local files.',
@@ -236,7 +236,7 @@ async function handleSendFile(id: unknown, args: Record<string, unknown>) {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP callback to codeclaw main process
+// HTTP callback to pikiclaw main process
 // ---------------------------------------------------------------------------
 
 function callbackSendFile(
@@ -283,7 +283,7 @@ function handleMessage(msg: any) {
       respond(id, {
         protocolVersion: params?.protocolVersion || '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'codeclaw-session', version: '1.0.0' },
+        serverInfo: { name: 'pikiclaw-session', version: '1.0.0' },
       });
       break;
 
@@ -299,13 +299,13 @@ function handleMessage(msg: any) {
       const name = params?.name;
       const args = params?.arguments || {};
       switch (name) {
-        case 'codeclaw_get_session_info':
+        case 'pikiclaw_get_session_info':
           handleGetSessionInfo(id);
           break;
-        case 'codeclaw_list_workspace_files':
+        case 'pikiclaw_list_workspace_files':
           handleListWorkspaceFiles(id, args);
           break;
-        case 'codeclaw_send_file':
+        case 'pikiclaw_send_file':
           void handleSendFile(id, args);
           break;
         default:

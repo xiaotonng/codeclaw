@@ -60,6 +60,8 @@ import {
   renderStart,
   renderStatus,
   renderHost,
+  buildSwitchWorkdirCard,
+  resolveFeishuRegisteredPath,
 } from './bot-feishu-render.js';
 import { FeishuChannel, type FeishuContext, type FeishuCallbackContext, type FeishuMessage } from './channel-feishu.js';
 import { splitText, supportsChannelCapability } from './channel-base.js';
@@ -418,22 +420,20 @@ export class FeishuBot extends Bot {
 
   private async cmdSwitch(ctx: FeishuContext, args: string) {
     const arg = args.trim();
-    if (!arg) {
-      await ctx.reply(
-        `**Current workdir:** \`${this.workdir}\`\n\n` +
-        `To switch, reply: /switch /path/to/directory`,
-      );
+    if (arg) {
+      const resolvedPath = path.resolve(arg.replace(/^~/, process.env.HOME || ''));
+      if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isDirectory()) {
+        await ctx.reply(`Not a valid directory: \`${resolvedPath}\``);
+        return;
+      }
+      const oldPath = this.switchWorkdir(resolvedPath);
+      await ctx.reply(`**Workdir switched**\n\n\`${oldPath}\`\n↓\n\`${resolvedPath}\``);
       return;
     }
 
-    const resolvedPath = path.resolve(arg.replace(/^~/, process.env.HOME || ''));
-    if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isDirectory()) {
-      await ctx.reply(`Not a valid directory: \`${resolvedPath}\``);
-      return;
-    }
-
-    const oldPath = this.switchWorkdir(resolvedPath);
-    await ctx.reply(`**Workdir switched**\n\n\`${oldPath}\`\n↓\n\`${resolvedPath}\``);
+    const browsePath = path.dirname(this.workdir);
+    const view = buildSwitchWorkdirCard(this.workdir, browsePath);
+    await ctx.channel.sendCard(ctx.chatId, view);
   }
 
   private async cmdRestart(ctx: FeishuContext) {
@@ -442,7 +442,7 @@ export class FeishuBot extends Bot {
       await ctx.reply(`⚠ ${formatActiveTaskRestartError(activeTasks)}`);
       return;
     }
-    await ctx.reply('**Restarting codeclaw...**\n\nPulling latest version. The bot will be back shortly.');
+    await ctx.reply('**Restarting pikiclaw...**\n\nPulling latest version. The bot will be back shortly.');
     void requestProcessRestart({ log: msg => this.log(msg) });
   }
 
@@ -491,7 +491,7 @@ export class FeishuBot extends Bot {
     this.log(`[handleMessage] queued chat=${ctx.chatId} agent=${session.agent} session=${session.sessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${files.length}`);
 
     // Send streaming card (CardKit typewriter effect) or fall back to regular card
-    const placeholderId = await this.channel.sendStreamingCard(ctx.chatId, buildInitialPreviewMarkdown(session.agent));
+    const placeholderId = await this.channel.sendStreamingCard(ctx.chatId, buildInitialPreviewMarkdown(session.agent), { replyTo: ctx.messageId || undefined });
     if (placeholderId) {
       this.registerSessionMessage(ctx.chatId, placeholderId, session);
       this.log(`[handleMessage] streaming card sent msg_id=${placeholderId}`);
@@ -709,6 +709,9 @@ export class FeishuBot extends Bot {
 
   private async handleCallback(data: string, ctx: FeishuCallbackContext) {
     try {
+      if (await this.handleSwitchNavigateCallback(data, ctx)) return;
+      if (await this.handleSwitchSelectCallback(data, ctx)) return;
+
       const action = decodeCommandAction(data);
       if (!action) return;
       const result = await executeCommandAction(this, ctx.chatId, action, {
@@ -718,6 +721,29 @@ export class FeishuBot extends Bot {
     } catch (e: any) {
       this.log(`callback error: ${e}`);
     }
+  }
+
+  private async handleSwitchNavigateCallback(data: string, ctx: FeishuCallbackContext): Promise<boolean> {
+    if (!data.startsWith('sw:n:')) return false;
+    const [pathId, pageRaw] = data.slice(5).split(':');
+    const browsePath = resolveFeishuRegisteredPath(parseInt(pathId, 10));
+    if (!browsePath) return true;
+    const view = buildSwitchWorkdirCard(this.workdir, browsePath, parseInt(pageRaw, 10) || 0);
+    await ctx.channel.editCard(ctx.chatId, ctx.messageId, view);
+    return true;
+  }
+
+  private async handleSwitchSelectCallback(data: string, ctx: FeishuCallbackContext): Promise<boolean> {
+    if (!data.startsWith('sw:s:')) return false;
+    const dirPath = resolveFeishuRegisteredPath(parseInt(data.slice(5), 10));
+    if (!dirPath || !fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) return true;
+
+    const oldPath = this.switchWorkdir(dirPath);
+    await ctx.editReply(
+      ctx.messageId,
+      `**Workdir**\n● \`${oldPath}\`\n→ \`${dirPath}\``,
+    );
+    return true;
   }
 
   private async previewCurrentSessionTurn(chatId: string, agent: Agent, sessionId: string | null) {
@@ -739,7 +765,7 @@ export class FeishuBot extends Bot {
   // ---- lifecycle ------------------------------------------------------------
 
   async run() {
-    const tmpDir = path.join(os.tmpdir(), 'codeclaw');
+    const tmpDir = path.join(os.tmpdir(), 'pikiclaw');
     fs.mkdirSync(tmpDir, { recursive: true });
 
     this.channel = new FeishuChannel({
@@ -800,7 +826,7 @@ export class FeishuBot extends Bot {
       return;
     }
 
-    const text = `**${VERSION}** codeclaw is online.\nSend /start to get started.`;
+    const text = `**${VERSION}** pikiclaw is online.\nSend /start to get started.`;
     for (const cid of targets) {
       try {
         await this.channel.send(cid, text);

@@ -91,10 +91,10 @@ const timer = setTimeout(() => { console.error('FAIL: global timeout'); process.
 
 console.log('--- restart e2e test ---\n');
 
-// 1. Spawn daemon with CODECLAW_RESTART_CMD pointing to local code
+// 1. Spawn daemon with PIKICLAW_RESTART_CMD pointing to local code
 const child = spawn('npx', ['tsx', CLI_PATH, '-c', 'telegram', '-t', TOKEN], {
   stdio: ['pipe', 'pipe', 'pipe'],
-  env: { ...process.env, CODECLAW_RESTART_CMD: `npx tsx ${CLI_PATH}` },
+  env: { ...process.env, PIKICLAW_RESTART_CMD: `npx tsx ${CLI_PATH}` },
   cwd: process.cwd(),
 });
 

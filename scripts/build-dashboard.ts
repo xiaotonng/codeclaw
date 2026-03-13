@@ -28,7 +28,7 @@ let html = fs.readFileSync(DIST_HTML, 'utf-8');
 // 3. Inject version placeholder — replace the literal string %%VERSION%% at runtime
 //    We need the dashboard-ui.ts to accept { version } and inject it.
 //    Strategy: Insert a meta tag that JS can read, or use a simple string replace.
-//    We'll insert a <meta name="codeclaw-version"> tag that the React app can read,
+//    We'll insert a <meta name="pikiclaw-version"> tag that the React app can read,
 //    but simpler: just use template literal replacement.
 
 // Escape backticks and ${} in the HTML for safe embedding in a JS template literal
@@ -41,8 +41,8 @@ const tsContent = `/**
  */
 
 export function getDashboardHtml(opts: { version: string }): string {
-  // The React app reads version from window.__CODECLAW_VERSION__
-  return \`${html}\`.replace('</head>', \`<script>window.__CODECLAW_VERSION__="\${opts.version}"</script></head>\`);
+  // The React app reads version from window.__PIKICLAW_VERSION__
+  return \`${html}\`.replace('</head>', \`<script>window.__PIKICLAW_VERSION__="\${opts.version}"</script></head>\`);
 }
 `;
 

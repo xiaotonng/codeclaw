@@ -1,10 +1,10 @@
 ---
 name: install
-description: This skill should be used when the user asks to "install codeclaw", "build and install", "deploy locally", "update local binary", "release", or "publish".
+description: This skill should be used when the user asks to "install pikiclaw", "build and install", "deploy locally", "update local binary", "release", or "publish".
 version: 8.0.0
 ---
 
-# Install & Publish codeclaw
+# Install & Publish pikiclaw
 
 ## 1. Run the release script
 
@@ -38,7 +38,7 @@ After CI creates the GitHub Release, update it with meaningful release notes:
    ### Bug Fixes
    - description of fix
 
-   **Full Changelog**: https://github.com/xiaotonng/codeclaw/compare/v<previous-version>...v<new-version>
+   **Full Changelog**: https://github.com/xiaotonng/pikiclaw/compare/v<previous-version>...v<new-version>
    EOF
    )"
    ```
@@ -49,4 +49,4 @@ After CI creates the GitHub Release, update it with meaningful release notes:
 - `npm link` creates a global symlink - rebuild with `npm run build` after code changes.
 - The `files` field in `package.json` controls what gets published: `dist/`, `LICENSE`, `README.md`.
 - CI pipeline (`.github/workflows/release.yml`): builds, publishes to npm, and creates GitHub Release on `v*` tag push.
-- To uninstall locally: `npm unlink -g codeclaw`.
+- To uninstall locally: `npm unlink -g pikiclaw`.

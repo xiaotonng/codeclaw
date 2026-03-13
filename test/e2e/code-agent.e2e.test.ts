@@ -128,7 +128,7 @@ function writeRedPng(filePath: string) {
 }
 
 describe.skipIf(!HAS_CLAUDE && !HAS_CODEX)('advanced: attachments', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-attach-'));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-attach-'));
 
   it.skipIf(!HAS_CLAUDE)('claude recognizes image content', async () => {
     const imgPath = path.join(tmpDir, 'red.png');
@@ -185,13 +185,13 @@ const SCREENSHOT_PROMPT = (outPath: string) => [
   `Open my default Chrome browser (not headless, not puppeteer) to do the following:`,
   `1. Use "open" command (macOS) or equivalent to open https://example.com in Chrome`,
   `2. Wait 3 seconds for the page to load`,
-  `3. Use AppleScript (osascript) to execute this JS in the Chrome tab: document.title = "CODECLAW_TEST_" + Date.now()`,
+  `3. Use AppleScript (osascript) to execute this JS in the Chrome tab: document.title = "PIKICLAW_TEST_" + Date.now()`,
   `4. Use screencapture command to take a screenshot and save it to: ${outPath}`,
   `After you are done, reply with the exact string: SCREENSHOT_DONE`,
 ].join('\n');
 
 describe.skipIf(!HAS_CLAUDE && !HAS_CODEX)('advanced: browser screenshot', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-browser-'));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-browser-'));
 
   it.skipIf(!HAS_CLAUDE)('claude can open browser, run JS, and screenshot', async () => {
     const outPath = path.join(tmpDir, 'claude-screenshot.png');

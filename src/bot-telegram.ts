@@ -118,7 +118,7 @@ export class TelegramBot extends Bot {
       if (!opts.initial) this.log('telegram token reloaded from setting.json');
     }
 
-    const mergedAllowed = parseAllowedChatIds(process.env.CODECLAW_ALLOWED_IDS || '');
+    const mergedAllowed = parseAllowedChatIds(process.env.PIKICLAW_ALLOWED_IDS || '');
     for (const id of parseAllowedChatIds(String(config.telegramAllowedChatIds || ''))) mergedAllowed.add(id);
     this.allowedChatIds = mergedAllowed;
   }
@@ -386,7 +386,7 @@ export class TelegramBot extends Bot {
   private async cmdStatus(ctx: TgContext) {
     const d = await getStatusDataAsync(this, ctx.chatId);
     const lines = [
-      `<b>codeclaw</b> v${d.version}\n`,
+      `<b>pikiclaw</b> v${d.version}\n`,
       `<b>Uptime:</b> ${fmtUptime(d.uptime)}`,
       `<b>Memory:</b> ${(d.memRss / 1024 / 1024).toFixed(0)}MB RSS / ${(d.memHeap / 1024 / 1024).toFixed(0)}MB heap`,
       `<b>PID:</b> ${d.pid}`,
@@ -454,7 +454,7 @@ export class TelegramBot extends Bot {
       return;
     }
     await ctx.reply(
-      `<b>Restarting codeclaw...</b>\n\n` +
+      `<b>Restarting pikiclaw...</b>\n\n` +
       `The bot will be back shortly.`,
       { parseMode: 'HTML' },
     );
@@ -795,7 +795,7 @@ export class TelegramBot extends Bot {
   // ---- lifecycle ------------------------------------------------------------
 
   async run() {
-    const tmpDir = path.join(os.tmpdir(), 'codeclaw');
+    const tmpDir = path.join(os.tmpdir(), 'pikiclaw');
     fs.mkdirSync(tmpDir, { recursive: true });
 
     this.channel = new TelegramChannel({

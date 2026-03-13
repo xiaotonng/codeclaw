@@ -1,10 +1,10 @@
 {
-  "name": "codeclaw",
-  "version": "0.2.34",
+  "name": "pikiclaw",
+  "version": "0.2.35",
   "description": "The best IM-driven remote coding experience. Bridge AI coding agents to any IM.",
   "type": "module",
   "bin": {
-    "codeclaw": "dist/cli.js"
+    "pikiclaw": "dist/cli.js"
   },
   "files": [
     "dist/",
@@ -24,7 +24,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xiaotonng/codeclaw.git"
+    "url": "git+https://github.com/xiaotonng/pikiclaw.git"
   },
   "scripts": {
     "dev": "npm run build:dashboard && tsx src/cli.ts",
