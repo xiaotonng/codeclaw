@@ -23,12 +23,19 @@ import { VERSION } from './version.js';
 // Welcome / Start
 // ---------------------------------------------------------------------------
 
+export interface AgentDetail {
+  agent: Agent;
+  model: string;
+  effort: string | null;
+}
+
 export interface StartData {
   title: string;
   subtitle: string;
   version: string;
   agent: Agent;
   workdir: string;
+  agentDetails: AgentDetail[];
   commands: Array<{ command: string; description: string }>;
 }
 
@@ -39,10 +46,18 @@ export function getStartData(bot: Bot, chatId: ChatId): StartData {
   const installedCount = res.agents.filter(a => a.installed).length;
   const skillRes = bot.fetchSkills();
   const commands = buildDefaultMenuCommands(installedCount, skillRes.skills);
+  const agentDetails: AgentDetail[] = res.agents
+    .filter(a => a.installed)
+    .map(a => ({
+      agent: a.agent,
+      model: bot.modelForAgent(a.agent) || '(default)',
+      effort: bot.effortForAgent(a.agent),
+    }));
   return {
     ...intro,
     agent: cs.agent,
     workdir: bot.workdir,
+    agentDetails,
     commands,
   };
 }

@@ -22,11 +22,11 @@ import type { McpSendFileCallback } from './mcp-bridge.js';
 import { shutdownAllDrivers } from './agent-driver.js';
 import {
   buildDefaultMenuCommands,
-  buildWelcomeIntro,
   SKILL_CMD_PREFIX,
 } from './bot-menu.js';
 import {
   getStartData,
+  type StartData,
   getStatusDataAsync,
   getHostDataSync,
   getSessionTurnPreviewData,
@@ -226,14 +226,6 @@ export class TelegramBot extends Bot {
     return { commands, skillCount: skillRes.skills.length, skills: skillRes.skills };
   }
 
-  private welcomeIntroLines(): string[] {
-    const intro = buildWelcomeIntro(VERSION);
-    return [
-      `<b>${escapeHtml(intro.title)}</b> v${escapeHtml(intro.version)}`,
-      escapeHtml(intro.subtitle),
-    ];
-  }
-
   private createTaskId(session: SessionRuntime): string {
     const seq = this.nextTaskId++;
     return `${session.key}:${Date.now().toString(36)}:${seq.toString(36)}`;
@@ -307,6 +299,10 @@ export class TelegramBot extends Bot {
 
   private async cmdStart(ctx: TgContext) {
     const d = getStartData(this, ctx.chatId);
+    await ctx.reply(this.renderStartHtml(d), { parseMode: 'HTML' });
+  }
+
+  private renderStartHtml(d: StartData): string {
     const lines = [
       `<b>${escapeHtml(d.title)}</b> v${escapeHtml(d.version)}`,
       escapeHtml(d.subtitle),
@@ -314,10 +310,17 @@ export class TelegramBot extends Bot {
       `<b>Agent:</b> ${escapeHtml(d.agent)}`,
       `<b>Workdir:</b> <code>${escapeHtml(d.workdir)}</code>`,
       '',
+      '<b>Agents</b>',
+      ...d.agentDetails.map(a => {
+        const parts = [`  <b>${escapeHtml(a.agent)}</b>: ${escapeHtml(a.model)}`];
+        if (a.effort) parts[0] += ` (effort: ${escapeHtml(a.effort)})`;
+        return parts[0];
+      }),
+      '',
       '<b>Commands</b>',
       ...formatMenuLines(d.commands),
     ];
-    await ctx.reply(lines.join('\n'), { parseMode: 'HTML' });
+    return lines.join('\n');
   }
 
   private async cmdSkills(ctx: TgContext) {
@@ -858,10 +861,10 @@ export class TelegramBot extends Bot {
       return;
     }
 
-    const text = this.welcomeIntroLines().join('\n');
-
     for (const cid of targets) {
       try {
+        const d = getStartData(this, cid);
+        const text = this.renderStartHtml(d);
         await this.channel.send(cid, text, { parseMode: 'HTML' });
         this.log(`startup notice sent to chat=${cid}`);
       } catch (e) {

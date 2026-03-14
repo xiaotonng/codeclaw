@@ -31,70 +31,77 @@ describe('Claude usage resolution', () => {
     else process.env.HOME = originalHome;
   });
 
-  it('falls through to telemetry when OAuth API returns a rate_limit_error', async () => {
-    // OAuth returns an error object — the code intentionally ignores this
-    // (it's a query-API rate limit, not the user's actual usage) and falls
-    // through to telemetry.
-    const telemetryDir = path.join(homeDir, '.claude', 'telemetry');
-    fs.mkdirSync(telemetryDir, { recursive: true });
-    fs.writeFileSync(path.join(telemetryDir, 'events.json'), JSON.stringify({
-      event_type: 'ClaudeCodeInternalEvent',
-      event_data: {
-        event_name: 'tengu_claudeai_limits_status_changed',
-        client_timestamp: new Date(Date.now() - 60_000).toISOString(), // 1 minute ago
-        model: 'claude-opus-4-6',
-        additional_metadata: JSON.stringify({ status: 'allowed_warning', hoursTillReset: 39 }),
-      },
-    }));
+  it('falls through to telemetry when OAuth fails and generates age-based labels', async () => {
+    // --- OAuth rate_limit_error scenario ---
+    {
+      const telemetryDir = path.join(homeDir, '.claude', 'telemetry');
+      fs.mkdirSync(telemetryDir, { recursive: true });
+      fs.writeFileSync(path.join(telemetryDir, 'events.json'), JSON.stringify({
+        event_type: 'ClaudeCodeInternalEvent',
+        event_data: {
+          event_name: 'tengu_claudeai_limits_status_changed',
+          client_timestamp: new Date(Date.now() - 60_000).toISOString(), // 1 minute ago
+          model: 'claude-opus-4-6',
+          additional_metadata: JSON.stringify({ status: 'allowed_warning', hoursTillReset: 39 }),
+        },
+      }));
 
-    execSyncMock.mockImplementation((cmd: string) => {
-      if (cmd.includes('security find-generic-password')) {
-        return JSON.stringify({ claudeAiOauth: { accessToken: 'oauth-token' } });
-      }
-      if (cmd.includes('api/oauth/usage')) {
-        return JSON.stringify({
-          error: {
-            type: 'rate_limit_error',
-            message: 'Rate limited. Please try again later.',
-          },
-        });
-      }
-      throw new Error(`Unexpected command: ${cmd}`);
-    });
+      execSyncMock.mockImplementation((cmd: string) => {
+        if (cmd.includes('security find-generic-password')) {
+          return JSON.stringify({ claudeAiOauth: { accessToken: 'oauth-token' } });
+        }
+        if (cmd.includes('api/oauth/usage')) {
+          return JSON.stringify({
+            error: {
+              type: 'rate_limit_error',
+              message: 'Rate limited. Please try again later.',
+            },
+          });
+        }
+        throw new Error(`Unexpected command: ${cmd}`);
+      });
 
-    const { getUsage } = await import('../src/code-agent.ts');
-    const usage = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
+      const { getUsage } = await import('../src/code-agent.ts');
+      const usage = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
 
-    // Should fall through to telemetry, not report the OAuth error
-    expect(usage.ok).toBe(true);
-    expect(usage.source).toBe('telemetry');
-    expect(usage.status).toBe('warning');
-  });
+      // Should fall through to telemetry, not report the OAuth error
+      expect(usage.ok).toBe(true);
+      expect(usage.source).toBe('telemetry');
+      expect(usage.status).toBe('warning');
+    }
 
-  it('generates age-based labels for telemetry fallback', async () => {
-    const telemetryDir = path.join(homeDir, '.claude', 'telemetry');
-    fs.mkdirSync(telemetryDir, { recursive: true });
-    // Write a recent telemetry event (5 minutes ago) so label is deterministic
-    fs.writeFileSync(path.join(telemetryDir, 'events.json'), JSON.stringify({
-      event_type: 'ClaudeCodeInternalEvent',
-      event_data: {
-        event_name: 'tengu_claudeai_limits_status_changed',
-        client_timestamp: new Date(Date.now() - 5 * 60_000).toISOString(), // 5 minutes ago
-        model: 'claude-opus-4-6',
-        additional_metadata: JSON.stringify({ status: 'allowed_warning', hoursTillReset: 39 }),
-      },
-    }));
+    // Reset modules and mocks for the next scenario
+    vi.resetModules();
+    execSyncMock.mockReset();
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-claude-usage-'));
+    process.env.HOME = homeDir;
 
-    execSyncMock.mockImplementation(() => {
-      throw new Error('No OAuth token');
-    });
+    // --- Age-based labels scenario ---
+    {
+      const telemetryDir = path.join(homeDir, '.claude', 'telemetry');
+      fs.mkdirSync(telemetryDir, { recursive: true });
+      // Write a recent telemetry event (5 minutes ago) so label is deterministic
+      fs.writeFileSync(path.join(telemetryDir, 'events.json'), JSON.stringify({
+        event_type: 'ClaudeCodeInternalEvent',
+        event_data: {
+          event_name: 'tengu_claudeai_limits_status_changed',
+          client_timestamp: new Date(Date.now() - 5 * 60_000).toISOString(), // 5 minutes ago
+          model: 'claude-opus-4-6',
+          additional_metadata: JSON.stringify({ status: 'allowed_warning', hoursTillReset: 39 }),
+        },
+      }));
 
-    const { getUsage } = await import('../src/code-agent.ts');
-    const usage = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
+      execSyncMock.mockImplementation(() => {
+        throw new Error('No OAuth token');
+      });
 
-    expect(usage.ok).toBe(true);
-    expect(usage.source).toBe('telemetry');
-    expect(usage.windows[0]?.label).toMatch(/^\d+m ago$/); // e.g. "5m ago"
-    expect(usage.windows[0]?.status).toBe('warning');
+      const { getUsage } = await import('../src/code-agent.ts');
+      const usage = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
+
+      expect(usage.ok).toBe(true);
+      expect(usage.source).toBe('telemetry');
+      expect(usage.windows[0]?.label).toMatch(/^\d+m ago$/); // e.g. "5m ago"
+      expect(usage.windows[0]?.status).toBe('warning');
+    }
   });
 });

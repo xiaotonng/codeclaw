@@ -7,7 +7,8 @@ describe('dashboard api', () => {
     vi.unstubAllGlobals();
   });
 
-  it('times out hung Feishu validation requests on the client side', async () => {
+  it('times out hung Feishu validation requests and builds paginated session requests per agent', async () => {
+    // --- Feishu timeout scenario ---
     vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       const signal = init?.signal;
       const abortError = Object.assign(new Error('aborted'), { name: 'AbortError' });
@@ -21,9 +22,11 @@ describe('dashboard api', () => {
     await expect(
       api.validateFeishuConfig('cli_xxx', 'secret-value', { timeoutMs: 25 }),
     ).rejects.toThrow(/timed out/i);
-  });
 
-  it('builds paginated session requests per agent', async () => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+
+    // --- Paginated session requests scenario ---
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       ok: true,
       sessions: [],

@@ -31,16 +31,18 @@ afterEach(() => {
 });
 
 describe('Bot.runStream', () => {
-  it('defaults to codex when DEFAULT_AGENT is unset', () => {
+  it('manages codex cumulative totals across turns and workdir switches', async () => {
+    // --- defaults to codex when DEFAULT_AGENT is unset ---
     delete process.env.DEFAULT_AGENT;
 
-    const bot = new Bot();
+    const defaultBot = new Bot();
 
-    expect(bot.defaultAgent).toBe('codex');
-    expect(bot.chat(1).agent).toBe('codex');
-  });
+    expect(defaultBot.defaultAgent).toBe('codex');
+    expect(defaultBot.chat(1).agent).toBe('codex');
 
-  it('passes prior Codex cumulative totals into resumed turns and stores updated totals', async () => {
+    // --- passes prior Codex cumulative totals into resumed turns and stores updated totals ---
+    process.env.DEFAULT_AGENT = 'codex';
+
     const doStreamMock = vi.mocked(doStream);
     doStreamMock
       .mockImplementationOnce(async opts => {
@@ -77,20 +79,19 @@ describe('Bot.runStream', () => {
     expect(result.cachedInputTokens).toBe(2500);
     expect(result.outputTokens).toBe(60);
     expect(cs.codexCumulative).toEqual({ input: 8300, output: 360, cached: 6500 });
-  });
 
-  it('clears cached Codex cumulative totals when switching workdirs', () => {
-    const bot = new Bot();
-    const cs = bot.chat(1);
-    cs.agent = 'codex';
-    cs.sessionId = 'sess-existing';
-    cs.codexCumulative = { input: 8300, output: 360, cached: 6500 };
+    // --- clears cached Codex cumulative totals when switching workdirs ---
+    const bot2 = new Bot();
+    const cs2 = bot2.chat(1);
+    cs2.agent = 'codex';
+    cs2.sessionId = 'sess-existing';
+    cs2.codexCumulative = { input: 8300, output: 360, cached: 6500 };
 
     const nextWorkdir = makeTmpDir('bot-unit-next-');
-    bot.switchWorkdir(nextWorkdir);
+    bot2.switchWorkdir(nextWorkdir);
 
-    expect(cs.sessionId).toBeNull();
-    expect(cs.codexCumulative).toBeUndefined();
+    expect(cs2.sessionId).toBeNull();
+    expect(cs2.codexCumulative).toBeUndefined();
   });
 
 });

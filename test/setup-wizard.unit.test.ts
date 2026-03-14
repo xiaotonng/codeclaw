@@ -54,7 +54,8 @@ describe('setup wizard', () => {
     restoreEnv(envSnapshot);
   });
 
-  it('walks through install, login, token validation, and config save', async () => {
+  it('walks through install, login, token validation, config save, and abort', async () => {
+    // --- full walkthrough: install, login, token validation, and config save ---
     let agents: AgentInfo[] = [
       { agent: 'claude', installed: false, path: null, version: null },
       { agent: 'codex', installed: false, path: null, version: null },
@@ -119,34 +120,33 @@ describe('setup wizard', () => {
     ]);
     expect(io.output).toContain('Telegram rejected this token: Unauthorized');
     expect(io.output).toContain('Telegram bot verified: @pikiclaw_test_bot (Pikiclaw Test)');
-  });
 
-  it('can abort before installation', async () => {
-    const io = new FakeIO([
+    // --- abort before installation ---
+    const abortIo = new FakeIO([
       '2',
       'n',
     ]);
-    const agents: AgentInfo[] = [
+    const abortAgents: AgentInfo[] = [
       { agent: 'claude', installed: false, path: null, version: null },
       { agent: 'codex', installed: false, path: null, version: null },
     ];
 
-    const result = await runSetupWizard({
+    const abortResult = await runSetupWizard({
       version: '0.2.22',
       channel: 'telegram',
       argsAgent: null,
       currentToken: null,
-      initialState: makeState(agents, false),
-      listAgents: () => agents,
-      io,
+      initialState: makeState(abortAgents, false),
+      listAgents: () => abortAgents,
+      io: abortIo,
       validateTelegramToken: async () => ({ ok: false, bot: null, error: 'should not be called' }),
       persistConfig(config) {
         return JSON.stringify(config);
       },
     });
 
-    expect(result.completed).toBe(false);
-    expect(result.agent).toBe('claude');
-    expect(io.commands).toEqual([]);
+    expect(abortResult.completed).toBe(false);
+    expect(abortResult.agent).toBe('claude');
+    expect(abortIo.commands).toEqual([]);
   });
 });

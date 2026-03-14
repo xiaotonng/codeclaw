@@ -261,10 +261,31 @@ export async function validateFeishuConfig(
       };
     }
 
-    const app = { appId: trimmedAppId, displayName: null };
-    feishuValidationLog(appLabel, `verified elapsedMs=${Date.now() - startedAt}`);
+    // Try to fetch bot display name using the tenant access token
+    let botDisplayName: string | null = null;
+    try {
+      const botResp: any = await withTimeout(
+        fetch(`${apiDomain}/open-apis/bot/v3/info`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${parsed.tenant_access_token}` },
+        }).then(r => r.json()),
+        5_000,
+        'Feishu bot info',
+      );
+      if (botResp?.bot?.app_name) {
+        botDisplayName = botResp.bot.app_name;
+      }
+    } catch {
+      // Non-critical — proceed without bot name
+    }
+
+    const app = { appId: trimmedAppId, displayName: botDisplayName };
+    const identity = botDisplayName
+      ? `${botDisplayName} (${appLabel})`
+      : `App ${appLabel} verified.`;
+    feishuValidationLog(appLabel, `verified botName=${botDisplayName ?? '(unknown)'} elapsedMs=${Date.now() - startedAt}`);
     return {
-      state: readyChannelState('feishu', `App ${trimmedAppId} verified.`),
+      state: readyChannelState('feishu', identity),
       app,
     };
   } catch (err) {

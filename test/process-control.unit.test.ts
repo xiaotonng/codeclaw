@@ -63,82 +63,98 @@ describe('process-control restart flow', () => {
     }
   });
 
-  it('hands restart requests from daemon children back to the supervisor via state file + exit code', async () => {
-    const mod = await loadModule();
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-restart-'));
-    const stateFile = path.join(tmpDir, 'restart.json');
-    process.env.PIKICLAW_DAEMON_CHILD = '1';
-    process.env.PIKICLAW_RESTART_STATE_FILE = stateFile;
+  it('hands restart requests to the supervisor via state file in daemon mode and spawns a replacement process in no-daemon mode', async () => {
+    // --- Daemon child scenario ---
+    {
+      const mod = await loadModule();
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-restart-'));
+      const stateFile = path.join(tmpDir, 'restart.json');
+      process.env.PIKICLAW_DAEMON_CHILD = '1';
+      process.env.PIKICLAW_RESTART_STATE_FILE = stateFile;
 
-    const cleanupSpy = vi.fn();
-    const unregister = mod.registerProcessRuntime({
-      label: 'telegram',
-      getActiveTaskCount: () => 0,
-      prepareForRestart: cleanupSpy,
-      buildRestartEnv: () => ({ TELEGRAM_ALLOWED_CHAT_IDS: '1001,1002' }),
-    });
-    const exitSpy = vi.fn();
-
-    try {
-      const result = await mod.requestProcessRestart({ exit: exitSpy as any });
-      expect(result.ok).toBe(true);
-      expect(result.restarting).toBe(true);
-      expect(cleanupSpy).toHaveBeenCalledTimes(1);
-      expect(exitSpy).toHaveBeenCalledWith(mod.PROCESS_RESTART_EXIT_CODE);
-      expect(spawnMock).not.toHaveBeenCalled();
-      expect(mod.consumeRestartStateFile(stateFile)).toEqual({
-        TELEGRAM_ALLOWED_CHAT_IDS: '1001,1002',
+      const cleanupSpy = vi.fn();
+      const unregister = mod.registerProcessRuntime({
+        label: 'telegram',
+        getActiveTaskCount: () => 0,
+        prepareForRestart: cleanupSpy,
+        buildRestartEnv: () => ({ TELEGRAM_ALLOWED_CHAT_IDS: '1001,1002' }),
       });
-    } finally {
-      unregister();
+      const exitSpy = vi.fn();
+
+      try {
+        const result = await mod.requestProcessRestart({ exit: exitSpy as any });
+        expect(result.ok).toBe(true);
+        expect(result.restarting).toBe(true);
+        expect(cleanupSpy).toHaveBeenCalledTimes(1);
+        expect(exitSpy).toHaveBeenCalledWith(mod.PROCESS_RESTART_EXIT_CODE);
+        expect(spawnMock).not.toHaveBeenCalled();
+        expect(mod.consumeRestartStateFile(stateFile)).toEqual({
+          TELEGRAM_ALLOWED_CHAT_IDS: '1001,1002',
+        });
+      } finally {
+        unregister();
+      }
     }
-  });
 
-  it('spawns a replacement process for no-daemon restarts and strips daemon-only env', async () => {
-    const mod = await loadModule();
-    const cleanupSpy = vi.fn();
-    const unregisterTelegram = mod.registerProcessRuntime({
-      label: 'telegram',
-      getActiveTaskCount: () => 0,
-      prepareForRestart: cleanupSpy,
-      buildRestartEnv: () => ({ TELEGRAM_ALLOWED_CHAT_IDS: '1001' }),
-    });
-    const unregisterFeishu = mod.registerProcessRuntime({
-      label: 'feishu',
-      getActiveTaskCount: () => 0,
-      buildRestartEnv: () => ({ FEISHU_ALLOWED_CHAT_IDS: 'ou_abc' }),
-    });
-    const exitSpy = vi.fn();
+    // Reset for the next scenario
+    vi.resetModules();
+    spawnMock.mockReset();
+    spawnMock.mockReturnValue({ pid: 4321, unref: vi.fn() } as any);
+    process.env = { ...ORIGINAL_ENV };
+    delete process.env.PIKICLAW_DAEMON_CHILD;
+    delete process.env.PIKICLAW_RESTART_STATE_FILE;
+    delete process.env.PIKICLAW_RESTART_CMD;
+    delete process.env.TELEGRAM_ALLOWED_CHAT_IDS;
+    delete process.env.FEISHU_ALLOWED_CHAT_IDS;
+    delete process.env.npm_config_yes;
 
-    try {
-      const result = await mod.requestProcessRestart({
-        argv: ['--no-daemon', '-c', 'telegram'],
-        restartCmd: 'npx tsx src/cli.ts',
-        exit: exitSpy as any,
+    // --- No-daemon scenario ---
+    {
+      const mod = await loadModule();
+      const cleanupSpy = vi.fn();
+      const unregisterTelegram = mod.registerProcessRuntime({
+        label: 'telegram',
+        getActiveTaskCount: () => 0,
+        prepareForRestart: cleanupSpy,
+        buildRestartEnv: () => ({ TELEGRAM_ALLOWED_CHAT_IDS: '1001' }),
       });
-      expect(result.ok).toBe(true);
-      expect(cleanupSpy).toHaveBeenCalledTimes(1);
-      expect(exitSpy).toHaveBeenCalledWith(0);
-      expect(spawnMock).toHaveBeenCalledTimes(1);
-      expect(spawnMock).toHaveBeenCalledWith(
-        'npx',
-        ['--yes', 'tsx', 'src/cli.ts', '--no-daemon', '-c', 'telegram'],
-        expect.objectContaining({
-          stdio: 'inherit',
-          detached: true,
-          env: expect.objectContaining({
-            TELEGRAM_ALLOWED_CHAT_IDS: '1001',
-            FEISHU_ALLOWED_CHAT_IDS: 'ou_abc',
-            npm_config_yes: 'true',
+      const unregisterFeishu = mod.registerProcessRuntime({
+        label: 'feishu',
+        getActiveTaskCount: () => 0,
+        buildRestartEnv: () => ({ FEISHU_ALLOWED_CHAT_IDS: 'ou_abc' }),
+      });
+      const exitSpy = vi.fn();
+
+      try {
+        const result = await mod.requestProcessRestart({
+          argv: ['--no-daemon', '-c', 'telegram'],
+          restartCmd: 'npx tsx src/cli.ts',
+          exit: exitSpy as any,
+        });
+        expect(result.ok).toBe(true);
+        expect(cleanupSpy).toHaveBeenCalledTimes(1);
+        expect(exitSpy).toHaveBeenCalledWith(0);
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(spawnMock).toHaveBeenCalledWith(
+          'npx',
+          ['--yes', 'tsx', 'src/cli.ts', '--no-daemon', '-c', 'telegram'],
+          expect.objectContaining({
+            stdio: 'inherit',
+            detached: true,
+            env: expect.objectContaining({
+              TELEGRAM_ALLOWED_CHAT_IDS: '1001',
+              FEISHU_ALLOWED_CHAT_IDS: 'ou_abc',
+              npm_config_yes: 'true',
+            }),
           }),
-        }),
-      );
-      const env = spawnMock.mock.calls[0]?.[2]?.env ?? {};
-      expect(env.PIKICLAW_DAEMON_CHILD).toBeUndefined();
-      expect(env.PIKICLAW_RESTART_STATE_FILE).toBeUndefined();
-    } finally {
-      unregisterFeishu();
-      unregisterTelegram();
+        );
+        const env = spawnMock.mock.calls[0]?.[2]?.env ?? {};
+        expect(env.PIKICLAW_DAEMON_CHILD).toBeUndefined();
+        expect(env.PIKICLAW_RESTART_STATE_FILE).toBeUndefined();
+      } finally {
+        unregisterFeishu();
+        unregisterTelegram();
+      }
     }
   });
 });

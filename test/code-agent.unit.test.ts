@@ -50,8 +50,8 @@ beforeEach(() => {
   shutdownCodexServer();
 });
 
-describe('buildCodexTurnInput', () => {
-  it('uses localImage for images and explicit file references for documents', () => {
+describe('buildCodexTurnInput and usage helpers', () => {
+  it('uses localImage for images, explicit file references for documents, and normalizes rate-limit windows', () => {
     const imagePath = path.join(tmpDir, 'shot.png');
     const docPath = path.join(tmpDir, 'notes.txt');
 
@@ -62,11 +62,7 @@ describe('buildCodexTurnInput', () => {
       { type: 'text', text: `[Attached file: ${docPath}]` },
       { type: 'text', text: 'inspect this' },
     ]);
-  });
-});
 
-describe('usage helpers', () => {
-  it('normalizes near-canonical rate-limit windows', () => {
     expect(labelFromWindowMinutes(301, 'Primary')).toBe('5h');
     expect(labelFromWindowMinutes(10081, 'Secondary')).toBe('7d');
   });
@@ -129,7 +125,7 @@ describe('stageSessionFiles', () => {
 });
 
 describe('codex stream', () => {
-  it('passes developerInstructions when resuming a thread', async () => {
+  it('passes developerInstructions on resume and surfaces structured plans and file changes', async () => {
     const callsFile = path.join(tmpDir, 'codex-rpc-calls.jsonl');
     const script = `#!/usr/bin/env node
 const fs = require('node:fs');
@@ -184,10 +180,11 @@ rl.on('line', (line) => {
       .map(line => JSON.parse(line));
     const resumeCall = calls.find(call => call.method === 'thread/resume');
     expect(resumeCall?.params?.developerInstructions).toContain('[Telegram Artifact Return]');
-  });
 
-  it('surfaces structured plans and file changes through callbacks', async () => {
-    const script = `#!/usr/bin/env node
+    // --- surfaces structured plans and file changes through callbacks ---
+    shutdownCodexServer();
+
+    const script2 = `#!/usr/bin/env node
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on('line', (line) => {
@@ -257,28 +254,28 @@ rl.on('line', (line) => {
 
   process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
 });`;
-    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script2, { mode: 0o755 });
 
     const plans: any[] = [];
     const activities: string[] = [];
-    const result = await doCodexStream(baseOpts('codex', {
+    const result2 = await doCodexStream(baseOpts('codex', {
       onText: (_text, _thinking, activity, _meta, plan) => {
         if (activity?.trim()) activities.push(activity);
         if (plan?.steps?.length) plans.push(plan);
       },
     }));
 
-    expect(result.ok).toBe(true);
+    expect(result2.ok).toBe(true);
     expect(plans.length).toBeGreaterThanOrEqual(1);
     expect(plans[plans.length - 1].steps).toEqual([
       { step: 'Inspect streaming paths', status: 'completed' },
       { step: 'Update tests', status: 'inProgress' },
     ]);
     expect(activities.some(activity => activity.includes('Edit files...'))).toBe(true);
-    expect(result.activity).toContain('Updated src/bot-telegram.ts');
+    expect(result2.activity).toContain('Updated src/bot-telegram.ts');
   });
 
-  it('keeps long codex commentary lines intact until preview rendering trims them', async () => {
+  it('keeps long codex commentary lines intact and runs turns in parallel across sessions', async () => {
     const commentary = 'I am verifying the release workflow, the npm publish result, and the final changelog content before I close this out. Tail marker: KEEP_THIS_VISIBLE_AT_THE_END';
     const script = `#!/usr/bin/env node
 const readline = require('node:readline');
@@ -363,11 +360,12 @@ rl.on('line', (line) => {
     expect(result.ok).toBe(true);
     expect(result.activity).toContain('KEEP_THIS_VISIBLE_AT_THE_END');
     expect(activities.some(activity => activity.includes('KEEP_THIS_VISIBLE_AT_THE_END'))).toBe(true);
-  });
 
-  it('runs codex turns in parallel across sessions', async () => {
+    // --- runs codex turns in parallel across sessions ---
+    shutdownCodexServer();
+
     const spawnLog = path.join(tmpDir, 'codex-app-server-spawns.log');
-    const script = `#!/usr/bin/env node
+    const script2 = `#!/usr/bin/env node
 const fs = require('node:fs');
 const readline = require('node:readline');
 const spawnLog = ${JSON.stringify(spawnLog)};
@@ -430,7 +428,7 @@ rl.on('line', (line) => {
 
   flush({ id: msg.id, error: { message: 'unexpected method' } });
 });`;
-    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script2, { mode: 0o755 });
 
     const startedAt = Date.now();
     const [first, second] = await Promise.all([
@@ -451,7 +449,7 @@ rl.on('line', (line) => {
 });
 
 describe('claude stream', () => {
-  it('parses text, thinking, tool activity, context windows, and assistant fallbacks', async () => {
+  it('parses text, thinking, tool activity, retries expired sessions, and marks edge cases correctly', async () => {
     const activities: string[] = [];
     writeFakeScript('claude', [
       { type: 'system', session_id: 's-tools', model: 'claude-opus-4-6', thinking_level: 'high' },
@@ -508,9 +506,8 @@ describe('claude stream', () => {
     expect(fallback.ok).toBe(true);
     expect(fallback.message).toBe('Final answer');
     expect(fallback.thinking).toBe('Deep thought');
-  });
 
-  it('retries expired sessions and marks incomplete states and edge cases correctly', async () => {
+    // --- retries expired sessions and marks incomplete states and edge cases ---
     const stateFile = path.join(tmpDir, 'call_count');
     fs.writeFileSync(stateFile, '0');
     const retryScript = `#!/bin/sh
@@ -643,8 +640,8 @@ echo '{"type":"result","session_id":"s-no"}'`;
   });
 });
 
-describe('listModels and getUsage', () => {
-  it('returns structured model and usage data for Claude and Codex', async () => {
+describe('listModels, getUsage, and getSessionTail', () => {
+  it('returns structured model and usage data and falls back to codex rollout files for session history', async () => {
     await withTempHome(async homeDir => {
       fs.writeFileSync(path.join(homeDir, '.claude.json'), JSON.stringify({
         projects: {
@@ -753,13 +750,8 @@ exit 0`;
       expect(claudeUsage.status).toBe('warning');
       expect(claudeUsage.windows[0].status).toBe('warning');
       expect(claudeUsage.windows[0].resetAfterSeconds).toBe(39 * 3600);
-    });
-  });
-});
 
-describe('getSessionTail', () => {
-  it('falls back to Codex rollout files when app-server history is unavailable', async () => {
-    await withTempHome(async homeDir => {
+      // --- getSessionTail: falls back to codex rollout files ---
       const emptyBin = makeTmpDir('pikiclaw-empty-bin-');
       const oldPath = process.env.PATH;
       process.env.PATH = emptyBin;
@@ -767,9 +759,9 @@ describe('getSessionTail', () => {
         const workdir = path.join(homeDir, 'project');
         fs.mkdirSync(workdir, { recursive: true });
 
-        const sessionsDir = path.join(homeDir, '.codex', 'sessions', '2026', '03', '12');
-        fs.mkdirSync(sessionsDir, { recursive: true });
-        fs.writeFileSync(path.join(sessionsDir, 'rollout-2026-03-12T00-00-00-test.jsonl'), [
+        const tailSessionsDir = path.join(homeDir, '.codex', 'sessions', '2026', '03', '12');
+        fs.mkdirSync(tailSessionsDir, { recursive: true });
+        fs.writeFileSync(path.join(tailSessionsDir, 'rollout-2026-03-12T00-00-00-test.jsonl'), [
           JSON.stringify({
             type: 'session_meta',
             payload: { id: 'sess-fallback', cwd: workdir },

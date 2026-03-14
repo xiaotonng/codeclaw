@@ -20,7 +20,7 @@ import {
   requestProcessRestart,
 } from './process-control.js';
 import { runSetupWizard } from './setup-wizard.js';
-import { applyUserConfig, loadUserConfig, startUserConfigSync, type ChannelName, type UserConfig } from './user-config.js';
+import { applyUserConfig, loadUserConfig, startUserConfigSync, updateUserConfig, type ChannelName, type UserConfig } from './user-config.js';
 import { VERSION } from './version.js';
 
 /* ── Daemon (watchdog) mode ─────────────────────────────────────────── */
@@ -176,6 +176,17 @@ export async function main() {
 
   if (args.version) { process.stdout.write(`pikiclaw ${VERSION}\n`); process.exit(0); }
 
+  // Fresh CLI launch (not a daemon-managed child): persist the current working
+  // directory (or explicit -w) into setting.json so the bot session — and any
+  // subsequent daemon-managed restarts — starts in the right place.
+  if (!process.env.PIKICLAW_DAEMON_CHILD) {
+    const cliWorkdir = path.resolve(args.workdir || '.');
+    if (userConfig.workdir !== cliWorkdir) {
+      updateUserConfig({ workdir: cliWorkdir });
+      userConfig = loadUserConfig();
+    }
+  }
+
   // Daemon mode (default): become a watchdog that supervises the real bot process.
   // The child is spawned via `npx pikiclaw@latest` so restarts always pull latest code.
   // Use --no-daemon to disable.
@@ -198,8 +209,6 @@ export async function main() {
 
   const configOverrides: Partial<UserConfig> = {};
   if (args.agent) configOverrides.defaultAgent = args.agent;
-  if (args.workdir) process.env.PIKICLAW_WORKDIR = path.resolve(args.workdir);
-
   // Apply config early so managed env vars are populated from setting.json.
   applyUserConfig({ ...userConfig, ...configOverrides }, undefined, { overwrite: true, clearMissing: true });
 

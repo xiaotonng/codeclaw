@@ -51,91 +51,96 @@ afterEach(() => {
 });
 
 describe('FeishuChannel cards', () => {
-  it('chunks legacy keyboard actions into visible action rows', async () => {
-    const { ch, createCalls } = createTestChannel();
+  it('chunks legacy keyboard actions, preserves explicit card rows, and retries websocket startup failures', async () => {
+    // Scenario 1: chunks legacy keyboard actions into visible action rows
+    {
+      const { ch, createCalls } = createTestChannel();
 
-    await ch.send('chat-1', '**Available Agents**', {
-      keyboard: {
+      await ch.send('chat-1', '**Available Agents**', {
+        keyboard: {
+          actions: [
+            makeButton('claude', 'ag:claude'),
+            makeButton('codex', 'ag:codex'),
+            makeButton('gemini', 'ag:gemini'),
+            makeButton('new', 'ag:new'),
+          ],
+        },
+      });
+
+      const payload = JSON.parse(createCalls[0].data.content);
+      const actionRows = payload.elements.filter((element: any) => element.tag === 'action');
+
+      expect(actionRows).toHaveLength(2);
+      expect(actionRows[0]).toMatchObject({
+        tag: 'action',
+        layout: 'trisection',
         actions: [
-          makeButton('claude', 'ag:claude'),
-          makeButton('codex', 'ag:codex'),
-          makeButton('gemini', 'ag:gemini'),
-          makeButton('new', 'ag:new'),
+          { value: { action: 'ag:claude' } },
+          { value: { action: 'ag:codex' } },
+          { value: { action: 'ag:gemini' } },
         ],
-      },
-    });
-
-    const payload = JSON.parse(createCalls[0].data.content);
-    const actionRows = payload.elements.filter((element: any) => element.tag === 'action');
-
-    expect(actionRows).toHaveLength(2);
-    expect(actionRows[0]).toMatchObject({
-      tag: 'action',
-      layout: 'trisection',
-      actions: [
-        { value: { action: 'ag:claude' } },
-        { value: { action: 'ag:codex' } },
-        { value: { action: 'ag:gemini' } },
-      ],
-    });
-    expect(actionRows[1]).toMatchObject({
-      tag: 'action',
-      actions: [{ value: { action: 'ag:new' } }],
-    });
-    expect(actionRows[1].layout).toBeUndefined();
-  });
-
-  it('preserves explicit command card rows on send and edit', async () => {
-    const { ch, createCalls, patchCalls } = createTestChannel();
-    const card: FeishuCardView = {
-      markdown: '**Available Agents**\n\nUse the controls below.',
-      rows: [
-        { actions: [makeButton('claude', 'ag:claude'), makeButton('codex', 'ag:codex')] },
-        { actions: [makeButton('gemini', 'ag:gemini')] },
-      ],
-    };
-
-    await ch.sendCard('chat-1', card);
-    await ch.editCard('chat-1', 'msg-9', card);
-
-    const sent = JSON.parse(createCalls[0].data.content);
-    const edited = JSON.parse(patchCalls[0].data.content);
-
-    expect(sent.elements.filter((element: any) => element.tag === 'action')).toHaveLength(2);
-    expect(sent.elements[1].layout).toBe('bisected');
-    expect(sent.elements[2].layout).toBeUndefined();
-    expect(edited.elements[1].actions[0].value.action).toBe('ag:claude');
-    expect(edited.elements[2].actions[0].value.action).toBe('ag:gemini');
-  });
-
-  it('retries retryable websocket startup failures', async () => {
-    const wsStart = vi.fn()
-      .mockRejectedValueOnce(new Error('socket hang up'))
-      .mockImplementationOnce(async () => {});
-    const wsClose = vi.fn();
-
-    const wsSpy = vi.spyOn(lark, 'WSClient').mockImplementation(class {
-      start = wsStart;
-      close = wsClose;
-    } as any);
-
-    const sleepSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: (...args: any[]) => void) => {
-      fn();
-      return 0 as any;
-    }) as typeof setTimeout);
-
-    const { ch } = createTestChannel();
-    const listenPromise = ch.listen();
-    for (let i = 0; i < 10 && wsStart.mock.calls.length < 2; i++) {
-      await Promise.resolve();
+      });
+      expect(actionRows[1]).toMatchObject({
+        tag: 'action',
+        actions: [{ value: { action: 'ag:new' } }],
+      });
+      expect(actionRows[1].layout).toBeUndefined();
     }
-    ch.disconnect();
-    await listenPromise;
 
-    expect(wsSpy).toHaveBeenCalledTimes(2);
-    expect(wsStart).toHaveBeenCalledTimes(2);
-    expect(wsClose).toHaveBeenCalled();
-    expect(sleepSpy).toHaveBeenCalled();
+    // Scenario 2: preserves explicit command card rows on send and edit
+    {
+      const { ch, createCalls, patchCalls } = createTestChannel();
+      const card: FeishuCardView = {
+        markdown: '**Available Agents**\n\nUse the controls below.',
+        rows: [
+          { actions: [makeButton('claude', 'ag:claude'), makeButton('codex', 'ag:codex')] },
+          { actions: [makeButton('gemini', 'ag:gemini')] },
+        ],
+      };
+
+      await ch.sendCard('chat-1', card);
+      await ch.editCard('chat-1', 'msg-9', card);
+
+      const sent = JSON.parse(createCalls[0].data.content);
+      const edited = JSON.parse(patchCalls[0].data.content);
+
+      expect(sent.elements.filter((element: any) => element.tag === 'action')).toHaveLength(2);
+      expect(sent.elements[1].layout).toBe('bisected');
+      expect(sent.elements[2].layout).toBeUndefined();
+      expect(edited.elements[1].actions[0].value.action).toBe('ag:claude');
+      expect(edited.elements[2].actions[0].value.action).toBe('ag:gemini');
+    }
+
+    // Scenario 3: retries retryable websocket startup failures
+    {
+      const wsStart = vi.fn()
+        .mockRejectedValueOnce(new Error('socket hang up'))
+        .mockImplementationOnce(async () => {});
+      const wsClose = vi.fn();
+
+      const wsSpy = vi.spyOn(lark, 'WSClient').mockImplementation(class {
+        start = wsStart;
+        close = wsClose;
+      } as any);
+
+      const sleepSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: (...args: any[]) => void) => {
+        fn();
+        return 0 as any;
+      }) as typeof setTimeout);
+
+      const { ch } = createTestChannel();
+      const listenPromise = ch.listen();
+      for (let i = 0; i < 10 && wsStart.mock.calls.length < 2; i++) {
+        await Promise.resolve();
+      }
+      ch.disconnect();
+      await listenPromise;
+
+      expect(wsSpy).toHaveBeenCalledTimes(2);
+      expect(wsStart).toHaveBeenCalledTimes(2);
+      expect(wsClose).toHaveBeenCalled();
+      expect(sleepSpy).toHaveBeenCalled();
+    }
   });
 });
 

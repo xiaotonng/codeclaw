@@ -888,9 +888,10 @@ export class FeishuBot extends Bot {
       return;
     }
 
-    const text = `**${VERSION}** pikiclaw is online.\nSend /start to get started.`;
     for (const cid of targets) {
       try {
+        const d = getStartData(this, cid);
+        const text = renderStart(d);
         await this.channel.send(cid, text);
         this.log(`startup notice sent to chat=${cid}`);
       } catch (e) {

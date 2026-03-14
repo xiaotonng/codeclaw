@@ -18,7 +18,8 @@ describe('bot-telegram render helpers', () => {
   // bot-telegram.unit.test.ts ("renders resumed history" and "compresses warnings").
   // Tests here focus on helpers not exercised through the bot integration tests.
 
-  it('formats provider usage windows and menu command lines', () => {
+  it('formats provider usage, compact selection, and stream previews', () => {
+    // --- formats provider usage windows and menu command lines ---
     const usageLines = formatProviderUsageLines({
       ok: true,
       capturedAt: new Date(Date.now() - 5_000).toISOString(),
@@ -36,10 +37,9 @@ describe('bot-telegram render helpers', () => {
     expect(usageLines.join('\n')).toContain('<b>Provider Usage</b>');
     expect(usageLines.join('\n')).toContain('Claude: 40% used status=rate_limited resetAfterSeconds=120');
     expect(formatMenuLines([{ command: 'status', description: 'Show status' }])[0]).toBe('/status — Show status');
-  });
 
-  it('keeps codex usage output in raw status form', () => {
-    const usageLines = formatProviderUsageLines({
+    // --- keeps codex usage output in raw status form ---
+    const codexUsageLines = formatProviderUsageLines({
       ok: true,
       capturedAt: null,
       status: null,
@@ -62,12 +62,11 @@ describe('bot-telegram render helpers', () => {
       error: null,
     });
 
-    expect(usageLines.join('\n')).toContain('Primary: 82% used status=warning resetAfterSeconds=300');
-    expect(usageLines.join('\n')).toContain('Secondary: 0% used status=allowed');
+    expect(codexUsageLines.join('\n')).toContain('Primary: 82% used status=warning resetAfterSeconds=300');
+    expect(codexUsageLines.join('\n')).toContain('Secondary: 0% used status=allowed');
     expect(formatMenuLines([{ command: 'status', description: 'Show status' }])[0]).toBe('/status — Show status');
-  });
 
-  it('builds compact selection copy and middle-truncated labels for mobile layouts', () => {
+    // --- builds compact selection copy and middle-truncated labels for mobile layouts ---
     const shortened = truncateMiddle('/Users/xiaoxiao/Desktop/work/pikiclaw/project', 24);
     expect(shortened).toContain('...');
     expect(shortened.startsWith('/Users')).toBe(true);
@@ -75,9 +74,8 @@ describe('bot-telegram render helpers', () => {
     expect(compactCode('/Users/xiaoxiao/Desktop/work/pikiclaw/project', 24)).toContain('<code>');
     expect(buildCompactSelectionTitle('Agents', 'codex')).toBe('<b>Agents</b> · <code>codex</code>');
     expect(buildCompactSelectionNotice('Model', 'claude-sonnet-4-6[1m]', 'claude · session reset')).toContain('<b>Model</b>');
-  });
 
-  it('keeps longer activity visible when the preview has no body text', () => {
+    // --- keeps longer activity visible when the preview has no body text ---
     const activity = [
       'I have the current release target: 0.2.24 to 0.2.25. I am about to patch the version in the package metadata, runtime constant, and the install skill examples.',
       'Updated 4 files',

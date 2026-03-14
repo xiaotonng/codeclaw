@@ -313,6 +313,13 @@ export function renderStart(d: StartData): string {
     `**Agent:** ${d.agent}`,
     `**Workdir:** \`${d.workdir}\``,
     '',
+    '**Agents**',
+    ...d.agentDetails.map(a => {
+      let line = `  **${a.agent}**: ${a.model}`;
+      if (a.effort) line += ` (effort: ${a.effort})`;
+      return line;
+    }),
+    '',
     '**Commands**',
     ...d.commands.map(c => `/${c.command} — ${c.description}`),
   ];

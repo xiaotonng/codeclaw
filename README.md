@@ -10,9 +10,11 @@
 npx pikiclaw@latest
 ```
 
-[![npm](https://img.shields.io/npm/v/pikiclaw)](https://www.npmjs.com/package/pikiclaw)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node.js 18+](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org)
+<p align="center">
+<a href="https://www.npmjs.com/package/pikiclaw"><img src="https://img.shields.io/npm/v/pikiclaw" alt="npm"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+<a href="https://nodejs.org"><img src="https://img.shields.io/badge/Node.js-18+-green.svg" alt="Node.js 18+"></a>
+</p>
 
 </div>
 
