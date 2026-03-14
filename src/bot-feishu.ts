@@ -52,7 +52,6 @@ import {
 } from './process-control.js';
 import {
   feishuPreviewRenderer,
-  feishuStreamingPreviewRenderer,
   buildInitialPreviewMarkdown,
   buildFinalReplyRender,
   renderCommandNotice,
@@ -492,11 +491,10 @@ export class FeishuBot extends Bot {
     const start = Date.now();
     this.log(`[handleMessage] queued chat=${ctx.chatId} agent=${session.agent} session=${session.sessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${files.length}`);
 
-    const placeholderId = await this.channel.sendStreamingCard(ctx.chatId, buildInitialPreviewMarkdown(session.agent), { replyTo: ctx.messageId || undefined });
-    const useStreamingPreview = !!placeholderId && this.channel.isStreamingCard(placeholderId);
+    const placeholderId = await this.channel.send(ctx.chatId, buildInitialPreviewMarkdown(session.agent), { replyTo: ctx.messageId || undefined });
     if (placeholderId) {
       this.registerSessionMessage(ctx.chatId, placeholderId, session);
-      this.log(`[handleMessage] ${useStreamingPreview ? 'streaming' : 'preview'} card sent msg_id=${placeholderId}`);
+      this.log(`[handleMessage] preview card sent msg_id=${placeholderId}`);
     }
 
     const taskId = this.createTaskId(session);
@@ -519,8 +517,8 @@ export class FeishuBot extends Bot {
             chatId: ctx.chatId,
             placeholderMessageId: placeholderId,
             channel: this.channel,
-            renderer: useStreamingPreview ? feishuStreamingPreviewRenderer : feishuPreviewRenderer,
-            streamEditIntervalMs: useStreamingPreview ? 350 : 700,
+            renderer: feishuPreviewRenderer,
+            streamEditIntervalMs: 700,
             startTimeMs: start,
             canEditMessages: supportsChannelCapability(this.channel, 'editMessages'),
             canSendTyping: false,
@@ -543,13 +541,7 @@ export class FeishuBot extends Bot {
           `tokens=in:${fmtTokens(result.inputTokens)}/out:${fmtTokens(result.outputTokens)}`,
         );
 
-        const wasStreaming = placeholderId && this.channel.isStreamingCard(placeholderId);
-        let finalReplyIds: string[];
-        if (wasStreaming) {
-          finalReplyIds = await this.finalizeStreamingCard(ctx, placeholderId, session.agent, result);
-        } else {
-          finalReplyIds = await this.sendFinalReply(ctx, placeholderId, session.agent, result);
-        }
+        const finalReplyIds = await this.sendFinalReply(ctx, placeholderId, session.agent, result);
         this.registerSessionMessages(ctx.chatId, finalReplyIds, session);
 
         this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
@@ -559,9 +551,6 @@ export class FeishuBot extends Bot {
         const errorText = `**Error**\n\n\`${msgText.slice(0, 500)}\``;
         if (placeholderId) {
           try {
-            if (this.channel.isStreamingCard(placeholderId)) {
-              await this.channel.endStreaming(placeholderId, 'Error');
-            }
             await this.channel.editMessage(ctx.chatId, placeholderId, errorText);
           } catch {
             await this.channel.send(ctx.chatId, errorText).catch(() => null);
@@ -578,54 +567,6 @@ export class FeishuBot extends Bot {
       this.log(`[handleMessage] queue execution failed: ${e}`);
       this.finishTask(taskId);
     });
-  }
-
-  /**
-   * Finalize a streaming card by closing CardKit streaming mode first, then
-   * replacing the card body with the complete final render.
-   */
-  private async finalizeStreamingCard(
-    ctx: FeishuContext,
-    placeholderId: string,
-    agent: Agent,
-    result: StreamResult,
-  ): Promise<string[]> {
-    const rendered = buildFinalReplyRender(agent, result);
-    const messageIds: string[] = [placeholderId];
-
-    const MAX_CARD = 25_000;
-    let firstText: string;
-    let remaining = '';
-
-    if (rendered.fullText.length <= MAX_CARD) {
-      firstText = rendered.fullText;
-    } else {
-      const maxFirst = MAX_CARD - rendered.headerText.length - rendered.footerText.length;
-      if (maxFirst > 200) {
-        let cut = rendered.bodyText.lastIndexOf('\n', maxFirst);
-        if (cut < maxFirst * 0.3) cut = maxFirst;
-        firstText = `${rendered.headerText}${rendered.bodyText.slice(0, cut)}${rendered.footerText}`;
-        remaining = rendered.bodyText.slice(cut);
-      } else {
-        firstText = `${rendered.headerText}${rendered.footerText}`;
-        remaining = rendered.bodyText;
-      }
-    }
-
-    const summary = result.message.slice(0, 80).replace(/\s+/g, ' ').trim() || 'Response complete.';
-    await this.channel.endStreaming(placeholderId, summary);
-    await this.channel.editMessage(ctx.chatId, placeholderId, firstText);
-
-    // Send overflow chunks as new messages
-    if (remaining.trim()) {
-      const chunks = splitText(remaining, MAX_CARD);
-      for (const chunk of chunks) {
-        const sent = await this.channel.send(ctx.chatId, chunk);
-        if (sent) messageIds.push(sent);
-      }
-    }
-
-    return messageIds;
   }
 
   private async sendFinalReply(
