@@ -12,12 +12,18 @@ import { getActiveUserConfig, onUserConfigChange, resolveUserWorkdir, setUserWor
 import {
   doStream, getSessions, getSessionTail, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
+  type CodexInteractionRequest,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
 } from './code-agent.js';
 import { getDriver, hasDriver, allDriverIds } from './agent-driver.js';
 import { terminateProcessTree } from './process-control.js';
 import { VERSION } from './version.js';
+import {
+  type HumanLoopPromptState, type HumanLoopQuestion,
+  buildHumanLoopResponse, createEmptyHumanLoopAnswer, currentHumanLoopQuestion,
+  isHumanLoopAwaitingText, setHumanLoopOption, setHumanLoopText, skipHumanLoopQuestion,
+} from './human-loop.js';
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
 export type ChatId = number | string;
@@ -453,6 +459,21 @@ export interface RunningTask {
   placeholderMessageIds?: Array<number | string>;
 }
 
+export interface BeginHumanLoopPromptOpts {
+  taskId: string;
+  chatId: ChatId;
+  title: string;
+  detail?: string | null;
+  hint?: string | null;
+  questions: HumanLoopQuestion[];
+  resolveWith: (answers: Record<string, string[]>) => Record<string, any> | null;
+}
+
+export interface ActiveHumanLoopPrompt {
+  prompt: HumanLoopPromptState<ChatId>;
+  result: Promise<Record<string, any> | null>;
+}
+
 // ---------------------------------------------------------------------------
 // Bot
 // ---------------------------------------------------------------------------
@@ -496,6 +517,9 @@ export class Bot {
   private taskKeysByActionId = new Map<string, string>();
   private withdrawnSourceMessages = new Set<string>();
   private nextTaskActionId = 1;
+  private humanLoopPrompts = new Map<string, HumanLoopPromptState<ChatId>>();
+  private humanLoopPromptIdsByChat = new Map<string, string[]>();
+  private nextHumanLoopPromptId = 1;
 
   constructor() {
     this.workdir = resolveUserWorkdir();
@@ -674,6 +698,10 @@ export class Bot {
   }
 
   protected finishTask(taskId: string) {
+    for (const prompt of [...this.humanLoopPrompts.values()]) {
+      if (prompt.taskId !== taskId) continue;
+      this.clearHumanLoopPrompt(prompt.promptId, new Error('Task finished before prompt was answered.'));
+    }
     const task = this.activeTasks.get(taskId);
     if (!task) return;
     this.activeTasks.delete(taskId);
@@ -794,6 +822,120 @@ export class Bot {
 
   protected sessionHasPendingWork(session: SessionRuntime): boolean {
     return this.sessionChains.has(session.key);
+  }
+
+  protected beginHumanLoopPrompt(opts: BeginHumanLoopPromptOpts): ActiveHumanLoopPrompt {
+    const promptId = `h${(this.nextHumanLoopPromptId++).toString(36)}`;
+    let resolvePrompt!: (response: Record<string, any> | null) => void;
+    let rejectPrompt!: (error: Error) => void;
+    const result = new Promise<Record<string, any> | null>((resolve, reject) => {
+      resolvePrompt = resolve;
+      rejectPrompt = reject;
+    });
+    const answers: Record<string, ReturnType<typeof createEmptyHumanLoopAnswer>> = {};
+    for (const question of opts.questions) answers[question.id] = createEmptyHumanLoopAnswer();
+    const prompt: HumanLoopPromptState<ChatId> = {
+      promptId,
+      taskId: opts.taskId,
+      chatId: opts.chatId,
+      title: opts.title,
+      detail: opts.detail ?? null,
+      hint: opts.hint ?? null,
+      questions: opts.questions,
+      currentIndex: 0,
+      answers,
+      resolveWith: opts.resolveWith,
+      resolve: resolvePrompt,
+      reject: rejectPrompt,
+      messageIds: [],
+    };
+    this.humanLoopPrompts.set(promptId, prompt);
+    const chatKey = String(opts.chatId);
+    const promptIds = this.humanLoopPromptIdsByChat.get(chatKey) || [];
+    promptIds.push(promptId);
+    this.humanLoopPromptIdsByChat.set(chatKey, promptIds);
+    return { prompt, result };
+  }
+
+  protected pendingHumanLoopPrompt(chatId: ChatId): HumanLoopPromptState<ChatId> | null {
+    const promptIds = this.humanLoopPromptIdsByChat.get(String(chatId)) || [];
+    for (let i = promptIds.length - 1; i >= 0; i--) {
+      const prompt = this.humanLoopPrompts.get(promptIds[i]) || null;
+      if (prompt && isHumanLoopAwaitingText(prompt)) return prompt;
+    }
+    const promptId = promptIds[promptIds.length - 1];
+    return promptId ? (this.humanLoopPrompts.get(promptId) || null) : null;
+  }
+
+  protected registerHumanLoopMessage(promptId: string, messageId: number | string | null | undefined) {
+    if (messageId == null) return;
+    const prompt = this.humanLoopPrompts.get(promptId);
+    if (!prompt) return;
+    if (!prompt.messageIds.includes(messageId)) prompt.messageIds.push(messageId);
+  }
+
+  protected resolveHumanLoopPrompt(promptId: string): HumanLoopPromptState<ChatId> | null {
+    const prompt = this.humanLoopPrompts.get(promptId) || null;
+    if (!prompt) return null;
+    this.humanLoopPrompts.delete(promptId);
+    this.removeHumanLoopPromptFromChat(prompt.chatId, promptId);
+    prompt.resolve(buildHumanLoopResponse(prompt));
+    return prompt;
+  }
+
+  protected clearHumanLoopPrompt(promptId: string, error?: Error): HumanLoopPromptState<ChatId> | null {
+    const prompt = this.humanLoopPrompts.get(promptId) || null;
+    if (!prompt) return null;
+    this.humanLoopPrompts.delete(promptId);
+    this.removeHumanLoopPromptFromChat(prompt.chatId, promptId);
+    if (error) prompt.reject(error);
+    return prompt;
+  }
+
+  protected humanLoopSelectOption(promptId: string, optionValue: string, opts: { requestFreeform?: boolean } = {}) {
+    const prompt = this.humanLoopPrompts.get(promptId) || null;
+    if (!prompt) return null;
+    const result = setHumanLoopOption(prompt, optionValue, opts);
+    if (result.completed) this.resolveHumanLoopPrompt(promptId);
+    return { prompt, ...result };
+  }
+
+  protected humanLoopSkip(promptId: string) {
+    const prompt = this.humanLoopPrompts.get(promptId) || null;
+    if (!prompt) return null;
+    const result = skipHumanLoopQuestion(prompt);
+    if (result.completed) this.resolveHumanLoopPrompt(promptId);
+    return { prompt, ...result };
+  }
+
+  protected humanLoopSubmitText(chatId: ChatId, text: string) {
+    const prompt = this.pendingHumanLoopPrompt(chatId);
+    if (!prompt) return null;
+    if (!isHumanLoopAwaitingText(prompt)) return null;
+    const result = setHumanLoopText(prompt, text);
+    if (result.completed) this.resolveHumanLoopPrompt(prompt.promptId);
+    return { prompt, ...result };
+  }
+
+  protected humanLoopCancel(promptId: string, reason = 'Prompt cancelled.') {
+    return this.clearHumanLoopPrompt(promptId, new Error(reason));
+  }
+
+  protected humanLoopCurrentQuestion(promptId: string): HumanLoopQuestion | null {
+    const prompt = this.humanLoopPrompts.get(promptId);
+    return prompt ? currentHumanLoopQuestion(prompt) : null;
+  }
+
+  protected humanLoopPrompt(promptId: string): HumanLoopPromptState<ChatId> | null {
+    return this.humanLoopPrompts.get(promptId) || null;
+  }
+
+  private removeHumanLoopPromptFromChat(chatId: ChatId, promptId: string) {
+    const chatKey = String(chatId);
+    const promptIds = this.humanLoopPromptIdsByChat.get(chatKey) || [];
+    const next = promptIds.filter(id => id !== promptId);
+    if (next.length) this.humanLoopPromptIdsByChat.set(chatKey, next);
+    else this.humanLoopPromptIdsByChat.delete(chatKey);
   }
 
   selectedSession(chatId: ChatId): SessionRuntime | null {
@@ -995,6 +1137,7 @@ export class Bot {
     systemPrompt?: string,
     mcpSendFile?: import('./mcp-bridge.js').McpSendFileCallback,
     abortSignal?: AbortSignal,
+    onCodexInteractionRequest?: (request: CodexInteractionRequest) => Promise<Record<string, any> | null>,
   ): Promise<StreamResult> {
     const resolvedModel = cs.modelId || this.modelForAgent(cs.agent);
     const agentConfig = this.agentConfigs[cs.agent] || {};
@@ -1029,6 +1172,7 @@ export class Bot {
       // MCP bridge
       mcpSendFile,
       abortSignal,
+      onCodexInteractionRequest,
     };
     const result = await doStream(opts);
     this.stats.totalTurns++;

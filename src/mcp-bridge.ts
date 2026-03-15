@@ -17,6 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { loadUserConfig } from './user-config.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -80,6 +81,25 @@ interface McpServerRuntimeInfo {
   moduleUrl: string;
 }
 
+interface RegisteredMcpServer {
+  name: string;
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
+export interface GuiIntegrationConfig {
+  browserEnabled: boolean;
+  browserHeadless: boolean;
+  browserIsolated: boolean;
+  browserUseExtension: boolean;
+  browserExtensionToken: string;
+  desktopEnabled: boolean;
+  desktopAppiumUrl: string;
+}
+
+const PLAYWRIGHT_MCP_EXTENSION_URL = 'https://chromewebstore.google.com/detail/playwright-mcp-bridge/mmlmfjhmonkocbjadbfplnigmagldckm';
+
 function sanitizeExecArgv(execArgv: string[]): string[] {
   return execArgv.filter(arg => !/^--inspect(?:-brk)?(?:=.*)?$/.test(arg));
 }
@@ -117,6 +137,93 @@ export function resolveMcpServerCommand(runtime: McpServerRuntimeInfo = {
   }
   // Last resort: assume pikiclaw is in PATH
   return { command: 'pikiclaw', args: ['--mcp-serve'] };
+}
+
+function parseOptionalBool(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value;
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!text) return null;
+  if (['1', 'true', 'yes', 'on'].includes(text)) return true;
+  if (['0', 'false', 'no', 'off'].includes(text)) return false;
+  return null;
+}
+
+function boolFromConfigEnv(configValue: unknown, envValue: unknown, fallback: boolean): boolean {
+  const envParsed = parseOptionalBool(envValue);
+  if (envParsed != null) return envParsed;
+  const configParsed = parseOptionalBool(configValue);
+  if (configParsed != null) return configParsed;
+  return fallback;
+}
+
+export function resolveGuiIntegrationConfig(
+  config = loadUserConfig(),
+  env: Record<string, string | undefined> = process.env,
+): GuiIntegrationConfig {
+  return {
+    browserEnabled: boolFromConfigEnv(config.browserGuiEnabled, env.PIKICLAW_BROWSER_GUI, true),
+    browserHeadless: boolFromConfigEnv(config.browserGuiHeadless, env.PIKICLAW_BROWSER_HEADLESS, false),
+    browserIsolated: boolFromConfigEnv(config.browserGuiIsolated, env.PIKICLAW_BROWSER_ISOLATED, false),
+    browserUseExtension: boolFromConfigEnv(config.browserGuiUseExtension, env.PIKICLAW_BROWSER_USE_EXTENSION, true),
+    browserExtensionToken: String(env.PLAYWRIGHT_MCP_EXTENSION_TOKEN || config.browserGuiExtensionToken || '').trim(),
+    desktopEnabled: boolFromConfigEnv(config.desktopGuiEnabled, env.PIKICLAW_DESKTOP_GUI, process.platform === 'darwin'),
+    desktopAppiumUrl: String(env.PIKICLAW_DESKTOP_APPIUM_URL || config.desktopAppiumUrl || 'http://127.0.0.1:4723').trim() || 'http://127.0.0.1:4723',
+  };
+}
+
+export function buildSupplementalMcpServers(gui: GuiIntegrationConfig = resolveGuiIntegrationConfig()): RegisteredMcpServer[] {
+  const servers: RegisteredMcpServer[] = [];
+  if (gui.browserEnabled) {
+    const args = ['-y', '@playwright/mcp@latest'];
+    if (gui.browserUseExtension) {
+      args.push('--extension');
+    } else {
+      if (gui.browserHeadless) args.push('--headless');
+      if (gui.browserIsolated) args.push('--isolated');
+    }
+    servers.push({
+      name: 'pikiclaw-browser',
+      command: 'npx',
+      args,
+      env: gui.browserUseExtension && gui.browserExtensionToken
+        ? { PLAYWRIGHT_MCP_EXTENSION_TOKEN: gui.browserExtensionToken }
+        : undefined,
+    });
+  }
+  return servers;
+}
+
+export function buildGuiSetupHints(gui: GuiIntegrationConfig = resolveGuiIntegrationConfig()): string[] {
+  const hints: string[] = [];
+  if (!gui.browserEnabled || !gui.browserUseExtension) return hints;
+
+  hints.push(
+    `browser extension mode enabled; install Playwright MCP Bridge in the current Chrome profile first: ${PLAYWRIGHT_MCP_EXTENSION_URL}`,
+  );
+  if (!gui.browserExtensionToken) {
+    hints.push(
+      'after installing the extension, open its UI to copy PLAYWRIGHT_MCP_EXTENSION_TOKEN if you want to skip the browser approval prompt',
+    );
+  }
+  return hints;
+}
+
+function buildClaudeMcpConfig(servers: RegisteredMcpServer[]) {
+  return {
+    mcpServers: Object.fromEntries(servers.map(server => [
+      server.name,
+      { type: 'stdio', command: server.command, args: server.args, ...(server.env ? { env: server.env } : {}) },
+    ])),
+  };
+}
+
+function buildGeminiMcpConfig(servers: RegisteredMcpServer[]) {
+  return {
+    mcpServers: Object.fromEntries(servers.map(server => [
+      server.name,
+      { command: server.command, args: server.args, ...(server.env ? { env: server.env } : {}), trust: true },
+    ])),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +337,8 @@ export function resolveSendFilePath(
 export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHandle> {
   const { sessionDir, workspacePath, stagedFiles, sendFile } = opts;
   let hadActivity = false;
+  const gui = resolveGuiIntegrationConfig();
+  for (const hint of buildGuiSetupHints(gui)) opts.onLog?.(hint);
 
   // Build allowed roots: workspace + workdir + /tmp
   const allowedRoots = [workspacePath];
@@ -345,45 +454,44 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     MCP_STAGED_FILES: JSON.stringify(stagedFiles),
     MCP_CALLBACK_URL: `http://127.0.0.1:${port}`,
     MCP_LOG_URL: `http://127.0.0.1:${port}/log`,
+    PIKICLAW_DESKTOP_GUI: String(gui.desktopEnabled),
+    PIKICLAW_DESKTOP_APPIUM_URL: gui.desktopAppiumUrl,
   };
+  const servers: RegisteredMcpServer[] = [
+    { name: 'pikiclaw', command, args, env: envVars },
+    ...buildSupplementalMcpServers(gui),
+  ];
 
   let configPath = '';
   let extraEnv: Record<string, string> | undefined;
-  let codexRegistered = false;
+  const codexRegisteredNames: string[] = [];
 
   if (opts.agent === 'codex') {
-    // Codex: register MCP server via `codex mcp add/remove`
-    const codexArgs = ['mcp', 'add', 'pikiclaw'];
-    for (const [k, v] of Object.entries(envVars)) codexArgs.push('--env', `${k}=${v}`);
-    codexArgs.push('--', command, ...args);
-    try {
-      execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: 10_000 });
-      codexRegistered = true;
-    } catch (e: any) {
-      // If already exists, remove and retry
-      try { execFileSync('codex', ['mcp', 'remove', 'pikiclaw'], { stdio: 'pipe', timeout: 5_000 }); } catch {}
-      execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: 10_000 });
-      codexRegistered = true;
+    // Codex: register MCP servers via `codex mcp add/remove`
+    for (const server of servers) {
+      const codexArgs = ['mcp', 'add', server.name];
+      for (const [k, v] of Object.entries(server.env || {})) codexArgs.push('--env', `${k}=${v}`);
+      codexArgs.push('--', server.command, ...server.args);
+      try {
+        execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: 10_000 });
+        codexRegisteredNames.push(server.name);
+      } catch {
+        try { execFileSync('codex', ['mcp', 'remove', server.name], { stdio: 'pipe', timeout: 5_000 }); } catch {}
+        execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: 10_000 });
+        codexRegisteredNames.push(server.name);
+      }
     }
   } else if (opts.agent === 'gemini') {
     // Gemini CLI 0.32+ loads MCP servers from settings.json rather than --mcp-config.
     configPath = path.join(sessionDir, 'gemini-system-settings.json');
-    const config = {
-      mcpServers: {
-        pikiclaw: { command, args, env: envVars, trust: true },
-      },
-    };
+    const config = buildGeminiMcpConfig(servers);
     fs.mkdirSync(sessionDir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
     extraEnv = { GEMINI_CLI_SYSTEM_SETTINGS_PATH: configPath };
   } else {
     // Claude: write MCP config JSON for --mcp-config
     configPath = path.join(sessionDir, 'mcp-config.json');
-    const config = {
-      mcpServers: {
-        pikiclaw: { type: 'stdio', command, args, env: envVars },
-      },
-    };
+    const config = buildClaudeMcpConfig(servers);
     fs.mkdirSync(sessionDir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   }
@@ -394,8 +502,8 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     hadActivity: () => hadActivity,
     stop: async () => {
       await new Promise<void>(resolve => server.close(() => resolve()));
-      if (codexRegistered) {
-        try { execFileSync('codex', ['mcp', 'remove', 'pikiclaw'], { stdio: 'pipe', timeout: 5_000 }); } catch {}
+      for (const name of [...codexRegisteredNames].reverse()) {
+        try { execFileSync('codex', ['mcp', 'remove', name], { stdio: 'pipe', timeout: 5_000 }); } catch {}
       }
       if (configPath) {
         try { fs.rmSync(configPath, { force: true }); } catch {}

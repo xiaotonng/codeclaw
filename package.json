@@ -1,6 +1,6 @@
 {
   "name": "pikiclaw",
-  "version": "0.2.49",
+  "version": "0.2.50",
   "description": "Put the world's smartest AI agents in your pocket. Command local Claude & Gemini via IM. | 让最好用的 IM 变成你电脑上的顶级 Agent 控制台",
   "type": "module",
   "bin": {
@@ -27,7 +27,7 @@
     "url": "git+https://github.com/xiaotonng/pikiclaw.git"
   },
   "scripts": {
-    "dev": "npm run build:dashboard && tsx src/cli.ts",
+    "dev": "bash scripts/dev.sh",
     "command": "set -ae && . ./.env && set +a && tsx src/run.ts",
     "build:dashboard": "tsx scripts/build-dashboard.ts",
     "build": "npm run build:dashboard && tsc",

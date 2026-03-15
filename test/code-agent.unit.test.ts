@@ -9,6 +9,7 @@ import {
   buildCodexTurnInput,
   doClaudeStream,
   doCodexStream,
+  doGeminiStream,
   doStream,
   getSessionTail,
   getUsage,
@@ -273,6 +274,100 @@ rl.on('line', (line) => {
     ]);
     expect(activities.some(activity => activity.includes('Edit files...'))).toBe(true);
     expect(result2.activity).toContain('Updated src/bot-telegram.ts');
+
+    // --- parses nested token usage into session context percent ---
+    shutdownCodexServer();
+
+    const script3 = `#!/usr/bin/env node
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: 'thread-usage' }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-usage' } } }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'thread/tokenUsage/updated',
+      params: {
+        threadId: 'thread-usage',
+        tokenUsage: {
+          info: {
+            total_token_usage: {
+              input_tokens: 34310,
+              cached_input_tokens: 17280,
+              output_tokens: 714,
+              reasoning_output_tokens: 446,
+              total_tokens: 35024,
+            },
+            last_token_usage: {
+              input_tokens: 11417,
+              cached_input_tokens: 10752,
+              output_tokens: 125,
+              reasoning_output_tokens: 18,
+              total_tokens: 11542,
+            },
+            model_context_window: 258400,
+          },
+        },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-usage',
+        item: { id: 'msg-usage', type: 'agentMessage', phase: 'final_answer' },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/agentMessage/delta',
+      params: { threadId: 'thread-usage', itemId: 'msg-usage', delta: 'done' },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-usage',
+        item: { id: 'msg-usage', type: 'agentMessage', phase: 'final_answer', text: 'done' },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'turn/completed',
+      params: { threadId: 'thread-usage', turn: { id: 'turn-usage', status: 'completed' } },
+    }) + '\\n');
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script3, { mode: 0o755 });
+
+    const previewMeta: Array<{ contextPercent: number | null } | undefined> = [];
+    const result3 = await doCodexStream(baseOpts('codex', {
+      onText: (_text, _thinking, _activity, meta) => {
+        if (meta) previewMeta.push({ contextPercent: meta.contextPercent });
+      },
+    }));
+
+    expect(result3.ok).toBe(true);
+    expect(result3.inputTokens).toBe(11417);
+    expect(result3.cachedInputTokens).toBe(10752);
+    expect(result3.outputTokens).toBe(125);
+    expect(result3.contextUsedTokens).toBe(35024);
+    expect(result3.contextPercent).toBe(13.6);
+    expect(previewMeta.some(meta => meta?.contextPercent === 13.6)).toBe(true);
   });
 
   it('keeps long codex commentary lines intact and runs turns in parallel across sessions', async () => {
@@ -477,6 +572,7 @@ process.stdout.write(JSON.stringify({ type: 'result', session_id: 'gemini-sessio
     expect(result.ok).toBe(true);
     expect(result.sessionId).toBe('gemini-session');
     expect(result.message).toBe('Gemini ok');
+    expect(result.contextWindow).toBe(1_048_576);
 
     const argv = JSON.parse(fs.readFileSync(argvFile, 'utf-8'));
     expect(argv).toContain('--output-format');
@@ -521,6 +617,23 @@ process.stdout.write(JSON.stringify({ type: 'result', session_id: 'gemini-sessio
     expect(argv.filter((arg: string) => arg === '--sandbox')).toHaveLength(1);
     expect(argv).toContain('default');
     expect(argv).toContain('true');
+  });
+
+  it('computes Gemini context percent from model fallback and input-side tokens', async () => {
+    writeFakeScript('gemini', [
+      { type: 'init', session_id: 'gemini-ctx', model: 'gemini-2.5-pro' },
+      { type: 'message', role: 'assistant', delta: true, content: 'OK' },
+      { type: 'result', session_id: 'gemini-ctx', status: 'success', stats: { input_tokens: 9302, output_tokens: 50, cached: 132, total_tokens: 9484 } },
+    ]);
+
+    const result = await doGeminiStream(baseOpts('gemini', {
+      geminiModel: 'gemini-2.5-pro',
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(result.contextWindow).toBe(1_048_576);
+    expect(result.contextUsedTokens).toBe(9434);
+    expect(result.contextPercent).toBe(0.9);
   });
 });
 
@@ -568,6 +681,30 @@ describe('claude stream', () => {
     expect(parsed.contextWindow).toBe(200000);
     expect(parsed.activity).toContain('Read src/bot.ts');
     expect(activities.some(activity => activity.includes('Read src/bot.ts done'))).toBe(true);
+
+    const claudePreviewPercents: Array<number | null> = [];
+    writeFakeScript('claude', [
+      { type: 'system', session_id: 's-ctx', model: 'claude-opus-4-6' },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'message_start',
+          message: { usage: { input_tokens: 25000, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0 } },
+        },
+      },
+      { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'ctx' } } },
+      { type: 'result', session_id: 's-ctx', usage: { input_tokens: 25000, cache_read_input_tokens: 1000, output_tokens: 1 } },
+    ]);
+
+    const claudeFallback = await doClaudeStream(baseOpts('claude', {
+      onText: (_text, _thinking, _activity, meta) => {
+        if (meta) claudePreviewPercents.push(meta.contextPercent);
+      },
+    }));
+    expect(claudeFallback.ok).toBe(true);
+    expect(claudeFallback.contextWindow).toBe(200000);
+    expect(claudeFallback.contextPercent).toBe(13);
+    expect(claudePreviewPercents).toContain(13);
 
     writeFakeScript('claude', [
       { type: 'system', session_id: 's2' },

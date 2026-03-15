@@ -15,6 +15,8 @@ src/
   bot-handler.ts                Generic message pipeline with live preview + MCP hook
   bot-menu.ts                   Menu command definitions and skill command mapping
   bot-streaming.ts              Stream preview parsing helpers
+  human-loop.ts                 Shared human-loop prompt state and answer helpers
+  human-loop-codex.ts           Map Codex user-input requests into IM prompts
 
   bot-telegram.ts               Telegram orchestration
   bot-telegram-render.ts        Telegram rendering helpers
@@ -38,8 +40,7 @@ src/
   mcp-session-server.ts         Stdio MCP server launched by agent CLIs
   tools/
     workspace.ts                im_list_files / im_send_file
-    capture.ts                  take_screenshot
-    gui.ts                      Reserved GUI tool module
+    desktop.ts                  Optional macOS desktop GUI tools via Appium Mac2
     types.ts                    MCP tool types and helpers
 
   dashboard.ts                  Web dashboard server and API
@@ -140,7 +141,7 @@ Each conversation runs against a pikiclaw-managed session workspace. That worksp
 - project skill discovery
 - MCP tool visibility
 
-This is why file return, screenshots, and project-scoped tools can work consistently across agents.
+This is why file return, project skills, and per-session tool visibility can work consistently across agents.
 
 ### 4. MCP is injected per stream
 
@@ -155,7 +156,11 @@ When a stream starts and an IM callback is available:
 
 This keeps the tool lifecycle tightly scoped to the active run.
 
-### 5. Dashboard is config + runtime surface
+### 5. Codex human loop is handled in-channel
+
+Codex can request structured user input mid-run. pikiclaw translates those requests into Telegram / Feishu prompts, waits for the answer, and resumes the same task instead of forcing the user back to the terminal.
+
+### 6. Dashboard is config + runtime surface
 
 The dashboard is not just a setup page. It is the main local control plane for:
 
@@ -179,6 +184,7 @@ Incoming IM message
   -> LivePreview updates the placeholder while streaming
   -> Bot.runStream() prepares agent options + MCP bridge
   -> AgentDriver streams output
+  -> if Codex requests user input, human-loop prompt is rendered in-channel
   -> final reply is rendered
   -> artifacts / send_file callbacks are delivered back to IM
 ```
@@ -189,9 +195,16 @@ Registered by `mcp-session-server.ts`:
 
 - `im_list_files`
 - `im_send_file`
-- `take_screenshot`
+- optional macOS desktop tools from `src/tools/desktop.ts`
+  - `desktop_status`
+  - `desktop_open_app`
+  - `desktop_snapshot`
+  - `desktop_click`
+  - `desktop_type`
+  - `desktop_screenshot`
+  - `desktop_close_session`
 
-`src/tools/gui.ts` exists as the future extension point for interactive GUI tools, but currently exports no live tools.
+Supplemental browser automation can also be registered from `mcp-bridge.ts` via `@playwright/mcp`, separate from the built-in session MCP server.
 
 ## Adding a New Agent
 

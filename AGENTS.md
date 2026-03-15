@@ -95,12 +95,16 @@ bot-{platform}.ts
 - The dashboard is the main config surface; env vars still work, but docs and code assume config-first
 - MCP tools are currently injected per stream, not as a top-level global tool registry
 - `src/tools/gui.ts` is a placeholder extension point and does not yet expose real GUI tools
+- The machine always has a production/self-bootstrap communication path via `npx pikiclaw@latest`; do not kill, replace, or "clean up" that chain when working on dev-only changes
+- `npm run dev` is a local-only development path: it runs with `--no-daemon`, stays on the checked-out source tree, and writes a fresh log file to `~/.pikiclaw/dev/dev.log` on each launch
 
 ## Testing Rules
 
 - Unit tests: `npm test`
 - Live E2E: `npm run test:e2e`
 - E2E tests should not mock the external system being tested
+- If a test or validation step needs to launch `pikiclaw`, use `npm run dev`; that is the only approved local startup path for dev/test work on this machine
+- The one explicit daemon exception is `test/e2e/restart.e2e.test.ts`; it still must stay on the local source chain and never use the production `npx pikiclaw@latest` runtime
 
 ## Common Commands
 
@@ -112,3 +116,5 @@ npm run test:e2e
 npx pikiclaw@latest --doctor
 npx pikiclaw@latest --setup
 ```
+
+When validating `npm run dev`, only observe the dev chain. Do not touch the long-lived production `npx pikiclaw@latest` process that keeps IM connectivity alive on this machine.

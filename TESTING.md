@@ -5,6 +5,9 @@
 ## Test Commands
 
 ```sh
+# Manual runtime / startup validation (preferred for anything that launches pikiclaw)
+npm run dev
+
 # Unit tests plus top-level direct-handler tests
 npm test
 
@@ -17,6 +20,17 @@ npm run test:e2e
 # One file
 npx vitest run test/channel-feishu.unit.test.ts
 ```
+
+## Startup Rule
+
+If a test or validation step needs to launch `pikiclaw` itself, use `npm run dev`.
+
+- `npm run dev` is the local-only startup path
+- It runs with `--no-daemon`, so it stays on the checked-out source tree
+- It rewrites `~/.pikiclaw/dev/dev.log` on each launch
+- Do not kill or reuse the long-lived production/self-bootstrap `npx pikiclaw@latest` process on this machine as part of dev testing
+
+The one deliberate exception is the daemon lifecycle test `test/e2e/restart.e2e.test.ts`. That test exists specifically to verify restart behavior, but it must still stay on the local source chain and never point at the production `npx pikiclaw@latest` runtime.
 
 ## Test Split
 
@@ -77,6 +91,15 @@ Agent live tests also require the corresponding CLI to be installed and authenti
 
 ### Live E2E tests
 
+Startup / runtime E2E:
+
+| File / Flow | Scope |
+|---|---|
+| `npm run dev` + real Telegram/Feishu interaction | Full local runtime startup, dashboard, channel connection, and message flow |
+| `test/e2e/restart.e2e.test.ts` | Local daemon/restart lifecycle only; intentionally exercises process replacement, never the production chain |
+
+In-process / non-startup E2E:
+
 | File | Scope |
 |---|---|
 | `test/e2e/bot-telegram.e2e.test.ts` | Full Telegram bot flows with a real bot and real agent |
@@ -84,12 +107,14 @@ Agent live tests also require the corresponding CLI to be installed and authenti
 | `test/e2e/code-agent.e2e.test.ts` | Real CLI streams for Claude/Codex |
 | `test/e2e/getSessions.e2e.test.ts` | Reads real local session stores |
 | `test/e2e/list-models.e2e.test.ts` | Live model discovery |
-| `test/e2e/restart.e2e.test.ts` | Restart path with process replacement |
 | `test/e2e/switch-workdir.e2e.test.ts` | Real workdir switching against live agents |
 
 ## Common Runs
 
 ```sh
+# Local startup validation with fresh dev log
+npm run dev
+
 # One unit file
 npx vitest run test/mcp-bridge.unit.test.ts
 
@@ -139,3 +164,5 @@ Examples:
 - `test/support/` contains shared helpers for Telegram and stream assertions
 - `npm run test:e2e` is broader than `npm test` and may consume tokens or send real messages
 - Some root-level files still use `*.e2e.test.ts` naming even though they are not under `test/e2e/`
+- For any manual or IM-driven end-to-end validation that requires a running bot, start the local runtime with `npm run dev` and inspect `~/.pikiclaw/dev/dev.log`
+- `test/e2e/restart.e2e.test.ts` is the only automated test that should intentionally exercise daemon behavior; all other startup-style validation should stay on the local dev path

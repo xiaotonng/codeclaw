@@ -21,6 +21,13 @@ export interface UserConfig {
   telegramAllowedChatIds?: string;
   feishuAppId?: string;
   feishuAppSecret?: string;
+  browserGuiEnabled?: boolean;
+  browserGuiHeadless?: boolean;
+  browserGuiIsolated?: boolean;
+  browserGuiUseExtension?: boolean;
+  browserGuiExtensionToken?: string;
+  desktopGuiEnabled?: boolean;
+  desktopAppiumUrl?: string;
 }
 
 interface ApplyUserConfigOptions {
@@ -46,6 +53,8 @@ const MANAGED_ENV_KEYS = [
   'FEISHU_APP_ID',
   'FEISHU_APP_SECRET',
 ] as const;
+const USER_CONFIG_DIRNAME = '.pikiclaw';
+const USER_CONFIG_FILENAME = 'setting.json';
 
 let activeUserConfig: Partial<UserConfig> = {};
 const userConfigListeners = new Set<UserConfigChangeListener>();
@@ -62,10 +71,14 @@ function expandHomeDir(value: string): string {
  * Single canonical config path: ~/.pikiclaw/setting.json
  * Both CLI and dashboard read/write this file exclusively.
  */
+export function getDevUserConfigPath(): string {
+  return path.join(os.homedir(), USER_CONFIG_DIRNAME, 'dev', USER_CONFIG_FILENAME);
+}
+
 export function getUserConfigPath(): string {
   const custom = (process.env.PIKICLAW_CONFIG || '').trim();
   if (custom) return path.resolve(custom);
-  return path.join(os.homedir(), '.pikiclaw', 'setting.json');
+  return path.join(os.homedir(), USER_CONFIG_DIRNAME, USER_CONFIG_FILENAME);
 }
 
 function loadJsonFile(filePath: string): Partial<UserConfig> {

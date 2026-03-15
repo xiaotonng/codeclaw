@@ -59,6 +59,30 @@ export interface StreamPreviewPlan {
   steps: StreamPreviewPlanStep[];
 }
 
+export interface CodexInteractionOption {
+  label: string;
+  description: string;
+}
+
+export interface CodexInteractionQuestion {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options: CodexInteractionOption[] | null;
+}
+
+export type CodexInteractionRequest =
+  | {
+    kind: 'requestUserInput';
+    requestId: string;
+    threadId: string;
+    turnId: string;
+    itemId: string;
+    questions: CodexInteractionQuestion[];
+  };
+
 export interface StreamOpts {
   agent: Agent;
   prompt: string;
@@ -102,6 +126,8 @@ export interface StreamOpts {
   extraEnv?: Record<string, string>;
   /** Abort the in-flight stream. */
   abortSignal?: AbortSignal;
+  /** Optional callback for Codex human-in-the-loop server requests. */
+  onCodexInteractionRequest?: (request: CodexInteractionRequest) => Promise<Record<string, any> | null>;
 }
 
 export interface StreamResult {
@@ -229,9 +255,16 @@ export function mimeForExt(ext: string): string {
   }
 }
 
-export function computeContext(s: { inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null; cacheCreationInputTokens: number | null; contextWindow: number | null }) {
-  const total = (s.inputTokens ?? 0) + (s.cachedInputTokens ?? 0) + (s.cacheCreationInputTokens ?? 0);
-  const used = total > 0 ? total : null;
+export function computeContext(s: {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
+  contextWindow: number | null;
+  contextUsedTokens?: number | null;
+}) {
+  const fallbackTotal = (s.inputTokens ?? 0) + (s.cachedInputTokens ?? 0) + (s.cacheCreationInputTokens ?? 0);
+  const used = s.contextUsedTokens ?? (fallbackTotal > 0 ? fallbackTotal : null);
   const pct = used != null && s.contextWindow
     ? Math.min(99.9, Math.round(used / s.contextWindow * 1000) / 10)
     : null;
@@ -241,7 +274,7 @@ export function computeContext(s: { inputTokens: number | null; outputTokens: nu
 export function buildStreamPreviewMeta(s: {
   inputTokens: number | null; outputTokens: number | null;
   cachedInputTokens: number | null; cacheCreationInputTokens: number | null;
-  contextWindow: number | null;
+  contextWindow: number | null; contextUsedTokens?: number | null;
 }): StreamPreviewMeta {
   return {
     inputTokens: s.inputTokens, outputTokens: s.outputTokens,
@@ -779,6 +812,7 @@ export async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, 
     model: opts.model, thinkingEffort: opts.thinkingEffort, errors: null as string[] | null,
     inputTokens: null as number | null, outputTokens: null as number | null, cachedInputTokens: null as number | null,
     cacheCreationInputTokens: null as number | null, contextWindow: null as number | null,
+    contextUsedTokens: null as number | null,
     codexCumulative: null as CodexCumulativeUsage | null,
     stopReason: null as string | null, activity: '',
     recentActivity: [] as string[],

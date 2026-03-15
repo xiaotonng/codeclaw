@@ -1,7 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { resolveMcpServerCommand, resolveSendFilePath } from '../src/mcp-bridge.ts';
+import {
+  buildGuiSetupHints,
+  buildSupplementalMcpServers,
+  resolveGuiIntegrationConfig,
+  resolveMcpServerCommand,
+  resolveSendFilePath,
+} from '../src/mcp-bridge.ts';
 import { makeTmpDir } from './support/env.ts';
 
 function writeFile(filePath: string, content = '') {
@@ -70,5 +76,126 @@ describe('resolveSendFilePath', () => {
     writeFile(workdirFile2, 'workdir');
 
     expect(resolveSendFilePath('desktop-screenshot.png', workspacePath2, [], workdir2).path).toBe(workdirFile2);
+  });
+});
+
+describe('resolveGuiIntegrationConfig', () => {
+  it('defaults browser automation to visible extension mode when not configured', () => {
+    const gui = resolveGuiIntegrationConfig({} as any, {});
+
+    expect(gui).toEqual({
+      browserEnabled: true,
+      browserHeadless: false,
+      browserIsolated: false,
+      browserUseExtension: true,
+      browserExtensionToken: '',
+      desktopEnabled: process.platform === 'darwin',
+      desktopAppiumUrl: 'http://127.0.0.1:4723',
+    });
+  });
+
+  it('prefers env overrides over user config defaults', () => {
+    const config = {
+      browserGuiEnabled: true,
+      browserGuiHeadless: false,
+      browserGuiIsolated: false,
+      desktopGuiEnabled: false,
+      desktopAppiumUrl: 'http://config-appium:4723',
+    };
+    const gui = resolveGuiIntegrationConfig(config as any, {
+      PIKICLAW_BROWSER_GUI: 'false',
+      PIKICLAW_BROWSER_HEADLESS: 'true',
+      PIKICLAW_BROWSER_ISOLATED: 'true',
+      PIKICLAW_BROWSER_USE_EXTENSION: 'true',
+      PLAYWRIGHT_MCP_EXTENSION_TOKEN: 'token-from-env',
+      PIKICLAW_DESKTOP_GUI: 'true',
+      PIKICLAW_DESKTOP_APPIUM_URL: 'http://env-appium:4723',
+    });
+
+    expect(gui).toEqual({
+      browserEnabled: false,
+      browserHeadless: true,
+      browserIsolated: true,
+      browserUseExtension: true,
+      browserExtensionToken: 'token-from-env',
+      desktopEnabled: true,
+      desktopAppiumUrl: 'http://env-appium:4723',
+    });
+  });
+});
+
+describe('buildSupplementalMcpServers', () => {
+  it('adds Playwright MCP with the expected flags', () => {
+    const servers = buildSupplementalMcpServers({
+      browserEnabled: true,
+      browserHeadless: true,
+      browserIsolated: true,
+      browserUseExtension: false,
+      browserExtensionToken: '',
+      desktopEnabled: true,
+      desktopAppiumUrl: 'http://127.0.0.1:4723',
+    });
+
+    expect(servers).toEqual([
+      {
+        name: 'pikiclaw-browser',
+        command: 'npx',
+        args: ['-y', '@playwright/mcp@latest', '--headless', '--isolated'],
+      },
+    ]);
+  });
+
+  it('uses extension mode to connect to the existing Chrome profile when configured', () => {
+    const servers = buildSupplementalMcpServers({
+      browserEnabled: true,
+      browserHeadless: false,
+      browserIsolated: false,
+      browserUseExtension: true,
+      browserExtensionToken: 'token-from-config',
+      desktopEnabled: true,
+      desktopAppiumUrl: 'http://127.0.0.1:4723',
+    });
+
+    expect(servers).toEqual([
+      {
+        name: 'pikiclaw-browser',
+        command: 'npx',
+        args: ['-y', '@playwright/mcp@latest', '--extension'],
+        env: { PLAYWRIGHT_MCP_EXTENSION_TOKEN: 'token-from-config' },
+      },
+    ]);
+  });
+});
+
+describe('buildGuiSetupHints', () => {
+  it('tells users to install the Playwright extension when extension mode is enabled', () => {
+    const hints = buildGuiSetupHints({
+      browserEnabled: true,
+      browserHeadless: false,
+      browserIsolated: false,
+      browserUseExtension: true,
+      browserExtensionToken: '',
+      desktopEnabled: true,
+      desktopAppiumUrl: 'http://127.0.0.1:4723',
+    });
+
+    expect(hints).toEqual([
+      'browser extension mode enabled; install Playwright MCP Bridge in the current Chrome profile first: https://chromewebstore.google.com/detail/playwright-mcp-bridge/mmlmfjhmonkocbjadbfplnigmagldckm',
+      'after installing the extension, open its UI to copy PLAYWRIGHT_MCP_EXTENSION_TOKEN if you want to skip the browser approval prompt',
+    ]);
+  });
+
+  it('stays quiet when browser automation does not use extension mode', () => {
+    const hints = buildGuiSetupHints({
+      browserEnabled: true,
+      browserHeadless: false,
+      browserIsolated: false,
+      browserUseExtension: false,
+      browserExtensionToken: '',
+      desktopEnabled: true,
+      desktopAppiumUrl: 'http://127.0.0.1:4723',
+    });
+
+    expect(hints).toEqual([]);
   });
 });

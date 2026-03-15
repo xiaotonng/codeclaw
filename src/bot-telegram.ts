@@ -24,6 +24,7 @@ import {
 } from './bot-orchestration.js';
 import {
   stageSessionFiles,
+  type CodexInteractionRequest,
 } from './code-agent.js';
 import type { McpSendFileCallback } from './mcp-bridge.js';
 import { shutdownAllDrivers } from './agent-driver.js';
@@ -60,6 +61,7 @@ import {
 } from './process-control.js';
 import {
   buildInitialPreviewHtml,
+  buildHumanLoopPromptHtml,
   buildStreamPreviewHtml,
   buildFinalReplyRender,
   escapeHtml,
@@ -71,6 +73,8 @@ import {
   renderSessionTurnHtml,
   truncateMiddle,
 } from './bot-telegram-render.js';
+import { buildCodexHumanLoopPrompt } from './human-loop-codex.js';
+import { currentHumanLoopQuestion, humanLoopOptionSelected } from './human-loop.js';
 import { TelegramChannel, type TgContext, type TgCallbackContext, type TgMessage } from './channel-telegram.js';
 import { splitText, supportsChannelCapability } from './channel-base.js';
 import { getActiveUserConfig } from './user-config.js';
@@ -454,11 +458,87 @@ export class TelegramBot extends Bot {
     await ctx.reply(`Stopped current session: ${parts.join(', ')}.`);
   }
 
+  private buildHumanLoopKeyboard(promptId: string): { inline_keyboard: { text: string; callback_data: string }[][] } {
+    const prompt = this.humanLoopPrompt(promptId);
+    const question = prompt ? currentHumanLoopQuestion(prompt) : null;
+    const inline_keyboard: { text: string; callback_data: string }[][] = [];
+    const optionRows = (question?.options || []).map((option, index) => ([{
+      text: `${humanLoopOptionSelected(prompt!, option.value) ? '●' : '○'} ${truncateMiddle(option.label, 28)}`,
+      callback_data: `hl:o:${promptId}:${index}`,
+    }]));
+    inline_keyboard.push(...optionRows);
+    if (question?.options?.length && question.allowFreeform) {
+      inline_keyboard.push([{ text: 'Other...', callback_data: `hl:other:${promptId}` }]);
+    }
+    if (question?.allowEmpty) {
+      inline_keyboard.push([{ text: 'Skip', callback_data: `hl:skip:${promptId}` }]);
+    }
+    inline_keyboard.push([{ text: 'Cancel', callback_data: `hl:cancel:${promptId}` }]);
+    return { inline_keyboard };
+  }
+
+  private async refreshHumanLoopPrompt(chatId: number, promptId: string, opts: { submitted?: boolean; suffix?: string } = {}) {
+    const prompt = this.humanLoopPrompt(promptId);
+    if (!prompt) return;
+    const messageId = prompt.messageIds[0];
+    if (typeof messageId !== 'number') return;
+    const html = `${buildHumanLoopPromptHtml(prompt)}${opts.suffix ? `\n\n<i>${escapeHtml(opts.suffix)}</i>` : ''}`;
+    await this.channel.editMessage(chatId, messageId, html, {
+      parseMode: 'HTML',
+      keyboard: opts.submitted ? { inline_keyboard: [] } : this.buildHumanLoopKeyboard(promptId),
+    }).catch(() => {});
+  }
+
+  private async finalizeHumanLoopPrompt(prompt: ReturnType<TelegramBot['humanLoopPrompt']>, suffix: string) {
+    if (!prompt) return;
+    const messageId = prompt.messageIds[0];
+    if (typeof messageId !== 'number') return;
+    const html = `${buildHumanLoopPromptHtml(prompt)}\n\n<i>${escapeHtml(suffix)}</i>`;
+    await this.channel.editMessage(prompt.chatId, messageId, html, {
+      parseMode: 'HTML',
+      keyboard: { inline_keyboard: [] },
+    }).catch(() => {});
+  }
+
+  private createCodexHumanLoopHandler(ctx: TgContext, taskId: string, messageThreadId: number | undefined) {
+    return async (request: CodexInteractionRequest): Promise<Record<string, any> | null> => {
+      const blueprint = buildCodexHumanLoopPrompt(request);
+      const active = this.beginHumanLoopPrompt({
+        taskId,
+        chatId: ctx.chatId,
+        ...blueprint,
+      });
+      try {
+        const sent = await ctx.reply(buildHumanLoopPromptHtml(active.prompt), {
+          parseMode: 'HTML',
+          messageThreadId,
+          keyboard: this.buildHumanLoopKeyboard(active.prompt.promptId),
+        });
+        if (typeof sent === 'number') this.registerHumanLoopMessage(active.prompt.promptId, sent);
+      } catch (error: any) {
+        this.humanLoopCancel(active.prompt.promptId, error?.message || 'Failed to send prompt.');
+        throw error;
+      }
+      return active.result;
+    };
+  }
+
   // ---- streaming bridge -----------------------------------------------------
 
   private async handleMessage(msg: TgMessage, ctx: TgContext) {
     const text = msg.text.trim();
     if (!text && !msg.files.length) return;
+    const pendingPrompt = this.pendingHumanLoopPrompt(ctx.chatId);
+    if (pendingPrompt && text && !msg.files.length && !text.startsWith('/')) {
+      const result = this.humanLoopSubmitText(ctx.chatId, text);
+      if (!result) {
+        await ctx.reply('Please answer the active prompt using the buttons above.');
+        return;
+      }
+      if (result.completed) await this.finalizeHumanLoopPrompt(result.prompt, 'Answer submitted.');
+      else await this.refreshHumanLoopPrompt(ctx.chatId, result.prompt.promptId);
+      return;
+    }
 
     const session = this.resolveIncomingSession(ctx, text, msg.files);
     const cs = this.chat(ctx.chatId);
@@ -566,7 +646,7 @@ export class TelegramBot extends Bot {
 
         const result = await this.runStream(prompt, session, files, (nextText, nextThinking, nextActivity = '', meta, plan) => {
           livePreview?.update(nextText, nextThinking, nextActivity, meta, plan);
-        }, undefined, mcpSendFile, abortController.signal);
+        }, undefined, mcpSendFile, abortController.signal, this.createCodexHumanLoopHandler(ctx, taskId, messageThreadId));
         await livePreview?.settle();
 
         this.log(
@@ -759,7 +839,65 @@ export class TelegramBot extends Bot {
     return true;
   }
 
+  private async handleHumanLoopCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
+    if (!data.startsWith('hl:')) return false;
+    const [, action, promptId, rawIndex] = data.split(':');
+    const prompt = this.humanLoopPrompt(promptId);
+    if (!prompt) {
+      await ctx.answerCallback('This prompt is no longer active.');
+      return true;
+    }
+    if (action === 'cancel') {
+      const cancelled = this.humanLoopCancel(promptId, 'Prompt cancelled from Telegram.');
+      await this.finalizeHumanLoopPrompt(cancelled, 'Cancelled.');
+      await ctx.answerCallback('Cancelled.');
+      return true;
+    }
+    if (action === 'skip') {
+      const result = this.humanLoopSkip(promptId);
+      if (!result) {
+        await ctx.answerCallback('This prompt is no longer active.');
+        return true;
+      }
+      if (result.completed) await this.finalizeHumanLoopPrompt(result.prompt, 'Answer submitted.');
+      else await this.refreshHumanLoopPrompt(ctx.chatId, promptId);
+      await ctx.answerCallback(result.completed ? 'Submitted.' : 'Skipped.');
+      return true;
+    }
+    if (action === 'other') {
+      const result = this.humanLoopSelectOption(promptId, '__other__', { requestFreeform: true });
+      if (!result) {
+        await ctx.answerCallback('This prompt is no longer active.');
+        return true;
+      }
+      await this.refreshHumanLoopPrompt(ctx.chatId, promptId);
+      await ctx.answerCallback('Reply with text to continue.');
+      return true;
+    }
+    if (action === 'o') {
+      const index = Number.parseInt(rawIndex || '', 10);
+      const question = this.humanLoopCurrentQuestion(promptId);
+      const option = Number.isFinite(index) ? question?.options?.[index] : null;
+      if (!option) {
+        await ctx.answerCallback('Option expired.');
+        return true;
+      }
+      const result = this.humanLoopSelectOption(promptId, option.value);
+      if (!result) {
+        await ctx.answerCallback('This prompt is no longer active.');
+        return true;
+      }
+      if (result.completed) await this.finalizeHumanLoopPrompt(result.prompt, 'Answer submitted.');
+      else await this.refreshHumanLoopPrompt(ctx.chatId, promptId);
+      await ctx.answerCallback(result.completed ? 'Submitted.' : 'Recorded.');
+      return true;
+    }
+    await ctx.answerCallback();
+    return true;
+  }
+
   async handleCallback(data: string, ctx: TgCallbackContext) {
+    if (await this.handleHumanLoopCallback(data, ctx)) return;
     if (await this.handleTaskStopCallback(data, ctx)) return;
     if (await this.handleSwitchNavigateCallback(data, ctx)) return;
     if (await this.handleSwitchSelectCallback(data, ctx)) return;

@@ -24,6 +24,7 @@ import {
 } from './bot-orchestration.js';
 import {
   stageSessionFiles,
+  type CodexInteractionRequest,
 } from './code-agent.js';
 import type { McpSendFileCallback } from './mcp-bridge.js';
 import { shutdownAllDrivers } from './agent-driver.js';
@@ -60,6 +61,7 @@ import {
   feishuPreviewRenderer,
   feishuStreamingPreviewRenderer,
   buildInitialPreviewMarkdown,
+  buildHumanLoopPromptMarkdown,
   buildFinalReplyRender,
   renderCommandNotice,
   renderCommandSelectionCard,
@@ -70,6 +72,8 @@ import {
   buildSwitchWorkdirCard,
   resolveFeishuRegisteredPath,
 } from './bot-feishu-render.js';
+import { buildCodexHumanLoopPrompt } from './human-loop-codex.js';
+import { currentHumanLoopQuestion, humanLoopOptionSelected } from './human-loop.js';
 import { FeishuChannel, type FeishuContext, type FeishuCallbackContext, type FeishuMessage } from './channel-feishu.js';
 import { splitText, supportsChannelCapability } from './channel-base.js';
 import { getActiveUserConfig } from './user-config.js';
@@ -485,11 +489,106 @@ export class FeishuBot extends Bot {
     await ctx.reply(`Stopped current session: ${parts.join(', ')}.`);
   }
 
+  private buildHumanLoopKeyboard(promptId: string): { rows: Array<{ actions: Array<any> }> } {
+    const prompt = this.humanLoopPrompt(promptId);
+    const question = prompt ? currentHumanLoopQuestion(prompt) : null;
+    const rows: Array<{ actions: Array<any> }> = [];
+    for (let index = 0; index < (question?.options?.length || 0); index++) {
+      const option = question!.options![index];
+      rows.push({
+        actions: [{
+          tag: 'button',
+          text: { tag: 'plain_text', content: `${humanLoopOptionSelected(prompt!, option.value) ? '●' : '○'} ${option.label}`.slice(0, 32) },
+          value: { action: `hl:o:${promptId}:${index}` },
+        }],
+      });
+    }
+    if (question?.options?.length && question.allowFreeform) {
+      rows.push({
+        actions: [{
+          tag: 'button',
+          text: { tag: 'plain_text', content: 'Other...' },
+          value: { action: `hl:other:${promptId}` },
+        }],
+      });
+    }
+    if (question?.allowEmpty) {
+      rows.push({
+        actions: [{
+          tag: 'button',
+          text: { tag: 'plain_text', content: 'Skip' },
+          value: { action: `hl:skip:${promptId}` },
+        }],
+      });
+    }
+    rows.push({
+      actions: [{
+        tag: 'button',
+        text: { tag: 'plain_text', content: 'Cancel' },
+        value: { action: `hl:cancel:${promptId}` },
+      }],
+    });
+    return { rows };
+  }
+
+  private async refreshHumanLoopPrompt(chatId: string, promptId: string, suffix?: string) {
+    const prompt = this.humanLoopPrompt(promptId);
+    if (!prompt) return;
+    const messageId = prompt.messageIds[0];
+    if (!messageId) return;
+    const markdown = `${buildHumanLoopPromptMarkdown(prompt)}${suffix ? `\n\n*${suffix}*` : ''}`;
+    await this.channel.editMessage(chatId, String(messageId), markdown, {
+      keyboard: this.buildHumanLoopKeyboard(promptId),
+    }).catch(() => {});
+  }
+
+  private async finalizeHumanLoopPrompt(prompt: ReturnType<FeishuBot['humanLoopPrompt']>, suffix: string) {
+    if (!prompt) return;
+    const messageId = prompt.messageIds[0];
+    if (!messageId) return;
+    const markdown = `${buildHumanLoopPromptMarkdown(prompt)}\n\n*${suffix}*`;
+    await this.channel.editMessage(prompt.chatId, String(messageId), markdown, {
+      keyboard: { rows: [] },
+    }).catch(() => {});
+  }
+
+  private createCodexHumanLoopHandler(ctx: FeishuContext, taskId: string) {
+    return async (request: CodexInteractionRequest): Promise<Record<string, any> | null> => {
+      const blueprint = buildCodexHumanLoopPrompt(request);
+      const active = this.beginHumanLoopPrompt({
+        taskId,
+        chatId: ctx.chatId,
+        ...blueprint,
+      });
+      try {
+        const sent = await ctx.reply(buildHumanLoopPromptMarkdown(active.prompt), {
+          keyboard: this.buildHumanLoopKeyboard(active.prompt.promptId),
+        });
+        if (sent) this.registerHumanLoopMessage(active.prompt.promptId, sent);
+      } catch (error: any) {
+        this.humanLoopCancel(active.prompt.promptId, error?.message || 'Failed to send prompt.');
+        throw error;
+      }
+      return active.result;
+    };
+  }
+
   // ---- streaming bridge -----------------------------------------------------
 
   private async handleMessage(msg: FeishuMessage, ctx: FeishuContext) {
     const text = msg.text.trim();
     if (!text && !msg.files.length) return;
+    const pendingPrompt = this.pendingHumanLoopPrompt(ctx.chatId);
+    if (pendingPrompt && text && !msg.files.length && !text.startsWith('/')) {
+      const result = this.humanLoopSubmitText(ctx.chatId, text);
+      if (!result) {
+        await ctx.reply('Please answer the active prompt using the buttons above.');
+        return;
+      }
+      if (result.completed) await this.finalizeHumanLoopPrompt(result.prompt, 'Answer submitted.');
+      else await this.refreshHumanLoopPrompt(ctx.chatId, result.prompt.promptId);
+      return;
+    }
 
     const session = this.resolveIncomingSession(ctx, text, msg.files);
     const cs = this.chat(ctx.chatId);
@@ -596,7 +695,7 @@ export class FeishuBot extends Bot {
 
         const result = await this.runStream(prompt, session, files, (nextText, nextThinking, nextActivity = '', meta, plan) => {
           livePreview?.update(nextText, nextThinking, nextActivity, meta, plan);
-        }, undefined, mcpSendFile, abortController.signal);
+        }, undefined, mcpSendFile, abortController.signal, this.createCodexHumanLoopHandler(ctx, taskId));
         await livePreview?.settle();
 
         const finalReplyIds = await this.sendFinalReply(ctx, placeholderId, session.agent, result);
@@ -778,6 +877,7 @@ export class FeishuBot extends Bot {
 
   private async handleCallback(data: string, ctx: FeishuCallbackContext) {
     try {
+      if (await this.handleHumanLoopCallback(data, ctx)) return;
       if (await this.handleTaskStopCallback(data, ctx)) return;
       if (await this.handleSwitchNavigateCallback(data, ctx)) return;
       if (await this.handleSwitchSelectCallback(data, ctx)) return;
@@ -791,6 +891,43 @@ export class FeishuBot extends Bot {
     } catch (e: any) {
       this.log(`callback error: ${e}`);
     }
+  }
+
+  private async handleHumanLoopCallback(data: string, ctx: FeishuCallbackContext): Promise<boolean> {
+    if (!data.startsWith('hl:')) return false;
+    const [, action, promptId, rawIndex] = data.split(':');
+    const prompt = this.humanLoopPrompt(promptId);
+    if (!prompt) return true;
+    if (action === 'cancel') {
+      const cancelled = this.humanLoopCancel(promptId, 'Prompt cancelled from Feishu.');
+      await this.finalizeHumanLoopPrompt(cancelled, 'Cancelled.');
+      return true;
+    }
+    if (action === 'skip') {
+      const result = this.humanLoopSkip(promptId);
+      if (!result) return true;
+      if (result.completed) await this.finalizeHumanLoopPrompt(result.prompt, 'Answer submitted.');
+      else await this.refreshHumanLoopPrompt(ctx.chatId, promptId);
+      return true;
+    }
+    if (action === 'other') {
+      const result = this.humanLoopSelectOption(promptId, '__other__', { requestFreeform: true });
+      if (!result) return true;
+      await this.refreshHumanLoopPrompt(ctx.chatId, promptId);
+      return true;
+    }
+    if (action === 'o') {
+      const index = Number.parseInt(rawIndex || '', 10);
+      const question = this.humanLoopCurrentQuestion(promptId);
+      const option = Number.isFinite(index) ? question?.options?.[index] : null;
+      if (!option) return true;
+      const result = this.humanLoopSelectOption(promptId, option.value);
+      if (!result) return true;
+      if (result.completed) await this.finalizeHumanLoopPrompt(result.prompt, 'Answer submitted.');
+      else await this.refreshHumanLoopPrompt(ctx.chatId, promptId);
+      return true;
+    }
+    return true;
   }
 
   private async handleTaskStopCallback(data: string, ctx: FeishuCallbackContext): Promise<boolean> {

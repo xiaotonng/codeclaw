@@ -10,7 +10,7 @@ import { terminateProcessTree } from './process-control.js';
 import {
   type AgentInfo, type StreamOpts, type StreamResult,
   type StreamPreviewMeta, type StreamPreviewPlan, type StreamPreviewPlanStep,
-  type CodexCumulativeUsage,
+  type CodexCumulativeUsage, type CodexInteractionRequest,
   type SessionListResult, type SessionInfo, type SessionTailOpts, type SessionTailResult,
   type ModelListOpts, type ModelListResult, type ModelInfo,
   type UsageOpts, type UsageResult, type UsageWindowInfo,
@@ -34,6 +34,7 @@ const CODEX_APPSERVER_SPAWN_TIMEOUT_MS = 15_000;
 
 type RpcCallback = (msg: any) => void;
 type NotificationHandler = (method: string, params: any) => void;
+type RequestHandler = (method: string, params: any, requestId: string) => Promise<any> | any;
 
 export class CodexAppServer {
   private proc: ReturnType<typeof spawn> | null = null;
@@ -41,6 +42,7 @@ export class CodexAppServer {
   private nextId = 1;
   private pending = new Map<number, RpcCallback>();
   private notificationHandlers = new Set<NotificationHandler>();
+  private requestHandlers = new Set<RequestHandler>();
   private ready = false;
   private startPromise: Promise<boolean> | null = null;
   private configOverrides: string[] = [];
@@ -80,6 +82,21 @@ export class CodexAppServer {
           if (!line.trim()) continue;
           let msg: any;
           try { msg = JSON.parse(line); } catch { continue; }
+          if (msg.method && msg.id != null) {
+            const handlers = [...this.requestHandlers];
+            if (!handlers.length) {
+              this.respond(msg.id, {});
+              continue;
+            }
+            const [handler] = handlers;
+            Promise.resolve(handler(msg.method, msg.params ?? {}, String(msg.id)))
+              .then(result => this.respond(msg.id, result ?? {}))
+              .catch(error => {
+                agentLog(`[codex-rpc] request handler error method=${msg.method} error=${error?.message || error}`);
+                this.respond(msg.id, {});
+              });
+            continue;
+          }
           if (msg.id != null) {
             const cb = this.pending.get(msg.id);
             if (cb) { this.pending.delete(msg.id); cb(msg); }
@@ -143,6 +160,16 @@ export class CodexAppServer {
   }
 
   get isRunning(): boolean { return this.ready && !!this.proc && !this.proc.killed; }
+
+  onRequest(handler: RequestHandler): () => void {
+    this.requestHandlers.add(handler);
+    return () => { this.requestHandlers.delete(handler); };
+  }
+
+  private respond(id: any, result: any): void {
+    if (!this.proc || this.proc.killed) return;
+    try { this.proc.stdin!.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n'); } catch {}
+  }
 }
 
 /** Singleton app-server for shared operations (sessions, models, usage). */
@@ -217,6 +244,47 @@ function summarizeCodexFileChange(item: any): string {
   return 'Updated files';
 }
 
+function buildCodexInteractionRequest(method: string, params: any, requestId: string): CodexInteractionRequest | null {
+  if (method === 'item/tool/requestUserInput') {
+    const questions = Array.isArray(params?.questions) ? params.questions : [];
+    return {
+      kind: 'requestUserInput',
+      requestId,
+      threadId: String(params?.threadId || ''),
+      turnId: String(params?.turnId || ''),
+      itemId: String(params?.itemId || ''),
+      questions: questions.map((question: any) => ({
+        id: String(question?.id || ''),
+        header: String(question?.header || ''),
+        question: String(question?.question || ''),
+        isOther: !!question?.isOther,
+        isSecret: !!question?.isSecret,
+        options: Array.isArray(question?.options)
+          ? question.options.map((option: any) => ({
+            label: String(option?.label || ''),
+            description: String(option?.description || ''),
+          }))
+          : null,
+      })).filter((question: any) => question.id && question.question),
+    };
+  }
+  return null;
+}
+
+function defaultCodexInteractionResponse(request: CodexInteractionRequest): Record<string, any> {
+  const answers: Record<string, { answers: string[] }> = {};
+  for (const question of request.questions) answers[question.id] = { answers: [] };
+  return { answers };
+}
+
+function defaultCodexServerRequestResponse(method: string): Record<string, any> {
+  if (method === 'item/commandExecution/requestApproval') return { decision: 'accept' };
+  if (method === 'item/fileChange/requestApproval') return { decision: 'accept' };
+  if (method === 'item/permissions/requestApproval') return { permissions: {}, scope: 'turn' };
+  if (method === 'item/tool/requestUserInput') return { answers: {} };
+  return {};
+}
+
 function isCodexToolCallFailure(item: any): boolean {
   if (!item || !isCodexToolCallItem(item)) return false;
   return item.success === false || !!item.error || item.status === 'failed' || item.status === 'error';
@@ -259,12 +327,33 @@ function buildCodexCumulativeUsage(raw: any): CodexCumulativeUsage | null {
   return { input: input ?? 0, output: output ?? 0, cached: cached ?? 0 };
 }
 
+function codexUsageTotalTokens(raw: any): number | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const explicit = numberOrNull(raw.totalTokens, raw.total_tokens);
+  if (explicit != null) return explicit;
+  const input = numberOrNull(raw.inputTokens, raw.input_tokens) ?? 0;
+  const cached = numberOrNull(raw.cachedInputTokens, raw.cached_input_tokens) ?? 0;
+  const output = numberOrNull(raw.outputTokens, raw.output_tokens) ?? 0;
+  const reasoning = numberOrNull(raw.reasoningOutputTokens, raw.reasoning_output_tokens) ?? 0;
+  const total = input + cached + output + reasoning;
+  return total > 0 ? total : null;
+}
+
 function applyCodexTokenUsage(
-  s: { inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null; cacheCreationInputTokens: number | null; contextWindow: number | null; codexCumulative: CodexCumulativeUsage | null },
+  s: {
+    inputTokens: number | null;
+    outputTokens: number | null;
+    cachedInputTokens: number | null;
+    cacheCreationInputTokens: number | null;
+    contextWindow: number | null;
+    contextUsedTokens: number | null;
+    codexCumulative: CodexCumulativeUsage | null;
+  },
   rawUsage: any, prev?: CodexCumulativeUsage,
 ) {
   if (!rawUsage || typeof rawUsage !== 'object') return;
-  const last = rawUsage.last;
+  const info = rawUsage.info && typeof rawUsage.info === 'object' ? rawUsage.info : rawUsage;
+  const last = info.last ?? info.lastTokenUsage ?? info.last_token_usage ?? rawUsage.last;
   const lastInput = numberOrNull(last?.inputTokens, last?.input_tokens);
   const lastOutput = numberOrNull(last?.outputTokens, last?.output_tokens);
   const lastCached = numberOrNull(last?.cachedInputTokens, last?.cached_input_tokens);
@@ -274,14 +363,22 @@ function applyCodexTokenUsage(
   if (lastCached != null) s.cachedInputTokens = lastCached;
   if (lastCacheCreation != null) s.cacheCreationInputTokens = lastCacheCreation;
 
-  const total = buildCodexCumulativeUsage(rawUsage.total ?? rawUsage);
+  const totalUsage = info.total ?? info.totalTokenUsage ?? info.total_token_usage ?? rawUsage.total ?? rawUsage;
+  const total = buildCodexCumulativeUsage(totalUsage);
   if (total) {
     s.codexCumulative = total;
     if (lastInput == null) s.inputTokens = prev ? Math.max(0, total.input - prev.input) : total.input;
     if (lastOutput == null) s.outputTokens = prev ? Math.max(0, total.output - prev.output) : total.output;
     if (lastCached == null) s.cachedInputTokens = prev ? Math.max(0, total.cached - prev.cached) : total.cached;
   }
-  const contextWindow = numberOrNull(rawUsage.modelContextWindow, rawUsage.model_context_window);
+  const contextUsedTokens = codexUsageTotalTokens(totalUsage);
+  if (contextUsedTokens != null) s.contextUsedTokens = contextUsedTokens;
+  const contextWindow = numberOrNull(
+    info.modelContextWindow,
+    info.model_context_window,
+    rawUsage.modelContextWindow,
+    rawUsage.model_context_window,
+  );
   if (contextWindow != null && contextWindow > 0) s.contextWindow = contextWindow;
 }
 
@@ -313,6 +410,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   let timedOut = false;
   let interrupted = false;
   let unsubscribeNotifications = () => {};
+  let unsubscribeRequests = () => {};
   let settleTurnDone: (() => void) | null = null;
 
   try {
@@ -341,7 +439,8 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       model: opts.model as string | null, thinkingEffort: opts.thinkingEffort,
       inputTokens: null as number | null, outputTokens: null as number | null,
       cachedInputTokens: null as number | null, cacheCreationInputTokens: null as number | null,
-      contextWindow: null as number | null, codexCumulative: null as CodexCumulativeUsage | null,
+      contextWindow: null as number | null, contextUsedTokens: null as number | null,
+      codexCumulative: null as CodexCumulativeUsage | null,
       turnId: null as string | null, turnStatus: null as string | null, turnError: null as string | null,
       messagePhases: new Map<string, string>(),
       commentaryByItem: new Map<string, string>(),
@@ -504,6 +603,12 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
           emit();
         }
 
+        if (method === 'serverRequest/resolved' && params.threadId === s.sessionId) {
+          const requestId = String(params.requestId || '');
+          if (requestId) pushRecentActivity(s.recentNarrative, 'Human input resolved');
+          emit();
+        }
+
         if (method === 'turn/completed' && params.threadId === s.sessionId) {
           const turn = params.turn || {};
           applyCodexTokenUsage(s, params.tokenUsage || turn.tokenUsage || turn.usage, opts.codexPrevCumulative);
@@ -518,6 +623,22 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
         if (method === 'model/rerouted' && params.threadId === s.sessionId) s.model = params.model ?? s.model;
       };
       unsubscribeNotifications = srv.onNotification(handleNotification);
+      unsubscribeRequests = srv.onRequest(async (method, params, requestId) => {
+        const interaction = buildCodexInteractionRequest(method, params, requestId);
+        if (!interaction) return defaultCodexServerRequestResponse(method);
+        pushRecentActivity(s.recentNarrative, interaction.kind === 'requestUserInput' ? 'Waiting for user input' : 'Waiting for approval');
+        emit();
+        try {
+          if (opts.onCodexInteractionRequest) {
+            const response = await opts.onCodexInteractionRequest(interaction);
+            return response ?? defaultCodexInteractionResponse(interaction);
+          }
+        } catch (error: any) {
+          pushRecentActivity(s.recentFailures, `Human input failed: ${shortValue(error?.message || error, 120)}`, 4);
+          emit();
+        }
+        return defaultCodexInteractionResponse(interaction);
+      });
     });
     const abortStream = () => {
       if (interrupted) return;
@@ -555,6 +676,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     if (turnResp.error) {
       opts.abortSignal?.removeEventListener('abort', abortStream);
       unsubscribeNotifications();
+      unsubscribeRequests();
       const errMsg = turnResp.error.message || 'turn/start failed';
       agentLog(`[codex-rpc] turn/start error: ${errMsg}`);
       return {
@@ -572,6 +694,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     await turnDone;
     opts.abortSignal?.removeEventListener('abort', abortStream);
     unsubscribeNotifications();
+    unsubscribeRequests();
 
     if (!s.text.trim() && s.msgs.length) s.text = s.msgs.join('\n\n');
     if (!s.thinking.trim() && s.thinkParts.length) s.thinking = s.thinkParts.join('\n\n');
@@ -599,6 +722,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     };
   } finally {
     unsubscribeNotifications();
+    unsubscribeRequests();
     srv.kill();
   }
 }

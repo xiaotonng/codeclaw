@@ -68,9 +68,23 @@ function claudeCmd(o: StreamOpts): string[] {
   return args;
 }
 
+function claudeContextWindowFromModel(model: unknown): number | null {
+  const id = typeof model === 'string' ? model.trim().toLowerCase() : '';
+  if (!id) return null;
+  if (id.endsWith('[1m]')) return 1_000_000;
+  if (id === 'opus' || id === 'sonnet' || id === 'haiku') return 200_000;
+  if (/^claude-(opus|sonnet|haiku)-/.test(id)) return 200_000;
+  return null;
+}
+
 function claudeParse(ev: any, s: any) {
   const t = ev.type || '';
-  if (t === 'system') { s.sessionId = ev.session_id ?? s.sessionId; s.model = ev.model ?? s.model; s.thinkingEffort = ev.thinking_level ?? s.thinkingEffort; }
+  if (t === 'system') {
+    s.sessionId = ev.session_id ?? s.sessionId;
+    s.model = ev.model ?? s.model;
+    s.thinkingEffort = ev.thinking_level ?? s.thinkingEffort;
+    s.contextWindow = claudeContextWindowFromModel(s.model) ?? s.contextWindow;
+  }
 
   if (t === 'stream_event') {
     const inner = ev.event || {};
@@ -99,6 +113,7 @@ function claudeParse(ev: any, s: any) {
     }
     s.sessionId = ev.session_id ?? s.sessionId;
     s.model = ev.model ?? s.model;
+    s.contextWindow = claudeContextWindowFromModel(s.model) ?? s.contextWindow;
   }
 
   if (t === 'assistant') {

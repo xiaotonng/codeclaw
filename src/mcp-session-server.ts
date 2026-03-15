@@ -19,8 +19,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { McpToolModule, ToolContext } from './tools/types.js';
+import { desktopTools } from './tools/desktop.js';
 import { workspaceTools } from './tools/workspace.js';
-import { guiTools } from './tools/gui.js';
 
 // ---------------------------------------------------------------------------
 // Logging — writes to stderr + file so it doesn't interfere with stdio MCP transport
@@ -60,6 +60,7 @@ function summarizeArgs(args: unknown, max = 200): string {
 
 const ctx: ToolContext = {
   workspace: process.env.MCP_WORKSPACE_PATH || '',
+  workdir: process.env.MCP_WORKDIR || undefined,
   stagedFiles: (() => {
     try { return JSON.parse(process.env.MCP_STAGED_FILES || '[]'); } catch { return []; }
   })(),
@@ -72,7 +73,16 @@ log(`started workspace=${ctx.workspace} stagedFiles=${ctx.stagedFiles.length} ca
 // Tool registry — collect all tool modules
 // ---------------------------------------------------------------------------
 
-const TOOL_MODULES: McpToolModule[] = [workspaceTools, guiTools];
+function desktopToolsEnabled(): boolean {
+  const raw = String(process.env.PIKICLAW_DESKTOP_GUI || '').trim().toLowerCase();
+  if (!raw) return process.platform === 'darwin';
+  return ['1', 'true', 'yes', 'on'].includes(raw);
+}
+
+const TOOL_MODULES: McpToolModule[] = [
+  workspaceTools,
+  ...(desktopToolsEnabled() ? [desktopTools] : []),
+];
 
 const ALL_TOOLS = TOOL_MODULES.flatMap(m => m.tools);
 

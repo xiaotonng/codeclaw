@@ -6,6 +6,7 @@
  */
 
 import type { Agent, StreamResult, StreamPreviewMeta } from './bot.js';
+import type { HumanLoopPromptState } from './human-loop.js';
 import type {
   CommandActionButton,
   CommandItemState,
@@ -21,6 +22,13 @@ import { formatProviderUsageLines } from './bot-telegram-render.js';
 import type { LivePreviewRenderer } from './bot-telegram-live-preview.js';
 import type { StreamPreviewRenderInput } from './bot-telegram-render.js';
 import { formatActivityCommandSummary, parseActivitySummary, renderPlanForPreview, summarizeActivityForPreview } from './bot-streaming.js';
+import {
+  currentHumanLoopQuestion,
+  humanLoopAnsweredCount,
+  isHumanLoopAwaitingText,
+  isHumanLoopQuestionAnswered,
+  summarizeHumanLoopAnswer,
+} from './human-loop.js';
 import type { FeishuCardActionItem, FeishuCardActionRow, FeishuCardView } from './channel-feishu.js';
 import path from 'node:path';
 import { listSubdirs } from './bot.js';
@@ -189,6 +197,41 @@ export function renderSessionTurnMarkdown(userText: string | null | undefined, a
   if (user) parts.push('**User**', renderFeishuQuote(user));
   if (assistant) parts.push('**Assistant**', assistant);
   return parts.join('\n\n');
+}
+
+export function buildHumanLoopPromptMarkdown(prompt: HumanLoopPromptState): string {
+  const question = currentHumanLoopQuestion(prompt);
+  const lines: string[] = [`**${prompt.title}**`];
+  if (prompt.detail) lines.push(`\`${prompt.detail}\``);
+  lines.push(`*${humanLoopAnsweredCount(prompt)}/${prompt.questions.length} answered*`);
+  if (!question) return lines.join('\n\n');
+
+  if (question.header.trim()) lines.push(`**${question.header}**`);
+  lines.push(question.prompt);
+
+  const options = question.options || [];
+  if (options.length) {
+    lines.push(options.map((option, index) => {
+      const detail = option.description ? `\n   ${option.description}` : '';
+      return `${index + 1}. ${option.label}${detail}`;
+    }).join('\n'));
+  }
+
+  if (isHumanLoopAwaitingText(prompt)) {
+    lines.push(`*${question.secret ? 'Reply in chat with the secret value.' : 'Reply in chat with text to answer.'}*`);
+  }
+
+  if (prompt.hint) lines.push(`*${prompt.hint}*`);
+
+  if (prompt.questions.length > 1) {
+    lines.push(prompt.questions.map((item, index) => {
+      const summary = summarizeHumanLoopAnswer(prompt, item);
+      const answered = isHumanLoopQuestionAnswered(prompt, index);
+      return `${answered ? '●' : '○'} ${item.header || item.prompt}: ${summary.display}`;
+    }).join('\n'));
+  }
+
+  return lines.join('\n\n');
 }
 
 // ---------------------------------------------------------------------------

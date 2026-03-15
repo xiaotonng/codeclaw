@@ -50,6 +50,13 @@ function geminiCmd(o: StreamOpts): string[] {
   return args;
 }
 
+function geminiContextWindowFromModel(model: unknown): number | null {
+  const id = typeof model === 'string' ? model.trim().toLowerCase() : '';
+  if (!id) return null;
+  if (/^(auto-gemini-(2\.5|3)|gemini-(2\.5|3|3\.1)-)/.test(id)) return 1_048_576;
+  return null;
+}
+
 function geminiParse(ev: any, s: any) {
   const t = ev.type || '';
 
@@ -57,6 +64,7 @@ function geminiParse(ev: any, s: any) {
   if (t === 'init') {
     s.sessionId = ev.session_id ?? s.sessionId;
     s.model = ev.model ?? s.model;
+    s.contextWindow = geminiContextWindowFromModel(s.model) ?? s.contextWindow;
   }
 
   // message delta: {"type":"message","role":"assistant","content":"...","delta":true}
@@ -91,6 +99,7 @@ function geminiParse(ev: any, s: any) {
       s.outputTokens = u.output_tokens ?? u.output ?? s.outputTokens;
       s.cachedInputTokens = u.cached ?? s.cachedInputTokens;
     }
+    s.contextWindow = geminiContextWindowFromModel(s.model) ?? s.contextWindow;
   }
 }
 

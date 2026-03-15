@@ -20,7 +20,14 @@ import {
   requestProcessRestart,
 } from './process-control.js';
 import { runSetupWizard } from './setup-wizard.js';
-import { applyUserConfig, loadUserConfig, startUserConfigSync, updateUserConfig, type ChannelName, type UserConfig } from './user-config.js';
+import {
+  applyUserConfig,
+  loadUserConfig,
+  startUserConfigSync,
+  updateUserConfig,
+  type ChannelName,
+  type UserConfig,
+} from './user-config.js';
 import { VERSION } from './version.js';
 
 /* ── Daemon (watchdog) mode ─────────────────────────────────────────── */

@@ -92,48 +92,48 @@ npx pikiclaw@latest --doctor
 
 ---
 
-## What Exists Today
+## Current Capabilities
 
-### Channels
+### Channels And Agents
 
-- Telegram 已可用
-- 飞书已可用
-- 两个渠道可以同时启动
-
-### Agents
-
-- Claude Code
-- Codex CLI
-- Gemini CLI
-
-Agent 通过 driver registry 接入，模型列表、会话列表、usage 展示都走统一接口。
+- Telegram、飞书都可用，也可以同时启动
+- Claude Code、Codex CLI、Gemini CLI 都已接入
+- agent 通过统一 driver registry 管理，模型列表、session 列表、usage 展示走同一套接口
 
 ### Runtime
 
 - 流式预览和持续消息更新
 - 会话切换、恢复和多轮续聊
 - 工作目录浏览与切换
-- 长任务防休眠
-- watchdog 守护和自动重启
-- 长文本自动拆分，文件和图片自动回传
+- 文件附件自动进入 session workspace
+- 长任务防休眠、watchdog 守护和自动重启
+- 长文本自动拆分，图片和文件可直接回传到 IM
+- Dashboard 可查看运行状态、sessions、usage、主机状态和 macOS 权限状态
 
 ### Skills
 
-- 支持项目级 `.pikiclaw/skills/*/SKILL.md`
+- 项目级 skills 以 `.pikiclaw/skills/*/SKILL.md` 为 canonical 入口
 - 兼容 `.claude/commands/*.md`
+- 兼容 legacy `.claude/skills` / `.agents/skills`，并可合并回 `.pikiclaw/skills`
 - IM 内可通过 `/skills` 和 `/sk_<name>` 触发
 
-### MCP Session Bridge
+### Codex Human Loop
 
-每次 Agent stream 会启动一个会话级 MCP server，把 IM 能力暴露给 Agent。
+当 Codex 在运行过程中请求额外用户输入时，pikiclaw 会把问题转成 Telegram / 飞书里的交互提示，用户回复后再继续当前任务。
 
-当前已接入的工具：
+### MCP And GUI Automation
+
+每次 Agent stream 都会启动一个会话级 MCP bridge，把本地工具按本次任务注入给 Agent。
+
+当前内置工具：
 
 - `im_list_files`：列出 session workspace 文件
 - `im_send_file`：把文件实时发回 IM
-- `take_screenshot`：跨平台截图并返回路径
 
-当前 `guiTools` 模块已经预留，但点击、输入、窗口控制等顶级 GUI 工具还没接上。
+可选 GUI 能力：
+
+- 浏览器自动化：通过 `@playwright/mcp` 补充接入，默认支持 Chrome extension mode，也可切到 headless / isolated 模式
+- macOS 桌面自动化：通过 Appium Mac2 提供 `desktop_open_app`、`desktop_snapshot`、`desktop_click`、`desktop_type`、`desktop_screenshot` 等工具
 
 ---
 
@@ -156,42 +156,37 @@ Agent 通过 driver registry 接入，模型列表、会话列表、usage 展示
 
 ---
 
-## Skills And MCP
+## Config And Setup Notes
 
-项目里现在有两条能力扩展线：
+- 持久化配置在 `~/.pikiclaw/setting.json`
+- Dashboard 是主配置入口，环境变量仍然可用
+- 浏览器 GUI 相关常用变量：
+  - `PIKICLAW_BROWSER_GUI`
+  - `PIKICLAW_BROWSER_USE_EXTENSION`
+  - `PIKICLAW_BROWSER_HEADLESS`
+  - `PIKICLAW_BROWSER_ISOLATED`
+  - `PLAYWRIGHT_MCP_EXTENSION_TOKEN`
+- 桌面 GUI 相关常用变量：
+  - `PIKICLAW_DESKTOP_GUI`
+  - `PIKICLAW_DESKTOP_APPIUM_URL`
 
-- Skills：偏“高层工作流提示词”，来源于 `.pikiclaw/skills` 和 `.claude/commands`
-- MCP tools：偏“可执行工具能力”，目前是会话级 bridge，由 pikiclaw 在每次 stream 时注入
+如果要启用 macOS 桌面自动化，需要先准备 Appium Mac2：
 
-这两条线已经能工作，但都还是偏“session / project 内部接入”，还不是仓库级统一入口。
+```bash
+npm install -g appium
+appium driver install mac2
+appium
+```
+
+然后给运行 `pikiclaw` 的终端应用授予 macOS 的辅助功能权限。
 
 ---
 
-## Status
+## Roadmap
 
-### 已完成
-
-| 项目 | 状态 |
-|---|---|
-| Telegram 渠道 | ✅ |
-| 飞书渠道 | ✅ |
-| Claude Code driver | ✅ |
-| Codex CLI driver | ✅ |
-| Gemini CLI driver | ✅ |
-| Web Dashboard | ✅ |
-| 项目级 Skills | ✅ |
-| 会话级 MCP bridge | ✅ |
-| 文件回传 / 截图回传 | ✅ |
-| 守护重启 / 防休眠 | ✅ |
-
-### 待办
-
-| 项目 | 说明 |
-|---|---|
-| 顶级 Skills 接入 | 把 skills 从当前项目级入口提升为更统一的顶级接入能力 |
-| 顶级 MCP 工具接入 | 把当前会话级 MCP bridge 扩展成更完整的顶级工具接入层 |
-| GUI 自动化工具补全 | 在 `src/tools/gui.ts` 上接入点击、输入、聚焦、窗口控制等工具 |
-| 更多渠道 | WhatsApp 仍在规划中 |
+- 把当前会话级 MCP bridge 继续扩展成更完整的顶级工具接入层
+- 继续完善 GUI 自动化能力，尤其是浏览器与桌面工具的协同链路
+- 增加更多 IM 渠道，WhatsApp 仍在规划中
 
 ---
 
@@ -215,6 +210,9 @@ npm run test:e2e
 npx vitest run test/channel-feishu.unit.test.ts
 npx pikiclaw@latest --doctor
 ```
+
+`npm run dev` 只跑本地源码链路，会固定使用 `--no-daemon`，避免跳转到生产/自举用的 `npx pikiclaw@latest`。
+同时会把本次启动的全部日志写到 `~/.pikiclaw/dev/dev.log`，并在每次启动时先清空旧日志。
 
 更多实现细节见：
 

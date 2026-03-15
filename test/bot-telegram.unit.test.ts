@@ -78,7 +78,7 @@ describe('TelegramBot.sendFinalReply', () => {
     expect(failed.finalEdit.text).toContain('Incomplete Response');
     expect(failed.finalEdit.text).toContain('Claude hit usage limit');
     expect(failed.finalEdit.text).toContain('✗ claude · 17s');
-    expect(failed.finalEdit.opts?.keyboard).toBeUndefined();
+    expect(failed.finalEdit.opts?.keyboard).toEqual({ inline_keyboard: [] });
 
     const truncated = await renderFinalReply('claude', {
       message: 'Answer stopped mid-way',
@@ -661,4 +661,3 @@ describe('TelegramBot.handleMessage streaming', () => {
     }
   });
 });
-

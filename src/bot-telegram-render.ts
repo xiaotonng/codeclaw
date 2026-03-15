@@ -1,5 +1,6 @@
 import type { Agent, StreamPreviewMeta, StreamPreviewPlan, StreamResult } from './bot.js';
 import type { SkillsListData } from './bot-commands.js';
+import type { HumanLoopPromptState } from './human-loop.js';
 import type {
   CommandActionButton,
   CommandItemState,
@@ -10,6 +11,13 @@ import type {
 import { encodeCommandAction } from './bot-command-ui.js';
 import { fmtUptime, formatThinkingForDisplay, thinkLabel } from './bot.js';
 import { formatActivityCommandSummary, parseActivitySummary, renderPlanForPreview, summarizeActivityForPreview } from './bot-streaming.js';
+import {
+  currentHumanLoopQuestion,
+  humanLoopAnsweredCount,
+  isHumanLoopAwaitingText,
+  isHumanLoopQuestionAnswered,
+  summarizeHumanLoopAnswer,
+} from './human-loop.js';
 
 export type FooterStatus = 'running' | 'done' | 'failed';
 
@@ -138,6 +146,46 @@ export function renderCommandSelectionKeyboard(view: CommandSelectionView): { in
       callback_data: encodeCommandAction(button.action),
     }))),
   };
+}
+
+export function buildHumanLoopPromptHtml(prompt: HumanLoopPromptState): string {
+  const question = currentHumanLoopQuestion(prompt);
+  const lines: string[] = [`<b>${escapeHtml(prompt.title)}</b>`];
+  if (prompt.detail) lines.push(compactCode(prompt.detail, 40));
+  lines.push(`<i>${humanLoopAnsweredCount(prompt)}/${prompt.questions.length} answered</i>`);
+  if (!question) return lines.join('\n');
+
+  lines.push('');
+  if (question.header.trim()) lines.push(`<b>${escapeHtml(question.header)}</b>`);
+  lines.push(escapeHtml(question.prompt));
+
+  const options = question.options || [];
+  if (options.length) {
+    lines.push('');
+    for (let i = 0; i < options.length; i++) {
+      const option = options[i];
+      lines.push(`${i + 1}. ${escapeHtml(option.label)}`);
+      if (option.description) lines.push(`<i>${escapeHtml(option.description)}</i>`);
+    }
+  }
+
+  if (isHumanLoopAwaitingText(prompt)) {
+    lines.push('', `<i>${question.secret ? 'Reply with the secret value in chat.' : 'Reply with text in chat to answer.'}</i>`);
+  }
+
+  if (prompt.hint) lines.push('', `<i>${escapeHtml(prompt.hint)}</i>`);
+
+  if (prompt.questions.length > 1) {
+    lines.push('');
+    for (let i = 0; i < prompt.questions.length; i++) {
+      const item = prompt.questions[i];
+      const summary = summarizeHumanLoopAnswer(prompt, item);
+      const answered = isHumanLoopQuestionAnswered(prompt, i);
+      lines.push(`${answered ? '●' : '○'} ${escapeHtml(item.header || item.prompt)}: ${escapeHtml(summary.display)}`);
+    }
+  }
+
+  return lines.join('\n');
 }
 
 function mdInline(line: string): string {

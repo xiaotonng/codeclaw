@@ -16,6 +16,10 @@
  *   6. Wait for child #2 to start polling
  *   7. Assert PID2 is alive
  *   8. Clean up the daemon via SIGTERM
+ *
+ * This is the one startup/daemon E2E that intentionally exercises process
+ * replacement. Keep it on the local source chain only; never aim it at the
+ * long-lived production/self-bootstrap `npx pikiclaw@latest` runtime.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
