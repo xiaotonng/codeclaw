@@ -2,7 +2,7 @@
 
 # pikiclaw
 
-**Put the world's smartest AI agents in your pocket. Command local Claude & Gemini via best IM.**
+**Put the world's smartest AI agents in your pocket. Command local Claude, Codex & Gemini via best IM.**
 
 *让最好用的 IM 变成你电脑上的顶级 Agent 控制台*
 
