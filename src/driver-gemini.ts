@@ -17,6 +17,7 @@ import {
   run, agentLog, detectAgentBin, buildStreamPreviewMeta,
   pushRecentActivity, firstNonEmptyLine, shortValue, normalizeErrorMessage,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
+  mergeManagedAndNativeSessions,
   roundPercent, emptyUsage, Q,
 } from './code-agent.js';
 
@@ -372,21 +373,7 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     runUpdatedAt: record.runUpdatedAt,
   }));
   const nativeSessions = getNativeGeminiSessions(resolvedWorkdir);
-
-  // Merge: pikiclaw records take precedence
-  // Filter out pending sessions — they haven't been confirmed by the agent yet
-  const seen = new Set<string>();
-  const merged: SessionInfo[] = [];
-  for (const s of pikiclawSessions) {
-    if (isPendingSessionId(s.sessionId)) continue;
-    if (s.sessionId) seen.add(s.sessionId);
-    merged.push(s);
-  }
-  for (const s of nativeSessions) {
-    if (s.sessionId && !seen.has(s.sessionId)) merged.push(s);
-  }
-
-  merged.sort((a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || ''));
+  const merged = mergeManagedAndNativeSessions(pikiclawSessions, nativeSessions);
   const sessions = typeof limit === 'number' ? merged.slice(0, limit) : merged;
   const projectName = geminiProjectName(resolvedWorkdir);
   const chatsDir = projectName ? geminiChatsDir(resolvedWorkdir) || '' : '';

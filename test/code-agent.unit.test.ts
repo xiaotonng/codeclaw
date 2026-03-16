@@ -16,6 +16,8 @@ import {
   labelFromWindowMinutes,
   listPikiclawSessions,
   listModels,
+  mergeManagedAndNativeSessions,
+  promoteSessionId,
   shutdownCodexServer,
   stageSessionFiles,
   type StreamOpts,
@@ -67,6 +69,51 @@ describe('buildCodexTurnInput and usage helpers', () => {
 
     expect(labelFromWindowMinutes(301, 'Primary')).toBe('5h');
     expect(labelFromWindowMinutes(10081, 'Secondary')).toBe('7d');
+  });
+
+  it('prefers native session metadata while keeping pikiclaw workspace and run state', () => {
+    const merged = mergeManagedAndNativeSessions([
+      {
+        sessionId: 'sess-1',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: '/tmp/pikiclaw/workspace',
+        model: 'local-model',
+        createdAt: '2026-03-16T00:00:00.000Z',
+        title: 'local title',
+        running: false,
+        runState: 'incomplete',
+        runDetail: 'local detail',
+        runUpdatedAt: '2026-03-16T00:02:00.000Z',
+      },
+    ], [
+      {
+        sessionId: 'sess-1',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: null,
+        model: 'native-model',
+        createdAt: '2026-03-16T00:01:00.000Z',
+        title: 'native title',
+        running: true,
+        runState: 'completed',
+        runDetail: null,
+        runUpdatedAt: '2026-03-16T00:01:30.000Z',
+      },
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      sessionId: 'sess-1',
+      title: 'native title',
+      model: 'native-model',
+      createdAt: '2026-03-16T00:01:00.000Z',
+      workspacePath: '/tmp/pikiclaw/workspace',
+      running: true,
+      runState: 'incomplete',
+      runDetail: 'local detail',
+      runUpdatedAt: '2026-03-16T00:02:00.000Z',
+    });
   });
 });
 
@@ -135,6 +182,33 @@ describe('stageSessionFiles', () => {
 
     const record = listPikiclawSessions(tmpDir, 'claude').find(entry => entry.sessionId === staged.sessionId);
     expect(record?.title).toBe('第一行问题前缀');
+  });
+
+  it('promotes pending sessions without leaving stale pending records or breaking old workspace paths', () => {
+    const workdir = makeTmpDir('pikiclaw-promote-');
+    const uploadDir = makeTmpDir('pikiclaw-image-');
+    const uploadPath = path.join(uploadDir, 'shot.jpg');
+    fs.writeFileSync(uploadPath, 'image-bytes');
+
+    const staged = stageSessionFiles({
+      agent: 'codex',
+      workdir,
+      files: [uploadPath],
+      title: 'inspect image',
+    });
+
+    const oldFilePath = path.join(staged.workspacePath, 'shot.jpg');
+    expect(fs.existsSync(oldFilePath)).toBe(true);
+
+    promoteSessionId(workdir, 'codex', staged.sessionId, 'thread-native');
+
+    const nativeWorkspace = path.join(workdir, '.pikiclaw', 'sessions', 'codex', 'thread-native', 'workspace');
+    expect(fs.existsSync(path.join(nativeWorkspace, 'shot.jpg'))).toBe(true);
+    expect(fs.existsSync(oldFilePath)).toBe(true);
+
+    const records = listPikiclawSessions(workdir, 'codex');
+    expect(records.map(entry => entry.sessionId)).toContain('thread-native');
+    expect(records.map(entry => entry.sessionId)).not.toContain(staged.sessionId);
   });
 });
 

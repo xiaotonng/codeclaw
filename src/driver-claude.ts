@@ -18,6 +18,7 @@ import {
   summarizeClaudeToolUse, summarizeClaudeToolResult,
   IMAGE_EXTS, mimeForExt,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
+  mergeManagedAndNativeSessions,
   readTailLines, stripInjectedPrompts,
   roundPercent, toIsoFromEpochSeconds, modelFamily, normalizeClaudeModelId, emptyUsage, normalizeUsageStatus,
 } from './code-agent.js';
@@ -275,22 +276,7 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
     runUpdatedAt: record.runUpdatedAt,
   }));
   const nativeSessions = getNativeClaudeSessions(resolvedWorkdir);
-
-  // Merge: pikiclaw records take precedence (they have workspacePath etc.)
-  // Filter out pending sessions — they haven't been confirmed by the agent yet
-  const seen = new Set<string>();
-  const merged: SessionInfo[] = [];
-  for (const s of pikiclawSessions) {
-    if (isPendingSessionId(s.sessionId)) continue;
-    if (s.sessionId) seen.add(s.sessionId);
-    merged.push(s);
-  }
-  for (const s of nativeSessions) {
-    if (s.sessionId && !seen.has(s.sessionId)) merged.push(s);
-  }
-
-  // Sort by createdAt descending
-  merged.sort((a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || ''));
+  const merged = mergeManagedAndNativeSessions(pikiclawSessions, nativeSessions);
   const sessions = typeof limit === 'number' ? merged.slice(0, limit) : merged;
   const projectDir = path.join(process.env.HOME || '', '.claude', 'projects', claudeProjectDirName(resolvedWorkdir));
   agentLog(

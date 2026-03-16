@@ -20,6 +20,7 @@ import {
   firstNonEmptyLine, shortValue, numberOrNull,
   IMAGE_EXTS,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
+  mergeManagedAndNativeSessions,
   stripInjectedPrompts, computeContext, readTailLines,
   roundPercent, toIsoFromEpochSeconds, labelFromWindowMinutes,
   usageWindowFromRateLimit, parseJsonTail, emptyUsage,
@@ -919,21 +920,7 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
     runUpdatedAt: record.runUpdatedAt,
   }));
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);
-
-  // Merge: pikiclaw records take precedence
-  // Filter out pending sessions — they haven't been confirmed by the agent yet
-  const seen = new Set<string>();
-  const merged: SessionInfo[] = [];
-  for (const s of pikiclawSessions) {
-    if (isPendingSessionId(s.sessionId)) continue;
-    if (s.sessionId) seen.add(s.sessionId);
-    merged.push(s);
-  }
-  for (const s of nativeSessions) {
-    if (s.sessionId && !seen.has(s.sessionId)) merged.push(s);
-  }
-
-  merged.sort((a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || ''));
+  const merged = mergeManagedAndNativeSessions(pikiclawSessions, nativeSessions);
   const sessions = typeof limit === 'number' ? merged.slice(0, limit) : merged;
   const sessionsDir = path.join(process.env.HOME || '', '.codex', 'sessions');
   agentLog(

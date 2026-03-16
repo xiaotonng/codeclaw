@@ -703,8 +703,13 @@ function loadSessionIndex(workdir: string): SessionIndexData {
     version: 1,
     sessions: sessions
       .map((entry: any) => normalizeSessionRecord(entry, workdir))
-      .filter((entry: LocalSessionRecord | null): entry is LocalSessionRecord => !!entry),
+      .filter((entry: LocalSessionRecord | null): entry is LocalSessionRecord => !!entry)
+      .filter((entry: LocalSessionRecord) => !isPendingSessionId(entry.sessionId) || fs.existsSync(sessionRootFromWorkspacePath(entry.workspacePath))),
   };
+}
+
+function writeSessionIndex(workdir: string, sessions: LocalSessionRecord[]) {
+  writeJsonFile(sessionIndexPath(workdir), { version: 1, sessions });
 }
 
 function writeSessionMeta(record: LocalSessionRecord) {
@@ -722,6 +727,15 @@ function copyPath(sourcePath: string, targetPath: string) {
   if (stat.isDirectory()) { fs.cpSync(sourcePath, targetPath, { recursive: true, force: true }); return; }
   ensureDir(path.dirname(targetPath));
   fs.copyFileSync(sourcePath, targetPath);
+}
+
+function createSessionDirAlias(aliasPath: string, targetPath: string) {
+  if (fs.existsSync(aliasPath) || !fs.existsSync(targetPath)) return;
+  try {
+    ensureDir(path.dirname(aliasPath));
+    const relativeTarget = path.relative(path.dirname(aliasPath), targetPath) || '.';
+    fs.symlinkSync(relativeTarget, aliasPath, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch {}
 }
 
 function migrateSessionLayout(workdir: string, record: LocalSessionRecord): LocalSessionRecord {
@@ -756,7 +770,7 @@ function saveSessionRecord(workdir: string, record: LocalSessionRecord): LocalSe
   if (pos >= 0) index.sessions[pos] = record;
   else index.sessions.unshift(record);
   index.sessions.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-  writeJsonFile(sessionIndexPath(workdir), { version: 1, sessions: index.sessions });
+  writeSessionIndex(workdir, index.sessions);
   writeSessionMeta(record);
   return record;
 }
@@ -778,8 +792,13 @@ export function promoteSessionId(workdir: string, agent: Agent, pendingId: strin
   // Move workspace directory if it exists
   if (fs.existsSync(oldDir) && !fs.existsSync(newDir)) {
     try { fs.renameSync(oldDir, newDir); } catch { /* cross-device: copy+delete */ try { fs.cpSync(oldDir, newDir, { recursive: true }); fs.rmSync(oldDir, { recursive: true, force: true }); } catch {} }
+    createSessionDirAlias(oldDir, newDir);
   }
 
+  writeSessionIndex(
+    resolvedWorkdir,
+    index.sessions.filter(entry => entry.agent !== agent || (entry.sessionId !== pendingId && entry.sessionId !== nativeId)),
+  );
   record.sessionId = nativeId;
   record.workspacePath = sessionWorkspacePath(resolvedWorkdir, agent, nativeId);
   saveSessionRecord(resolvedWorkdir, record);
@@ -1175,6 +1194,48 @@ export interface SessionListOpts {
   agent: Agent;
   workdir: string;
   limit?: number;
+}
+
+export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], nativeSessions: SessionInfo[]): SessionInfo[] {
+  const managedById = new Map<string, SessionInfo>();
+  const merged: SessionInfo[] = [];
+  const seen = new Set<string>();
+
+  for (const session of managedSessions) {
+    if (!session.sessionId || isPendingSessionId(session.sessionId)) continue;
+    managedById.set(session.sessionId, session);
+  }
+
+  for (const native of nativeSessions) {
+    const sessionId = native.sessionId;
+    if (sessionId) seen.add(sessionId);
+    const managed = sessionId ? managedById.get(sessionId) : null;
+    if (!managed) {
+      merged.push(native);
+      continue;
+    }
+    merged.push({
+      ...managed,
+      ...native,
+      workdir: native.workdir || managed.workdir,
+      workspacePath: managed.workspacePath || native.workspacePath,
+      running: managed.running || native.running,
+      runState: managed.runState,
+      runDetail: managed.runDetail ?? native.runDetail,
+      runUpdatedAt: managed.runUpdatedAt ?? native.runUpdatedAt,
+      title: native.title || managed.title,
+      model: native.model || managed.model,
+      createdAt: native.createdAt || managed.createdAt,
+    });
+  }
+
+  for (const managed of managedSessions) {
+    if (!managed.sessionId || isPendingSessionId(managed.sessionId) || seen.has(managed.sessionId)) continue;
+    merged.push(managed);
+  }
+
+  merged.sort((a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || ''));
+  return merged;
 }
 
 export function getSessions(opts: SessionListOpts): Promise<SessionListResult> {
