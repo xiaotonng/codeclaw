@@ -153,3 +153,70 @@ describe('Gemini session tail', () => {
     ]);
   });
 });
+
+describe('Gemini session listing', () => {
+  const originalHome = process.env.HOME;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-16T00:02:00Z'));
+    execSyncMock.mockReset();
+    process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-gemini-sessions-'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (originalHome == null) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+  });
+
+  it('reads session titles directly from native Gemini session files', async () => {
+    const workdir = '/tmp/pikiclaw';
+    const geminiDir = path.join(process.env.HOME!, '.gemini');
+    fs.mkdirSync(geminiDir, { recursive: true });
+    fs.writeFileSync(path.join(geminiDir, 'projects.json'), JSON.stringify({
+      projects: { [workdir]: 'pikiclaw' },
+    }));
+
+    const chatsDir = path.join(geminiDir, 'tmp', 'pikiclaw', 'chats');
+    fs.mkdirSync(chatsDir, { recursive: true });
+    fs.writeFileSync(path.join(chatsDir, 'session-2026-03-16T00-00-abc.json'), JSON.stringify({
+      sessionId: 'gemini-session-1',
+      startTime: '2026-03-16T00:00:00.000Z',
+      lastUpdated: '2026-03-16T00:01:00.000Z',
+      messages: [
+        { id: '1', timestamp: '2026-03-16T00:00:00.000Z', type: 'user', content: [{ text: 'How do I add dark mode to my React app with CSS variables?' }] },
+      ],
+      kind: 'chat',
+    }, null, 2));
+
+    const { getSessions } = await import('../src/code-agent.ts');
+    const result = await getSessions({ agent: 'gemini', workdir, limit: 5 });
+
+    expect(result.ok).toBe(true);
+    expect(result.sessions).toHaveLength(1);
+    expect(result.sessions[0]).toMatchObject({
+      sessionId: 'gemini-session-1',
+      title: 'How do I add dark mode to my React app with CSS variables?',
+      createdAt: '2026-03-16T00:00:00.000Z',
+    });
+    expect(execSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('returns an empty native session list when the Gemini chats directory is missing', async () => {
+    const workdir = '/tmp/pikiclaw';
+    const geminiDir = path.join(process.env.HOME!, '.gemini');
+    fs.mkdirSync(geminiDir, { recursive: true });
+    fs.writeFileSync(path.join(geminiDir, 'projects.json'), JSON.stringify({
+      projects: { [workdir]: 'pikiclaw' },
+    }));
+
+    const { getSessions } = await import('../src/code-agent.ts');
+    const result = await getSessions({ agent: 'gemini', workdir, limit: 5 });
+
+    expect(result.ok).toBe(true);
+    expect(result.sessions).toHaveLength(0);
+    expect(execSyncMock).not.toHaveBeenCalled();
+  });
+});

@@ -223,15 +223,15 @@ function AgentInventory({
           <button
             key={item.agent}
             type="button"
-            disabled={item.loading || !agent?.installed}
-            onClick={() => agent?.installed && onSelect(item.agent)}
+            disabled={item.loading}
+            onClick={() => onSelect(item.agent)}
             className={cn(
               'w-full rounded-lg border p-4 text-left transition-[border-color,background,box-shadow,transform] duration-200',
               'focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
               selected
                 ? 'border-edge-h bg-panel-h shadow-[0_12px_28px_rgba(2,6,23,0.12)]'
                 : 'border-edge bg-panel-alt hover:border-edge-h hover:bg-panel',
-              !item.loading && !agent?.installed && 'cursor-not-allowed opacity-65'
+              !item.loading && !agent?.installed && 'border-dashed'
             )}
           >
             <div className="flex items-start gap-3">
@@ -560,7 +560,7 @@ function applyAgentSnapshot(
 ) {
   setAgents(snapshot.agents);
   setSelectedAgent(prev => {
-    if (preserveSelection && prev && snapshot.agents.some(agent => agent.agent === prev && agent.installed)) return prev;
+    if (preserveSelection && prev && snapshot.agents.some(agent => agent.agent === prev)) return prev;
     return snapshot.defaultAgent;
   });
 }
@@ -578,6 +578,7 @@ export function ConfigTab({
   const [selectedAgent, setSelectedAgent] = useState('');
   const [loadingAgents, setLoadingAgents] = useState(true);
   const [updatingDefault, setUpdatingDefault] = useState(false);
+  const [installingAgent, setInstallingAgent] = useState<string | null>(null);
   const hasAgents = useRef(false);
 
   const loadAgentStatus = useCallback(async (preserveSelection = true) => {
@@ -647,6 +648,22 @@ export function ConfigTab({
     }
   }, [activeAgent, updateRuntime, updatingDefault]);
 
+  const handleInstallAgent = useCallback(async () => {
+    if (!activeAgent || activeAgent.installed || installingAgent) return;
+    setInstallingAgent(activeAgent.agent);
+    try {
+      const snapshot = await api.installAgent(activeAgent.agent);
+      if (!snapshot.ok) throw new Error(snapshot.error || t('config.agentInstallFailed'));
+      applyAgentSnapshot(snapshot, setAgents, setSelectedAgent, true);
+      toast(t('config.agentInstalled'));
+    } catch (error) {
+      toast(error instanceof Error ? error.message : t('config.agentInstallFailed'), false);
+      void loadAgentStatus(true);
+    } finally {
+      setInstallingAgent(current => (current === activeAgent.agent ? null : current));
+    }
+  }, [activeAgent, installingAgent, loadAgentStatus, t, toast]);
+
   const handleModelChange = (next: string) => {
     if (!activeAgent || !next || next === activeAgent.selectedModel) return;
     setAgents(prev => prev.map(agent => agent.agent === activeAgent.agent ? { ...agent, selectedModel: next } : agent));
@@ -700,15 +717,28 @@ export function ConfigTab({
                       {activeAgent?.version || t('config.notInstalled')}
                     </div>
                   </div>
-                  {!loadingAgents && activeAgent && activeAgent.installed && !activeAgent.isDefault && (
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      disabled={updatingDefault}
-                      onClick={handleDefaultAgentChange}
-                    >
-                      {t(updatingDefault ? 'config.settingDefault' : 'config.setDefaultAction')}
-                    </Button>
+                  {!loadingAgents && activeAgent && (
+                    activeAgent.installed ? (
+                      !activeAgent.isDefault && (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          disabled={updatingDefault}
+                          onClick={handleDefaultAgentChange}
+                        >
+                          {t(updatingDefault ? 'config.settingDefault' : 'config.setDefaultAction')}
+                        </Button>
+                      )
+                    ) : (
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={installingAgent != null}
+                        onClick={handleInstallAgent}
+                      >
+                        {t(installingAgent === activeAgent.agent ? 'config.installingAgent' : 'config.installAction')}
+                      </Button>
+                    )
                   )}
                 </div>
               </div>
@@ -759,8 +789,9 @@ export function ConfigTab({
             </div>
 
             {!activeAgent?.installed && activeAgent?.installCommand && (
-              <div className="rounded-lg border border-dashed border-edge bg-panel-alt px-3 py-2 font-mono text-[11px] text-fg-5">
-                {activeAgent.installCommand}
+              <div className="rounded-lg border border-dashed border-edge bg-panel-alt px-3 py-3">
+                <div className="text-sm leading-relaxed text-fg-4">{t('config.installHint')}</div>
+                <div className="mt-2 font-mono text-[11px] text-fg-5">{activeAgent.installCommand}</div>
               </div>
             )}
           </Card>

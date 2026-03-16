@@ -286,6 +286,12 @@ function extractGeminiText(content: any): string {
   return parts.join('\n').trim();
 }
 
+function normalizeGeminiSessionTitle(value: unknown): string | null {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  return text.length <= 120 ? text : `${text.slice(0, 117).trimEnd()}...`;
+}
+
 function findGeminiSessionFile(workdir: string, sessionId: string): string | null {
   const chatsDir = geminiChatsDir(workdir);
   if (!chatsDir || !fs.existsSync(chatsDir)) return null;
@@ -304,7 +310,7 @@ function findGeminiSessionFile(workdir: string, sessionId: string): string | nul
 }
 
 /** Read native Gemini CLI sessions from ~/.gemini/tmp/{projectName}/chats/ */
-function getNativeGeminiSessions(workdir: string): SessionInfo[] {
+function getNativeGeminiSessionsFromFiles(workdir: string): SessionInfo[] {
   const chatsDir = geminiChatsDir(workdir);
   if (!chatsDir || !fs.existsSync(chatsDir)) return [];
 
@@ -323,8 +329,7 @@ function getNativeGeminiSessions(workdir: string): SessionInfo[] {
       const messages = Array.isArray(data.messages) ? data.messages : [];
       for (const msg of messages) {
         if (msg.type === 'user') {
-          const text = extractGeminiText(msg.content).replace(/\s+/g, ' ').trim();
-          if (text) { title = text.length <= 120 ? text : `${text.slice(0, 117).trimEnd()}...`; }
+          title = normalizeGeminiSessionTitle(extractGeminiText(msg.content));
           break;
         }
       }
@@ -344,6 +349,10 @@ function getNativeGeminiSessions(workdir: string): SessionInfo[] {
     } catch { /* skip */ }
   }
   return sessions;
+}
+
+function getNativeGeminiSessions(workdir: string): SessionInfo[] {
+  return getNativeGeminiSessionsFromFiles(workdir);
 }
 
 function getGeminiSessions(workdir: string, limit?: number): SessionListResult {

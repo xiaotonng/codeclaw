@@ -77,6 +77,12 @@ export const api = {
       `/api/session-detail/${agent}/${encodeURIComponent(sessionId)}?limit=${limit}`,
       opts,
     ),
+  installAgent: (agent: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string } & AgentStatusResponse>(
+      '/api/agent-install',
+      { agent },
+      { timeoutMs: 600_000, ...opts },
+    ),
   updateRuntimeAgent: (patch: Record<string, unknown>) =>
     post<{ ok: boolean; error?: string } & AgentStatusResponse>('/api/runtime-agent', patch),
   saveConfig: (patch: Record<string, unknown>) => post<{ ok: boolean; configPath?: string }>('/api/config', patch),

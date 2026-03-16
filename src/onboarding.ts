@@ -1,4 +1,5 @@
 import type { AgentInfo } from './code-agent.js';
+import { getAgentInstallCommand, getAgentLabel } from './agent-npm.js';
 
 export type ChannelStatus = 'ready' | 'missing' | 'invalid' | 'error' | 'checking';
 export type SetupChannel = 'telegram' | 'feishu' | 'whatsapp';
@@ -25,16 +26,8 @@ export interface SetupState {
 }
 
 function enrichAgent(agent: AgentInfo): AgentSetupState {
-  const label = agent.agent === 'claude'
-    ? 'Claude Code'
-    : agent.agent === 'gemini'
-      ? 'Gemini CLI'
-      : 'Codex';
-  const installCommand = agent.agent === 'claude'
-    ? 'npm install -g @anthropic-ai/claude-code'
-    : agent.agent === 'gemini'
-      ? 'npm install -g @google/gemini-cli'
-      : 'npm install -g @openai/codex';
+  const label = getAgentLabel(agent.agent);
+  const installCommand = getAgentInstallCommand(agent.agent) || 'npm install -g <agent-package>';
 
   return {
     ...agent,

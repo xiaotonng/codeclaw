@@ -7,7 +7,7 @@ describe('dashboard api', () => {
     vi.unstubAllGlobals();
   });
 
-  it('times out hung Feishu validation requests and builds paginated session requests per agent', async () => {
+  it('times out hung Feishu validation requests and builds agent/session requests', async () => {
     // --- Feishu timeout scenario ---
     vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       const signal = init?.signal;
@@ -43,5 +43,14 @@ describe('dashboard api', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/codex?page=2&limit=6');
+
+    fetchMock.mockClear();
+    await api.installAgent('gemini');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/agent-install');
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.method).toBe('POST');
+    expect(init.body).toBe(JSON.stringify({ agent: 'gemini' }));
   });
 });

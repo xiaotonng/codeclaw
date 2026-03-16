@@ -58,8 +58,10 @@ Commands:
   codex-models    List available Codex models
   claude-sessions List recent Claude sessions for the workdir
   codex-sessions  List recent Codex sessions for the workdir
+  gemini-sessions List recent Gemini sessions for the workdir
   claude-tail     Show last N messages of a Claude session
   codex-tail      Show last N messages of a Codex session
+  gemini-tail     Show last N messages of a Gemini session
 
 Options:
   -p, --prompt <text>   Prompt text (or pass after command as positional args)
@@ -166,8 +168,12 @@ async function main() {
       }
       break;
     }
-    case 'claude-sessions': case 'codex-sessions': {
-      const agent: Agent = args.command === 'codex-sessions' ? 'codex' : 'claude';
+    case 'claude-sessions': case 'codex-sessions': case 'gemini-sessions': {
+      const agent: Agent = args.command === 'codex-sessions'
+        ? 'codex'
+        : args.command === 'gemini-sessions'
+          ? 'gemini'
+          : 'claude';
       const limit = 20;
       const result = await getSessions({ agent, workdir, limit });
       if (!result.ok) {
@@ -190,8 +196,12 @@ async function main() {
       }
       process.exit(0);
     }
-    case 'claude-tail': case 'codex-tail': {
-      const agent: Agent = args.command === 'codex-tail' ? 'codex' : 'claude';
+    case 'claude-tail': case 'codex-tail': case 'gemini-tail': {
+      const agent: Agent = args.command === 'codex-tail'
+        ? 'codex'
+        : args.command === 'gemini-tail'
+          ? 'gemini'
+          : 'claude';
       let sessionId: string | null = args.session;
 
       // Default: find the latest session

@@ -11,6 +11,7 @@ export interface UserConfig {
   /** Launch multiple channels simultaneously (comma-separated or array). */
   channels?: ChannelName[];
   defaultAgent?: Agent;
+  agentAutoUpdate?: boolean;
   claudeModel?: string;
   claudeReasoningEffort?: string;
   codexModel?: string;

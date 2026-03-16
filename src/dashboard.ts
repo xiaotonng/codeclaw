@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { exec, execFileSync, execSync, spawn, type ChildProcess } from 'node:child_process';
+import { getAgentInstallCommand, getAgentLabel, getAgentPackage } from './agent-npm.js';
 import { collectSetupState, isSetupReady, type SetupState } from './onboarding.js';
 import { loadUserConfig, saveUserConfig, applyUserConfig, resolveUserWorkdir, setUserWorkdir, hasUserConfigFile, type UserConfig } from './user-config.js';
 import { listAgents, getSessionTail, getSessions, listModels, normalizeClaudeModelId, type AgentDetectOptions, type SessionInfo, type SessionListResult, type UsageResult } from './code-agent.js';
@@ -58,6 +59,7 @@ const CHANNEL_STATUS_VALIDATION_TIMEOUT_MS = 3_000;
 const CHANNEL_STATUS_CACHE_TTL_MS = 20_000;
 const DEFAULT_SESSION_PAGE_SIZE = 6;
 const MAX_SESSION_PAGE_SIZE = 30;
+const AGENT_INSTALL_TIMEOUT_MS = 10 * 60_000;
 
 function buildLocalChannelStates(config: Partial<UserConfig>): NonNullable<SetupState['channels']> {
   const telegramConfigured = !!String(config.telegramBotToken || '').trim();
@@ -538,6 +540,61 @@ function dashboardLog(message: string) {
   process.stdout.write(`[dashboard ${ts}] ${message}\n`);
 }
 
+function runCommand(
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; timeoutMs?: number } = {},
+): Promise<{ ok: boolean; stdout: string; stderr: string; error: string | null }> {
+  return new Promise(resolve => {
+    let stdout = '';
+    let stderr = '';
+    let finished = false;
+    const child = spawn(cmd, args, {
+      cwd: opts.cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, npm_config_yes: 'true' },
+    });
+    const timeoutMs = Math.max(500, opts.timeoutMs ?? 30_000);
+    const timer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      child.kill('SIGTERM');
+      resolve({ ok: false, stdout, stderr, error: `Timed out after ${Math.round(timeoutMs / 1000)}s` });
+    }, timeoutMs);
+
+    child.stdout?.on('data', chunk => { stdout += String(chunk); });
+    child.stderr?.on('data', chunk => { stderr += String(chunk); });
+    child.on('error', err => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({ ok: false, stdout, stderr, error: err.message });
+    });
+    child.on('close', code => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({
+        ok: code === 0,
+        stdout,
+        stderr,
+        error: code === 0 ? null : (stderr.trim() || stdout.trim() || `Exited with code ${code}`),
+      });
+    });
+  });
+}
+
+async function installAgentViaNpm(agent: Agent, log: (msg: string) => void): Promise<void> {
+  const pkg = getAgentPackage(agent);
+  if (!pkg) throw new Error(`Unsupported agent: ${agent}`);
+  log(`Installing ${getAgentLabel(agent)} via npm...`);
+  const result = await runCommand('npm', ['install', '-g', `${pkg}@latest`], {
+    timeoutMs: AGENT_INSTALL_TIMEOUT_MS,
+  });
+  if (!result.ok) throw new Error(result.error || `Failed to install ${pkg}`);
+  log(`${getAgentLabel(agent)} installation complete.`);
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -716,8 +773,8 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
     return value || null;
   }
 
-  async function buildAgentStatusResponse(config = loadUserConfig()) {
-    const setupState = getSetupState(config, { includeVersion: true });
+  async function buildAgentStatusResponse(config = loadUserConfig(), agentOptions: AgentDetectOptions = {}) {
+    const setupState = getSetupState(config, { includeVersion: true, ...agentOptions });
     const workdir = getRuntimeWorkdir(config);
     const defaultAgent = getRuntimeDefaultAgent(config);
     const agents = await Promise.all(setupState.agents.map(async (agentState) => {
@@ -821,6 +878,21 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
 
       if (url.pathname === '/api/agent-status' && method === 'GET') {
         return json(res, await buildAgentStatusResponse());
+      }
+
+      if (url.pathname === '/api/agent-install' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        const agent = String(body?.agent || '').trim();
+        if (!isAgent(agent)) return json(res, { ok: false, error: 'Invalid agent' }, 400);
+        dashboardLog(`[agents] install requested agent=${agent} command="${getAgentInstallCommand(agent) || '(unknown)'}"`);
+        try {
+          await installAgentViaNpm(agent, msg => dashboardLog(`[agents] ${msg}`));
+          return json(res, { ok: true, ...(await buildAgentStatusResponse(loadUserConfig(), { refresh: true })) });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          dashboardLog(`[agents] install failed agent=${agent} error=${detail}`);
+          return json(res, { ok: false, error: detail }, 500);
+        }
       }
 
       // Host info

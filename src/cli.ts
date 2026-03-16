@@ -5,6 +5,7 @@
 
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { startAgentAutoUpdate } from './agent-auto-update.js';
 import { envBool } from './bot.js';
 import { TelegramBot } from './bot-telegram.js';
 import { hasConfiguredChannelToken, resolveConfiguredChannels } from './cli-channels.js';
@@ -435,6 +436,11 @@ Docs: https://github.com/xiaotonng/pikiclaw
   }
   if (args.allowedIds && channel === 'telegram') runtimeConfig.telegramAllowedChatIds = args.allowedIds;
   applyUserConfig(runtimeConfig, undefined, { overwrite: true, clearMissing: true });
+  startAgentAutoUpdate({
+    config: runtimeConfig,
+    agents: listAgents({ includeVersion: true, refresh: true }).agents,
+    log: processLog,
+  });
   if (args.model) {
     const ag = args.agent || runtimeConfig.defaultAgent || 'codex';
     if (ag === 'codex') process.env.CODEX_MODEL = args.model;
