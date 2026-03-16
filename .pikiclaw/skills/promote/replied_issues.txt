@@ -1,0 +1,5 @@
+https://github.com/inspirai-store/skill-market/issues/4
+https://github.com/JohannOosthuizen/Gemini-CLI-Telegram-Bot/issues/2
+https://github.com/anthropics/claude-code/issues/18189
+https://github.com/RichardAtCT/claude-code-telegram/issues/126
+https://github.com/jiroshimaya/fictional-scientists/issues/24
