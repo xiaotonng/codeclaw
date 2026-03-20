@@ -343,6 +343,7 @@ function SystemPermissions() {
   const { state, locale, reload, toast } = useStore();
   const t = createT(locale);
   const permissions = state?.permissions || {};
+  const hostApp = state?.hostApp;
   const [pendingPermission, setPendingPermission] = useState<PermissionKey | null>(null);
   const [guide, setGuide] = useState<PermissionGuideState | null>(null);
 
@@ -441,13 +442,19 @@ function SystemPermissions() {
           const value = permissions[key] as PermissionStatus | undefined;
           const granted = !!value?.granted;
           const permissionKey = key as PermissionKey;
+          const hostHint = !granted && !loading && hostApp
+            ? t('perm.hostAppHint').replace('{hostApp}', hostApp)
+            : !granted && !loading
+              ? t('perm.hostAppHintFallback')
+              : undefined;
+          const metaParts = [hostHint, !granted && !loading && item.manualHintKey ? t(item.manualHintKey) : undefined].filter(Boolean);
           return (
             <SettingRow
               key={key}
               icon={item.icon}
               title={t(item.labelKey)}
               description={t(item.reasonKey)}
-              meta={!granted && !loading && item.manualHintKey ? t(item.manualHintKey) : undefined}
+              meta={metaParts.length > 0 ? metaParts.join(' · ') : undefined}
               status={loading ? t('status.loading') : granted ? t('config.authorized') : t('config.pendingAuth')}
               statusVariant={loading ? 'muted' : granted ? 'ok' : 'warn'}
               loading={loading}
@@ -563,6 +570,42 @@ function applyAgentSnapshot(
     if (preserveSelection && prev && snapshot.agents.some(agent => agent.agent === prev)) return prev;
     return snapshot.defaultAgent;
   });
+}
+
+function PermissionAlert() {
+  const { state, locale } = useStore();
+  const t = createT(locale);
+  if (!state || state.platform !== 'darwin') return null;
+  const perms = state.permissions || {};
+  const missing = (['accessibility', 'screenRecording'] as const).filter(k => perms[k] && !perms[k].granted);
+  if (missing.length === 0) return null;
+  const labels = missing.map(k => t(k === 'accessibility' ? 'perm.accessibility' : 'perm.screenRecording'));
+  const hostApp = state.hostApp;
+  const scrollToPerms = () => {
+    document.getElementById('sys-perms-section')?.scrollIntoView({ behavior: 'smooth' });
+  };
+  return (
+    <button
+      type="button"
+      onClick={scrollToPerms}
+      className="flex w-full items-center gap-3 rounded-lg border border-[color:var(--th-warn-edge,theme(colors.amber.400/0.3))] bg-[color:var(--th-warn-bg,theme(colors.amber.50/0.06))] px-4 py-3 text-left transition-colors hover:bg-[color:var(--th-warn-bg-h,theme(colors.amber.50/0.1))]"
+    >
+      <MacSymbol>
+        <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+        <line x1="12" y1="9" x2="12" y2="13" />
+        <line x1="12" y1="17" x2="12.01" y2="17" />
+      </MacSymbol>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium text-fg-2">{labels.join('、')} {t('perm.alertMissing')}</div>
+        <div className="mt-0.5 text-xs text-fg-4">
+          {hostApp
+            ? t('perm.alertHostApp').replace('{hostApp}', hostApp)
+            : t('perm.alertHostAppFallback')}
+        </div>
+      </div>
+      <span className="shrink-0 text-xs font-medium text-primary">{t('perm.alertAction')}</span>
+    </button>
+  );
 }
 
 export function ConfigTab({
@@ -682,6 +725,7 @@ export function ConfigTab({
 
   return (
     <div className="animate-in space-y-8">
+      <PermissionAlert />
       <IMChannels onOpenTelegram={onOpenTelegram} onOpenFeishu={onOpenFeishu} />
 
       <section className="space-y-4">
@@ -798,7 +842,7 @@ export function ConfigTab({
         </div>
       </section>
 
-      <section className="space-y-4">
+      <section id="sys-perms-section" className="space-y-4">
         <SectionLabel>{t('config.sysPerms')}</SectionLabel>
         <SystemPermissions />
       </section>

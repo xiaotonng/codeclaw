@@ -8,6 +8,8 @@
 
 > npx pikiclaw@latest
 
+<img src="docs/promo-install.gif" alt="Quick install" width="700">
+
 <p align="center">
 <a href="https://www.npmjs.com/package/pikiclaw"><img src="https://img.shields.io/npm/v/pikiclaw" alt="npm"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
@@ -45,7 +47,20 @@ pikiclaw 的目标很直接：
        你的电脑
 ```
 
-它适合的不是“演示一次 AI”，而是你离开电脑以后，Agent 还能继续在本机把事做完。
+它适合的不是”演示一次 AI”，而是你离开电脑以后，Agent 还能继续在本机把事做完。
+
+### 在 Telegram 里长这样
+
+<table>
+<tr>
+<td align=”center”><b>命令与 Agent 切换</b><br><img src=”docs/promo-tg-commands.png” alt=”Commands” width=”320”></td>
+<td align=”center”><b>代码审查</b><br><img src=”docs/promo-tg-task.png” alt=”Code review” width=”320”></td>
+</tr>
+<tr>
+<td align=”center”><b>多轮编码 + 文件回传</b><br><img src=”docs/promo-tg-complex.png” alt=”Complex task” width=”320”></td>
+<td align=”center”><b>状态监控 + 会话管理</b><br><img src=”docs/promo-tg-sessions.png” alt=”Sessions” width=”320”></td>
+</tr>
+</table>
 
 ---
 
@@ -75,6 +90,23 @@ npx pikiclaw@latest
 - 默认 Agent / 模型设置
 - 工作目录切换
 - 会话和运行状态查看
+
+<details>
+<summary>Dashboard 截图</summary>
+
+**配置管理** — IM 接入、AI Agent、系统权限
+
+<img src="docs/promo-dashboard-config.png" alt="Config" width="700">
+
+**插件中心** — 浏览器操控、桌面自动化
+
+<img src="docs/promo-dashboard-extensions.png" alt="Extensions" width="700">
+
+**会话管理** — 按 Agent 分组的会话泳道
+
+<img src="docs/promo-dashboard-sessions.png" alt="Sessions" width="700">
+
+</details>
 
 如果你更喜欢终端向导：
 
@@ -151,6 +183,13 @@ npx pikiclaw@latest --doctor
 | `/sk_<name>` | 运行项目 skill |
 
 普通文本消息会直接转给当前 Agent。
+
+<details>
+<summary>Telegram 命令效果预览</summary>
+
+<img src="docs/promo-tg-commands.png" alt="Commands in Telegram" width="360">
+
+</details>
 
 ---
 
