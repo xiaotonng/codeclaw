@@ -22,7 +22,7 @@ npx pikiclaw@latest
 
 > Real task: ask pikiclaw to gather and summarize today's AI news — the agent reads, writes, and sends results back through Telegram, all from your phone.
 
-<video src="docs/promo-demo.mp4" width="700" controls muted></video>
+<img src="docs/promo-demo.gif" alt="Demo" width="700">
 
 > Basic operations: send a message, watch the agent stream, receive files back.
 
