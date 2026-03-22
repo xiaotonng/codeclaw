@@ -932,16 +932,20 @@ export function DesktopSetupModal({ open, onClose, onSaved }: { open: boolean; o
   const t = createT(locale);
   const [installing, setInstalling] = useState(false);
   const [installed, setInstalled] = useState(false);
+  const [enabled, setEnabled] = useState(false);
   const [enabling, setEnabling] = useState(false);
+  const [disabling, setDisabling] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (open) {
       setInstalling(false);
       setEnabling(false);
+      setDisabling(false);
       setResult(null);
       api.getBrowser().then(ext => {
         setInstalled(ext.desktop.installed);
+        setEnabled(ext.desktop.enabled);
       }).catch(() => {});
     }
   }, [open]);
@@ -971,10 +975,10 @@ export function DesktopSetupModal({ open, onClose, onSaved }: { open: boolean; o
     try {
       const r = await api.desktopToggle(true);
       if (r.ok) {
+        setEnabled(true);
         setResult({ ok: true, text: '\u2713 ' + t('ext.desktopStarted') });
         toast(t('ext.desktopStarted'));
         onSaved?.();
-        setTimeout(onClose, 600);
       } else {
         setResult({ ok: false, text: '\u2717 ' + (r.error || t('ext.desktopInstallFailed')) });
       }
@@ -982,6 +986,26 @@ export function DesktopSetupModal({ open, onClose, onSaved }: { open: boolean; o
       setResult({ ok: false, text: '\u2717 ' + t('ext.desktopInstallFailed') });
     } finally {
       setEnabling(false);
+    }
+  };
+
+  const handleDisable = async () => {
+    setDisabling(true);
+    setResult(null);
+    try {
+      const r = await api.desktopToggle(false);
+      if (r.ok) {
+        setEnabled(false);
+        setResult({ ok: true, text: '\u2713 ' + t('ext.desktopStopped') });
+        toast(t('ext.desktopStopped'));
+        onSaved?.();
+      } else {
+        setResult({ ok: false, text: '\u2717 ' + (r.error || t('ext.desktopInstallFailed')) });
+      }
+    } catch {
+      setResult({ ok: false, text: '\u2717 ' + t('ext.desktopInstallFailed') });
+    } finally {
+      setDisabling(false);
     }
   };
 
@@ -1008,7 +1032,7 @@ export function DesktopSetupModal({ open, onClose, onSaved }: { open: boolean; o
           </Button>
         </div>
 
-        {/* Step 2: Enable & Start */}
+        {/* Step 2: Enable & Start / Disable & Stop */}
         <div className="rounded-lg border border-edge bg-panel-alt p-4">
           <div className="text-sm font-medium text-fg-2 mb-1">{t('ext.desktopStep2Title')}</div>
           <div className="text-xs text-fg-4 mb-3">{t('ext.desktopStep2Desc')}</div>
@@ -1017,14 +1041,27 @@ export function DesktopSetupModal({ open, onClose, onSaved }: { open: boolean; o
               {result.text}
             </div>
           )}
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={!installed || enabling}
-            onClick={handleEnable}
-          >
-            {enabling ? t('ext.desktopStarting') : t('ext.desktopStep2Action')}
-          </Button>
+          <div className="flex items-center gap-2">
+            {!enabled ? (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={!installed || enabling}
+                onClick={handleEnable}
+              >
+                {enabling ? t('ext.desktopStarting') : t('ext.desktopStep2Action')}
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={disabling}
+                onClick={handleDisable}
+              >
+                {disabling ? t('ext.desktopStopping') : t('ext.disable')}
+              </Button>
+            )}
+          </div>
         </div>
       </div>
       <div className="flex justify-end gap-2 mt-6">

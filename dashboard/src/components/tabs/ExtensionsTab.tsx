@@ -4,7 +4,7 @@ import { createT } from '../../i18n';
 import { useStore } from '../../store';
 import type { BrowserStatusResponse } from '../../types';
 import { BrandIcon } from '../BrandIcon';
-import { Badge, Button } from '../ui';
+import { Badge, Button, Spinner } from '../ui';
 import { SettingRowAction, SettingRowCard, SettingRowField, SettingRowLead } from './shared';
 
 function localeText(locale: string, zh: string, en: string): string {
@@ -144,7 +144,7 @@ export function ExtensionsTab({
 
         <SettingRowField label={localeText(locale, '状态', 'Status')}>
           <div className="flex flex-wrap items-center gap-1.5">
-            <Badge variant={browserBadge.variant}>{browserBadge.label}</Badge>
+            <Badge variant={browserBadge.variant}>{!snapshot && <Spinner />}{browserBadge.label}</Badge>
           </div>
           <div className="mt-1 text-[13px] leading-relaxed text-fg-3">
             {browserStatusDetail(browser, locale)}
@@ -178,7 +178,7 @@ export function ExtensionsTab({
 
         <SettingRowField label={localeText(locale, '状态', 'Status')}>
           <div className="flex flex-wrap items-center gap-1.5">
-            <Badge variant={desktopBadge.variant}>{desktopBadge.label}</Badge>
+            <Badge variant={desktopBadge.variant}>{!snapshot && <Spinner />}{desktopBadge.label}</Badge>
           </div>
           <div className="mt-1 text-[13px] leading-relaxed text-fg-3">
             {desktopStatusDetail(desktop, locale)}
