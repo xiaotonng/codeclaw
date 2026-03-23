@@ -276,7 +276,13 @@ export class FeishuBot extends Bot {
 
   private resolveIncomingSession(ctx: FeishuContext, text: string, files: string[]): SessionRuntime {
     const cs = this.chat(ctx.chatId);
-    // TODO: Feishu doesn't expose reply_to in the event easily; for now use active session
+    const replyMessageId = ctx.replyToMessageId || null;
+    const repliedSession = this.sessionFromMessage(ctx.chatId, replyMessageId);
+    if (repliedSession) {
+      this.log(`[resolveSession] reply matched session=${repliedSession.sessionId} chat=${ctx.chatId}`);
+      this.applySessionSelection(cs, repliedSession);
+      return repliedSession;
+    }
     const selected = this.getSelectedSession(cs);
     if (selected) return selected;
     return this.ensureSession(ctx.chatId, text, files);
@@ -336,8 +342,26 @@ export class FeishuBot extends Bot {
 
   private sessionsPageSize = 5;
 
-  private buildStopKeyboard(actionId: string | null) {
+  private buildStopKeyboard(actionId: string | null, opts?: { queued?: boolean }) {
     if (!actionId) return undefined;
+    if (opts?.queued) {
+      return {
+        rows: [{
+          actions: [
+            {
+              tag: 'button',
+              text: { tag: 'plain_text', content: 'Recall' },
+              value: { action: `tsk:stop:${actionId}` },
+            },
+            {
+              tag: 'button',
+              text: { tag: 'plain_text', content: 'Steer' },
+              value: { action: `tsk:steer:${actionId}` },
+            },
+          ],
+        }],
+      };
+    }
     return {
       rows: [{
         actions: [{
@@ -619,7 +643,7 @@ export class FeishuBot extends Bot {
             workdir: this.workdir,
             files: msg.files,
             sessionId: session.sessionId,
-            title: msg.files[0],
+            title: undefined,
           });
           session.workspacePath = staged.workspacePath;
           this.syncSelectedChats(session);
@@ -657,13 +681,14 @@ export class FeishuBot extends Bot {
       startedAt: start,
       sourceMessageId: ctx.messageId,
     });
-    const stopKeyboard = this.buildStopKeyboard(this.actionIdForTask(taskId));
+    const queuePosition = waiting ? this.getQueuePosition(session.key, taskId) : 0;
+    const placeholderKeyboard = this.buildStopKeyboard(this.actionIdForTask(taskId), { queued: waiting });
 
     const model = session.modelId || this.modelForAgent(session.agent);
     const effort = this.effortForAgent(session.agent);
-    const placeholderId = await this.channel.sendStreamingCard(ctx.chatId, buildInitialPreviewMarkdown(session.agent, model, effort, waiting), {
+    const placeholderId = await this.channel.sendStreamingCard(ctx.chatId, buildInitialPreviewMarkdown(session.agent, model, effort, waiting, queuePosition), {
       replyTo: ctx.messageId || undefined,
-      keyboard: stopKeyboard,
+      keyboard: placeholderKeyboard,
     });
     if (placeholderId) {
       this.registerSessionMessage(ctx.chatId, placeholderId, session);
@@ -682,6 +707,11 @@ export class FeishuBot extends Bot {
           this.log(`[handleMessage] skipped cancelled queued task chat=${ctx.chatId} msg=${ctx.messageId}`);
           return;
         }
+        // Task is now running — update keyboard from Recall/Steer to Stop
+        const runningKeyboard = this.buildStopKeyboard(this.actionIdForTask(taskId));
+        if (placeholderId && waiting) {
+          try { await this.channel.editMessage(ctx.chatId, placeholderId, buildInitialPreviewMarkdown(session.agent, model, effort, false), { keyboard: runningKeyboard }); } catch {}
+        }
         if (placeholderId) {
           const renderer = this.channel.isStreamingCard(placeholderId)
             ? feishuStreamingPreviewRenderer
@@ -697,7 +727,7 @@ export class FeishuBot extends Bot {
             canEditMessages: supportsChannelCapability(this.channel, 'editMessages'),
             canSendTyping: false,
             parseMode: 'Markdown',
-            keyboard: stopKeyboard,
+            keyboard: runningKeyboard,
             log: (message: string) => this.log(message),
           });
           livePreview.start();
@@ -879,6 +909,7 @@ export class FeishuBot extends Bot {
       messageId: ctx.messageId,
       from: ctx.from,
       chatType: 'p2p',
+      replyToMessageId: null,
       reply: (text, opts) => ctx.channel.send(ctx.chatId, text, opts),
       editReply: (msgId, text, opts) => ctx.channel.editMessage(ctx.chatId, msgId, text, opts),
       channel: ctx.channel,
@@ -892,6 +923,7 @@ export class FeishuBot extends Bot {
     try {
       if (await this.handleHumanLoopCallback(data, ctx)) return;
       if (await this.handleTaskStopCallback(data, ctx)) return;
+      if (await this.handleTaskSteerCallback(data, ctx)) return;
       if (await this.handleSwitchNavigateCallback(data, ctx)) return;
       if (await this.handleSwitchSelectCallback(data, ctx)) return;
 
@@ -951,6 +983,15 @@ export class FeishuBot extends Bot {
     if (result.cancelled) {
       try { await this.channel.deleteMessage(ctx.chatId, ctx.messageId); } catch {}
     }
+    return true;
+  }
+
+  private async handleTaskSteerCallback(data: string, ctx: FeishuCallbackContext): Promise<boolean> {
+    if (!data.startsWith('tsk:steer:')) return false;
+    const actionId = data.slice('tsk:steer:'.length).trim();
+    const result = this.steerTaskByActionId(actionId);
+    if (!result.task) return true;
+    // The queued task will naturally run next after the running task is interrupted
     return true;
   }
 

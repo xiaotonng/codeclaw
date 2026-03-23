@@ -89,7 +89,7 @@ export async function stageFilesIntoSession(
     workdir: bot.workdir,
     files,
     sessionId: session.sessionId,
-    title: files[0],
+    title: undefined,
   });
   session.workspacePath = staged.workspacePath;
   return {

@@ -136,7 +136,7 @@ export async function getSessionsPageData(bot: Bot, chatId: ChatId, page: number
       runState: status.isRunning ? 'running' : s.runState,
       runDetail: s.runDetail,
     });
-    const title = s.title ? s.title.replace(/\n/g, ' ').slice(0, 10) : sessionKey.slice(0, 10);
+    const title = s.title ? s.title.replace(/\n/g, ' ').slice(0, 20) : sessionKey.slice(0, 20);
     const time = s.createdAt
       ? new Date(s.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
       : '?';

@@ -691,7 +691,7 @@ export class Bot {
       workdir: this.workdir,
       files: [],
       sessionId: null,
-      title: title || files[0] || 'New session',
+      title: title || 'New session',
     });
     const runtime = this.upsertSessionRuntime({
       agent: cs.agent,
@@ -825,6 +825,53 @@ export class Bot {
       return { task, interrupted: true, cancelled: false };
     }
     return { task, interrupted: false, cancelled: false };
+  }
+
+  /**
+   * Steer: interrupt the running task so a queued task (identified by actionId) runs next.
+   * Returns { task, interrupted } where task is the queued task and interrupted indicates
+   * whether a running task was aborted.
+   */
+  protected steerTaskByActionId(actionId: string): { task: RunningTask | null; interrupted: boolean } {
+    const taskId = this.taskKeysByActionId.get(String(actionId));
+    if (!taskId) return { task: null, interrupted: false };
+    const task = this.activeTasks.get(taskId) || null;
+    if (!task || task.status !== 'queued') return { task, interrupted: false };
+    const interrupted = this.interruptRunningTask(task.sessionKey);
+    return { task, interrupted };
+  }
+
+  /**
+   * Interrupt only the currently running task for a session, leaving queued tasks intact.
+   * Used by the "Steer" action to let a queued task run next.
+   */
+  protected interruptRunningTask(sessionKey: string | null | undefined): boolean {
+    const session = this.getSessionRuntimeByKey(sessionKey, { allowAnyWorkdir: true });
+    if (!session) return false;
+    for (const taskId of session.runningTaskIds) {
+      const task = this.activeTasks.get(taskId);
+      if (!task || task.status !== 'running') continue;
+      try { task.abort?.(); } catch {}
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Return the number of tasks ahead of the given task in its session queue.
+   * Counts running + queued (non-cancelled) tasks that were started before this one.
+   */
+  protected getQueuePosition(sessionKey: string, taskId: string): number {
+    const session = this.getSessionRuntimeByKey(sessionKey, { allowAnyWorkdir: true });
+    if (!session) return 0;
+    let ahead = 0;
+    for (const otherId of session.runningTaskIds) {
+      if (otherId === taskId) continue;
+      const other = this.activeTasks.get(otherId);
+      if (!other || other.cancelled) continue;
+      if (other.status === 'running' || other.status === 'queued') ahead++;
+    }
+    return ahead;
   }
 
   private sourceMessageKey(chatId: ChatId, sourceMessageId: number | string): string {

@@ -902,7 +902,7 @@ export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFile
   const importedFiles = importFilesIntoWorkspace(session.workspacePath, opts.files);
   if (importedFiles.length) {
     session.record.stagedFiles = dedupeStrings([...session.record.stagedFiles, ...importedFiles]);
-    if (!session.record.title) session.record.title = importedFiles[0];
+    /* title will be set when the first text prompt arrives */
     saveSessionRecord(opts.workdir, session.record);
   }
   return { sessionId: session.sessionId, workspacePath: session.workspacePath, importedFiles };
@@ -1053,7 +1053,7 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
   // Capture staged files for MCP bridge before clearing
   const stagedFiles = [...session.record.stagedFiles];
   session.record.stagedFiles = [];
-  if (!session.record.title) session.record.title = summarizePromptTitle(opts.prompt) || importedFiles[0] || null;
+  if (!session.record.title) session.record.title = summarizePromptTitle(opts.prompt) || null;
   setSessionRunState(session.record, 'running', null);
   saveSessionRecord(opts.workdir, session.record);
 

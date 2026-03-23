@@ -253,6 +253,7 @@ export class TelegramBot extends Bot {
       : null;
     const repliedSession = this.sessionFromMessage(ctx.chatId, replyMessageId);
     if (repliedSession) {
+      this.log(`[resolveSession] reply matched session=${repliedSession.sessionId} chat=${ctx.chatId}`);
       this.applySessionSelection(cs, repliedSession);
       return repliedSession;
     }
@@ -350,8 +351,16 @@ export class TelegramBot extends Bot {
 
   private sessionsPageSize = 5;
 
-  private buildStopKeyboard(actionId: string | null) {
+  private buildStopKeyboard(actionId: string | null, opts?: { queued?: boolean }) {
     if (!actionId) return undefined;
+    if (opts?.queued) {
+      return {
+        inline_keyboard: [[
+          { text: 'Recall', callback_data: `tsk:stop:${actionId}` },
+          { text: 'Steer', callback_data: `tsk:steer:${actionId}` },
+        ]],
+      };
+    }
     return {
       inline_keyboard: [[
         { text: 'Stop', callback_data: `tsk:stop:${actionId}` },
@@ -558,7 +567,7 @@ export class TelegramBot extends Bot {
             workdir: this.workdir,
             files: msg.files,
             sessionId: session.sessionId,
-            title: msg.files[0],
+            title: undefined,
           });
           session.workspacePath = staged.workspacePath;
           this.syncSelectedChats(session);
@@ -595,11 +604,12 @@ export class TelegramBot extends Bot {
       startedAt: start,
       sourceMessageId: ctx.messageId,
     });
-    const stopKeyboard = this.buildStopKeyboard(this.actionIdForTask(taskId));
     const waiting = this.sessionHasPendingWork(session);
+    const queuePosition = waiting ? this.getQueuePosition(session.key, taskId) : 0;
+    const placeholderKeyboard = this.buildStopKeyboard(this.actionIdForTask(taskId), { queued: waiting });
     let phId: number | null = null;
     if (canEditMessages) {
-      const placeholderId = await ctx.reply(buildInitialPreviewHtml(session.agent, waiting), { parseMode: 'HTML', messageThreadId, keyboard: stopKeyboard });
+      const placeholderId = await ctx.reply(buildInitialPreviewHtml(session.agent, waiting, queuePosition), { parseMode: 'HTML', messageThreadId, keyboard: placeholderKeyboard });
       phId = typeof placeholderId === 'number' ? placeholderId : null;
       if (phId != null) {
         this.registerSessionMessage(ctx.chatId, phId, session);
@@ -624,6 +634,11 @@ export class TelegramBot extends Bot {
           this.log(`[handleMessage] skipped cancelled queued task chat=${ctx.chatId} msg=${ctx.messageId}`);
           return;
         }
+        // Task is now running — update keyboard from Recall/Steer to Stop
+        const runningKeyboard = this.buildStopKeyboard(this.actionIdForTask(taskId));
+        if (phId != null && waiting) {
+          try { await this.channel.editMessage(ctx.chatId, phId, buildInitialPreviewHtml(session.agent, false), { parseMode: 'HTML', keyboard: runningKeyboard }); } catch {}
+        }
         if (phId != null || canSendTyping) {
           livePreview = new LivePreview({
             agent: session.agent,
@@ -636,7 +651,7 @@ export class TelegramBot extends Bot {
             canEditMessages,
             canSendTyping,
             messageThreadId,
-            keyboard: stopKeyboard,
+            keyboard: runningKeyboard,
             log: (message: string) => this.log(message),
           });
           livePreview.start();
@@ -852,6 +867,22 @@ export class TelegramBot extends Bot {
     return true;
   }
 
+  private async handleTaskSteerCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
+    if (!data.startsWith('tsk:steer:')) return false;
+    const actionId = data.slice('tsk:steer:'.length).trim();
+    const result = this.steerTaskByActionId(actionId);
+    if (!result.task) {
+      await ctx.answerCallback('This task already finished.');
+      return true;
+    }
+    if (result.task.status !== 'queued') {
+      await ctx.answerCallback('Task is already running.');
+      return true;
+    }
+    await ctx.answerCallback(result.interrupted ? 'Steering — interrupting current task...' : 'No running task to interrupt.');
+    return true;
+  }
+
   private async handleHumanLoopCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
     if (!data.startsWith('hl:')) return false;
     const [, action, promptId, rawIndex] = data.split(':');
@@ -912,6 +943,7 @@ export class TelegramBot extends Bot {
   async handleCallback(data: string, ctx: TgCallbackContext) {
     if (await this.handleHumanLoopCallback(data, ctx)) return;
     if (await this.handleTaskStopCallback(data, ctx)) return;
+    if (await this.handleTaskSteerCallback(data, ctx)) return;
     if (await this.handleSwitchNavigateCallback(data, ctx)) return;
     if (await this.handleSwitchSelectCallback(data, ctx)) return;
     if (await this.handleSessionsPageCallback(data, ctx)) return;

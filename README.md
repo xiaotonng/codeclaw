@@ -142,6 +142,7 @@ npx pikiclaw@latest --doctor  # check environment only
 
 - Streaming preview with continuous message updates
 - Session switching, resume, and multi-turn conversations
+- Task queue with **Steer** — interrupt the running task and let a queued message jump ahead
 - Working directory browsing and switching
 - File attachments automatically enter the session workspace
 - Long-task sleep prevention, watchdog, and auto-restart

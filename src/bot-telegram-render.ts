@@ -309,10 +309,14 @@ export function formatProviderUsageLines(usage: ProviderUsageSnapshot): string[]
   );
 }
 
-export function buildInitialPreviewHtml(agent: Agent, waiting = false): string {
-  return waiting
-    ? `<i>Waiting in queue...</i>\n\n${formatPreviewFooterHtml(agent, 0)}`
-    : formatPreviewFooterHtml(agent, 0);
+export function buildInitialPreviewHtml(agent: Agent, waiting = false, queuePosition = 0): string {
+  if (waiting) {
+    const queueLabel = queuePosition > 0
+      ? `Queued · ${queuePosition} ${queuePosition === 1 ? 'task' : 'tasks'} ahead`
+      : 'Waiting in queue...';
+    return `<i>${escapeHtml(queueLabel)}</i>\n\n${formatPreviewFooterHtml(agent, 0)}`;
+  }
+  return formatPreviewFooterHtml(agent, 0);
 }
 
 export function buildStreamPreviewHtml(input: StreamPreviewRenderInput): string {

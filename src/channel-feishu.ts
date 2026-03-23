@@ -70,6 +70,8 @@ export interface FeishuContext {
   messageId: string;
   from: FeishuFrom;
   chatType: 'p2p' | 'group';
+  /** The parent message ID when this message is a reply, or null. */
+  replyToMessageId: string | null;
   reply: (text: string, opts?: SendOpts) => Promise<string | null>;
   editReply: (msgId: string, text: string, opts?: SendOpts) => Promise<void>;
   channel: FeishuChannel;
@@ -535,7 +537,8 @@ class FeishuChannel extends Channel {
       return;
     }
 
-    const ctx = this._makeCtx(chatId, messageId, from, chatType, event);
+    const parentId = typeof msg.parent_id === 'string' && msg.parent_id ? msg.parent_id : null;
+    const ctx = this._makeCtx(chatId, messageId, from, chatType, event, parentId);
 
     // Parse message content
     let text = '';
@@ -1160,12 +1163,13 @@ class FeishuChannel extends Channel {
   // Internal helpers
   // ========================================================================
 
-  private _makeCtx(chatId: string, messageId: string, from: FeishuFrom, chatType: 'p2p' | 'group', raw: any): FeishuContext {
+  private _makeCtx(chatId: string, messageId: string, from: FeishuFrom, chatType: 'p2p' | 'group', raw: any, replyToMessageId?: string | null): FeishuContext {
     return {
       chatId,
       messageId,
       from,
       chatType,
+      replyToMessageId: replyToMessageId || null,
       reply: (text: string, opts?: SendOpts) => this.send(chatId, text, { ...opts, replyTo: messageId || opts?.replyTo }),
       editReply: (msgId: string, text: string, opts?: SendOpts) => this.editMessage(chatId, msgId, text, opts),
       channel: this,
