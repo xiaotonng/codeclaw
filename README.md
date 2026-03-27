@@ -122,6 +122,10 @@ npx pikiclaw@latest --doctor  # check environment only
 
 <img src="docs/promo-dashboard-sessions.png" alt="Sessions" width="700">
 
+**Workspace** — Live session workspace with message streaming, plan progress, and directory browser
+
+<img src="docs/workspace.png" alt="Workspace" width="700">
+
 **System Info** — Working directory, CPU / memory / disk monitoring
 
 <img src="docs/promo-dashboard-system.png" alt="System Info" width="700">
