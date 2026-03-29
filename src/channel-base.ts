@@ -17,22 +17,14 @@ export interface ChannelCapabilities {
   editMessages: boolean;
   typingIndicators: boolean;
   commandMenu: boolean;
-  callbackActions: boolean;
   messageReactions: boolean;
-  fileUpload: boolean;
-  fileDownload: boolean;
-  threads: boolean;
 }
 
 export const DEFAULT_CHANNEL_CAPABILITIES: ChannelCapabilities = Object.freeze({
   editMessages: false,
   typingIndicators: false,
   commandMenu: false,
-  callbackActions: false,
   messageReactions: false,
-  fileUpload: false,
-  fileDownload: false,
-  threads: false,
 });
 
 export type ChannelCapability = keyof ChannelCapabilities;

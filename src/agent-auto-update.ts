@@ -46,7 +46,34 @@ function isPathInside(parentDir: string, childPath: string): boolean {
   return child === parent || child.startsWith(`${parent}${path.sep}`);
 }
 
-export function resolveAgentUpdateStrategy(agent: Pick<AgentInfo, 'agent' | 'path'>, npmPrefix: string | null): AgentUpdateStrategy {
+function realPathOrNull(filePath: string): string | null {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function packageDirFromNpmRoot(npmRoot: string, pkg: string): string {
+  return path.join(path.resolve(npmRoot), ...pkg.split('/'));
+}
+
+function isNpmPackageOwnedBinary(binPath: string, pkg: string, npmRoot: string | null): boolean {
+  if (!npmRoot) return false;
+  const packageDir = packageDirFromNpmRoot(npmRoot, pkg);
+  if (!fs.existsSync(packageDir)) return false;
+
+  const realPackageDir = realPathOrNull(packageDir) || path.resolve(packageDir);
+  const realBinPath = realPathOrNull(binPath);
+  if (realBinPath && isPathInside(realPackageDir, realBinPath)) return true;
+  return isPathInside(realPackageDir, binPath);
+}
+
+export function resolveAgentUpdateStrategy(
+  agent: Pick<AgentInfo, 'agent' | 'path'>,
+  npmPrefix: string | null,
+  npmRoot: string | null = null,
+): AgentUpdateStrategy {
   const id = String(agent.agent || '').trim();
   const pkg = getAgentPackage(id);
   if (!pkg) return { kind: 'skip', reason: 'unsupported agent' };
@@ -54,8 +81,11 @@ export function resolveAgentUpdateStrategy(agent: Pick<AgentInfo, 'agent' | 'pat
   const binPath = String(agent.path || '').trim();
   const npmBinDir = npmPrefix ? path.join(path.resolve(npmPrefix), 'bin') : null;
   const npmManaged = !!(binPath && npmBinDir && isPathInside(npmBinDir, binPath));
-  if (npmManaged) return { kind: 'npm', pkg };
-  return { kind: 'skip', reason: 'non-npm install path' };
+  if (!npmManaged) return { kind: 'skip', reason: 'non-npm install path' };
+  if (!isNpmPackageOwnedBinary(binPath, pkg, npmRoot)) {
+    return { kind: 'skip', reason: 'binary is not owned by the npm package' };
+  }
+  return { kind: 'npm', pkg };
 }
 
 function labelForAgent(agent: string): string {
@@ -108,6 +138,11 @@ async function runCommand(
 
 async function getNpmGlobalPrefix(): Promise<string | null> {
   const result = await runCommand('npm', ['prefix', '-g'], { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmPrefix });
+  return result.ok ? result.stdout.trim().split('\n')[0] || null : null;
+}
+
+async function getNpmGlobalRoot(): Promise<string | null> {
+  const result = await runCommand('npm', ['root', '-g'], { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmPrefix });
   return result.ok ? result.stdout.trim().split('\n')[0] || null : null;
 }
 
@@ -166,6 +201,7 @@ export function startAgentAutoUpdate(opts: {
     try {
       opts.log(`agent auto-update: checking ${installedAgents.length} installed agent${installedAgents.length === 1 ? '' : 's'} in background`);
       const npmPrefix = await getNpmGlobalPrefix();
+      const npmRoot = await getNpmGlobalRoot();
 
       for (const agent of installedAgents) {
         const id = String(agent.agent || '').trim();
@@ -184,7 +220,7 @@ export function startAgentAutoUpdate(opts: {
           continue;
         }
 
-        const strategy = resolveAgentUpdateStrategy(agent, npmPrefix);
+        const strategy = resolveAgentUpdateStrategy(agent, npmPrefix, npmRoot);
         if (strategy.kind === 'skip') {
           opts.log(`agent auto-update: ${label} is ${currentVersion || 'unknown'} and latest is ${latestVersion}, but update is skipped (${strategy.reason})`);
           continue;

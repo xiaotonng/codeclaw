@@ -250,12 +250,3 @@ export class LivePreview {
     await this.editChain.catch(() => {});
   }
 }
-
-// ---------------------------------------------------------------------------
-// Backward compat alias — existing code imports TelegramLivePreview
-// ---------------------------------------------------------------------------
-
-/** @deprecated Use `LivePreview` directly. */
-export const TelegramLivePreview = LivePreview;
-/** @deprecated Use `LivePreviewOptions` directly. */
-export type TelegramLivePreviewOptions = LivePreviewOptions;

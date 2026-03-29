@@ -13,6 +13,7 @@ import {
   doStream,
   ensureManagedSession,
   findManagedThreadSession,
+  getSessions,
   getSessionTail,
   getUsage,
   labelFromWindowMinutes,
@@ -77,6 +78,9 @@ describe('buildCodexTurnInput and usage helpers', () => {
   it('filters interrupted placeholder prompts out of session previews', () => {
     expect(sanitizeSessionUserPreviewText('[Request interrupted by user]')).toBe('');
     expect(sanitizeSessionUserPreviewText('[Request interrupted by user for tool use]')).toBe('');
+    expect(sanitizeSessionUserPreviewText('[Image: original 2316x1558, displayed at 2000x1338]')).toBe('');
+    expect(sanitizeSessionUserPreviewText('[Attached file: /tmp/shot.png]')).toBe('');
+    expect(sanitizeSessionUserPreviewText('[Image: original 2316x1558] 帮我看一下这里为什么有间距')).toBe('帮我看一下这里为什么有间距');
     expect(sanitizeSessionUserPreviewText('正常问题')).toBe('正常问题');
   });
 
@@ -278,6 +282,56 @@ describe('buildCodexTurnInput and usage helpers', () => {
     expect(s.lastMessageText).toBe('native answer (latest)');
     // but managed workspace is preserved
     expect(s.workspacePath).toBe('/tmp/pikiclaw/workspace');
+  });
+
+  it('filters codex subagent native sessions from session listings', async () => {
+    await withTempHome(async (homeDir) => {
+      const workdir = makeTmpDir('pikiclaw-workdir-');
+      const otherWorkdir = makeTmpDir('pikiclaw-other-workdir-');
+      const sessionsDir = path.join(homeDir, '.codex', 'sessions', '2026', '03', '28');
+      fs.mkdirSync(sessionsDir, { recursive: true });
+
+      const writeRollout = (filename: string, payload: Record<string, unknown>) => {
+        fs.writeFileSync(
+          path.join(sessionsDir, filename),
+          JSON.stringify({ timestamp: '2026-03-28T00:13:16.000Z', type: 'session_meta', payload }) + '\n',
+        );
+      };
+
+      writeRollout('rollout-parent.jsonl', {
+        id: 'sess-parent',
+        timestamp: '2026-03-28T00:12:31.000Z',
+        cwd: workdir,
+        originator: 'pikiclaw',
+      });
+      writeRollout('rollout-child.jsonl', {
+        id: 'sess-child',
+        timestamp: '2026-03-28T00:13:16.000Z',
+        cwd: workdir,
+        originator: 'pikiclaw',
+        source: {
+          subagent: {
+            thread_spawn: {
+              parent_thread_id: 'sess-parent',
+              depth: 1,
+              agent_nickname: 'Kepler',
+              agent_role: 'explorer',
+            },
+          },
+        },
+      });
+      writeRollout('rollout-other.jsonl', {
+        id: 'sess-other',
+        timestamp: '2026-03-28T00:14:00.000Z',
+        cwd: otherWorkdir,
+        originator: 'pikiclaw',
+      });
+
+      const result = await getSessions({ agent: 'codex', workdir });
+
+      expect(result.ok).toBe(true);
+      expect(result.sessions.map(session => session.sessionId)).toEqual(['sess-parent']);
+    });
   });
 });
 
@@ -1507,6 +1561,75 @@ rl.on('line', (line) => {
     const record = listPikiclawSessions(tmpDir, 'codex').find(entry => entry.sessionId === 'thread-native');
     expect(record?.title).toBe('给我讲故事');
     expect(record?.workspacePath).toBe(path.join(tmpDir, '.pikiclaw', 'sessions', 'codex', 'thread-native', 'workspace'));
+  });
+
+  it('forwards early native codex session ids through doStream while promoting the managed session', async () => {
+    const script = `#!/usr/bin/env node
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: 'thread-forwarded' }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-forwarded' } } }) + '\\n');
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({
+        method: 'turn/started',
+        params: { threadId: 'thread-forwarded', turn: { id: 'turn-forwarded' } },
+      }) + '\\n');
+      process.stdout.write(JSON.stringify({
+        method: 'item/started',
+        params: { threadId: 'thread-forwarded', item: { id: 'msg-forwarded', type: 'agentMessage', phase: 'final_answer' } },
+      }) + '\\n');
+      process.stdout.write(JSON.stringify({
+        method: 'item/agentMessage/delta',
+        params: { threadId: 'thread-forwarded', itemId: 'msg-forwarded', delta: 'done' },
+      }) + '\\n');
+      process.stdout.write(JSON.stringify({
+        method: 'turn/completed',
+        params: { threadId: 'thread-forwarded', turn: { id: 'turn-forwarded', status: 'completed' } },
+      }) + '\\n');
+    }, 150);
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+    let reportedSessionId: string | null = null;
+    const streamPromise = doStream(baseOpts('codex', {
+      prompt: '提早告诉我 session id',
+      onSessionId: sessionId => { reportedSessionId = sessionId; },
+    }));
+
+    const deadline = Date.now() + 1500;
+    while (!reportedSessionId && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+
+    expect(reportedSessionId).toBe('thread-forwarded');
+
+    const result = await streamPromise;
+    expect(result.ok).toBe(true);
+    expect(result.sessionId).toBe('thread-forwarded');
+
+    const record = listPikiclawSessions(tmpDir, 'codex').find(entry => entry.sessionId === 'thread-forwarded');
+    expect(record?.workspacePath).toBe(path.join(tmpDir, '.pikiclaw', 'sessions', 'codex', 'thread-forwarded', 'workspace'));
   });
 
   it('persists completed and incomplete run states in managed session records', async () => {

@@ -2,7 +2,7 @@ import type { AgentInfo } from './code-agent.js';
 import { getAgentInstallCommand, getAgentLabel } from './agent-npm.js';
 
 export type ChannelStatus = 'ready' | 'missing' | 'invalid' | 'error' | 'checking';
-export type SetupChannel = 'telegram' | 'feishu' | 'weixin' | 'whatsapp';
+export type SetupChannel = 'telegram' | 'feishu' | 'weixin';
 
 export interface AgentSetupState extends AgentInfo {
   label: string;
@@ -68,12 +68,12 @@ function defaultChannelState(channel: string, tokenProvided: boolean): ChannelSe
     };
   }
   return {
-    channel: 'whatsapp',
+    channel: 'telegram',
     configured: tokenProvided,
     ready: tokenProvided,
     validated: false,
     status: tokenProvided ? 'ready' : 'missing',
-    detail: tokenProvided ? 'WhatsApp credentials are configured.' : 'WhatsApp is not configured.',
+    detail: tokenProvided ? 'Telegram credentials are configured.' : 'Telegram is not configured.',
   };
 }
 
@@ -127,9 +127,7 @@ export function buildSetupGuide(state: SetupState, version: string, options?: { 
       ? 'Feishu'
       : state.channel === 'weixin'
         ? 'Weixin'
-        : state.channel === 'whatsapp'
-          ? 'WhatsApp'
-          : 'your chat app';
+        : 'your chat app';
   const lines: string[] = [
     `pikiclaw v${version}`,
     '',
@@ -176,8 +174,6 @@ export function buildSetupGuide(state: SetupState, version: string, options?: { 
       'MISSING  No Weixin credentials configured in ~/.pikiclaw/setting.json',
       '         Run `pikiclaw` to open the dashboard, scan the QR code, and validate the channel before enabling it.',
     );
-  } else if (state.channel === 'whatsapp') {
-    lines.push('MISSING  WhatsApp setup is not available yet. Use `--channel telegram` for now.');
   } else if (state.tokenProvided) {
     lines.push('OK       A channel token was provided.');
   } else {

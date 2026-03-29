@@ -29,10 +29,11 @@ interface TurnHistoryWindow {
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir,
+  session, workdir, active = true,
 }: {
   session: SessionInfo;
   workdir: string;
+  active?: boolean;
 }) {
   const locale = useStore(s => s.locale);
   const t = useMemo(() => createT(locale), [locale]);
@@ -132,7 +133,13 @@ export const SessionPanel = memo(function SessionPanel({
 
   /* ── Poll stream state — works identically across multiple tabs ── */
   useEffect(() => {
-    let active = true;
+    if (!active) return;
+    void loadLatestTurns({ keepOlder: true });
+  }, [active, loadLatestTurns]);
+
+  useEffect(() => {
+    if (!active) return;
+    let mounted = true;
     let prevPhase: 'queued' | 'streaming' | 'done' | null = null;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -148,10 +155,10 @@ export const SessionPanel = memo(function SessionPanel({
     };
 
     const poll = async () => {
-      if (!active) return;
+      if (!mounted) return;
       try {
         const res = await api.getSessionStreamState(session.agent || '', session.sessionId);
-        if (!active) return;
+        if (!mounted) return;
         const state = res.state;
         const phase = state?.phase ?? null;
         const keepPolling = shouldPollSessionStreamState(displayState, localStreamPendingRef.current, phase, prevPhase);
@@ -191,12 +198,12 @@ export const SessionPanel = memo(function SessionPanel({
           setStreaming(false);
         } else if (state.phase === 'done') {
           setPendingPrompt(null);
-          setLiveStream(hasPlan(state.plan) ? {
+          setLiveStream((hasPlan(state.plan) || state.text || state.thinking || state.activity) ? {
             phase: 'done',
-            text: '',
-            thinking: '',
-            activity: '',
-            plan: state.plan,
+            text: state.text || '',
+            thinking: state.thinking || '',
+            activity: state.activity || '',
+            plan: state.plan ?? null,
           } : null);
           setStreaming(false);
           if (prevPhase !== 'done') {
@@ -216,18 +223,19 @@ export const SessionPanel = memo(function SessionPanel({
     if (shouldPollSessionStreamState(displayState, localStreamPendingRef.current, null, null)) ensurePolling();
     poll(); // initial poll
     return () => {
-      active = false;
+      mounted = false;
       stopPolling();
     };
-  }, [displayState, loadLatestTurns, session.agent, session.sessionId, streamPollNonce]);
+  }, [active, displayState, loadLatestTurns, session.agent, session.sessionId, streamPollNonce]);
 
   /* ── Fallback: poll messages for IM-triggered sessions (no stream snapshot) ── */
   useEffect(() => {
+    if (!active) return;
     if (displayState !== 'running') return;
     if (streaming) return; // stream-state polling is active, no need
     const id = setInterval(() => { void loadLatestTurns({ keepOlder: true }); }, 3000);
     return () => clearInterval(id);
-  }, [displayState, loadLatestTurns, streaming]);
+  }, [active, displayState, loadLatestTurns, streaming]);
 
   useLayoutEffect(() => {
     const anchor = prependAnchorRef.current;
@@ -409,6 +417,15 @@ function mergeLatestHistory(current: TurnHistoryWindow, latest: TurnHistoryWindo
   };
 }
 
+function mergeRichMessages(lhs: RichMessage, rhs: RichMessage): RichMessage {
+  const parts = [lhs.text, rhs.text].filter(Boolean);
+  return {
+    role: lhs.role,
+    text: parts.join('\n\n'),
+    blocks: [...lhs.blocks, ...rhs.blocks],
+  };
+}
+
 function groupIntoTurns(msgs: RichMessage[]): Turn[] {
   const turns: Turn[] = [];
   let cur: Turn = { user: null, assistant: null };
@@ -416,7 +433,8 @@ function groupIntoTurns(msgs: RichMessage[]): Turn[] {
     if (m.role === 'user') {
       if (cur.user || cur.assistant) { turns.push(cur); cur = { user: null, assistant: null }; }
       cur.user = m;
-    } else cur.assistant = m;
+    } else if (cur.assistant) cur.assistant = mergeRichMessages(cur.assistant, m);
+    else cur.assistant = m;
   }
   if (cur.user || cur.assistant) turns.push(cur);
   return turns;
@@ -433,7 +451,7 @@ const TurnView = memo(function TurnView({ turn, agent, meta, t, onResend, onEdit
   return (
     <div className="session-turn">
       {turn.user && !isSystemMsg && (
-        <UserBubble text={turn.user.text} t={t} onResend={onResend} onEdit={onEdit} />
+        <UserBubble text={turn.user.text} blocks={turn.user.blocks} t={t} onResend={onResend} onEdit={onEdit} />
       )}
       {isSystemMsg && turn.user && (
         <div className="mb-4 px-4 py-3 rounded-lg bg-[rgba(255,255,255,0.02)] border border-edge/20 text-[12.5px] leading-[1.7] text-fg-4">
@@ -459,16 +477,42 @@ function isContinuationSummary(text: string): boolean {
   return markers.some(m => text.includes(m));
 }
 
+/** Lightbox for full-screen image preview */
+function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm cursor-zoom-out"
+      onClick={onClose}
+    >
+      <img
+        src={src}
+        className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      />
+    </div>,
+    document.body,
+  );
+}
+
 /** User message bubble with actions */
-function UserBubble({ text, t, onResend, onEdit }: {
+function UserBubble({ text, blocks, t, onResend, onEdit }: {
   text: string;
+  blocks?: MessageBlock[];
   t: (k: string) => string;
   onResend?: (text: string) => void;
   onEdit?: (text: string) => void;
 }) {
   const [showActions, setShowActions] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const hasActions = !!(onResend || onEdit);
+  const imageBlocks = blocks?.filter(b => b.type === 'image') || [];
 
   const handleCopy = () => {
     navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
@@ -481,8 +525,21 @@ function UserBubble({ text, t, onResend, onEdit }: {
       onMouseLeave={() => setShowActions(false)}
     >
       <div className="max-w-[72%] rounded-md border border-fg-6 bg-panel px-4 py-3 text-[13.5px] leading-[1.72] text-fg shadow-sm">
-        <div className="whitespace-pre-wrap break-words">{text}</div>
+        {text && <div className="whitespace-pre-wrap break-words">{text}</div>}
+        {imageBlocks.length > 0 && (
+          <div className={cn('flex flex-wrap gap-2', text && 'mt-2')}>
+            {imageBlocks.map((img, i) => (
+              <img
+                key={i}
+                src={img.content}
+                className="max-w-[280px] max-h-[200px] rounded border border-fg-6/50 object-cover cursor-zoom-in hover:opacity-90 transition-opacity"
+                onClick={() => setLightboxSrc(img.content)}
+              />
+            ))}
+          </div>
+        )}
       </div>
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
       {/* Action bar — appears below the bubble on hover */}
       {hasActions && (
         <div className={cn(
@@ -544,10 +601,12 @@ function TurnDivider({ agent, meta }: { agent: string; meta: ReturnType<typeof g
    Assistant message — separated activity, thinking, output
    ═══════════════════════════════════════════════════════════════ */
 function AssistantMsg({ message, t }: { message: RichMessage; t: (k: string) => string }) {
-  const { activityBlocks, thinkingBlocks, processNotes, outputBlocks } = categorizeAssistantBlocks(message.blocks);
+  const { activityBlocks, thinkingBlocks, processNotes, planBlocks, outputBlocks } = categorizeAssistantBlocks(message.blocks);
+  const latestPlan = [...planBlocks].reverse().find(block => hasPlan(block.plan));
   return (
     <div className="space-y-3">
-      {activityBlocks.length > 0 && <ActivitySection blocks={activityBlocks} notes={processNotes} t={t} />}
+      {(activityBlocks.length > 0 || processNotes.length > 0) && <ActivitySection blocks={activityBlocks} notes={processNotes} t={t} />}
+      {latestPlan?.plan && <PlanProgressCard plan={latestPlan.plan} phase="done" t={t} className="max-w-[760px]" />}
       {thinkingBlocks.length > 0 && <ThinkingSection blocks={thinkingBlocks} t={t} />}
       {outputBlocks.length > 0 && <OutputBlock blocks={outputBlocks} />}
     </div>
@@ -653,7 +712,7 @@ function LivePreview({
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
             {stream.text}
           </ReactMarkdown>
-          <span className="inline-block w-[2px] h-[16px] bg-fg-3 animate-pulse ml-0.5 align-text-bottom" />
+          {stream.phase === 'streaming' && <span className="inline-block w-[2px] h-[16px] bg-fg-3 animate-pulse ml-0.5 align-text-bottom" />}
         </div>
       )}
 
@@ -673,16 +732,37 @@ function categorizeAssistantBlocks(blocks: MessageBlock[]): {
   activityBlocks: MessageBlock[];
   thinkingBlocks: MessageBlock[];
   processNotes: MessageBlock[];
+  planBlocks: MessageBlock[];
   outputBlocks: MessageBlock[];
 } {
   const normalized = blocks.filter(block =>
-    block.type === 'tool_use' || block.type === 'tool_result' || !!block.content.trim(),
+    block.type === 'plan'
+    || block.type === 'tool_use'
+    || block.type === 'tool_result'
+    || block.type === 'image'
+    || !!block.content.trim(),
   );
-  const hasStructured = normalized.some(b => b.type !== 'text');
-  if (!hasStructured) return { activityBlocks: [], thinkingBlocks: [], processNotes: [], outputBlocks: normalized };
+  const hasExplicitPhases = normalized.some(block => block.type === 'text' && !!block.phase);
+  const hasStructured = normalized.some(block => block.type !== 'text' && block.type !== 'image');
+  if (!hasStructured && !hasExplicitPhases) {
+    return { activityBlocks: [], thinkingBlocks: [], processNotes: [], planBlocks: [], outputBlocks: normalized };
+  }
+
+  if (hasExplicitPhases) {
+    return {
+      activityBlocks: normalized.filter(block => block.type === 'tool_use' || block.type === 'tool_result'),
+      thinkingBlocks: normalized.filter(block => block.type === 'thinking'),
+      processNotes: normalized.filter(block => block.type === 'text' && block.phase === 'commentary'),
+      planBlocks: normalized.filter(block => block.type === 'plan' && hasPlan(block.plan)),
+      outputBlocks: normalized.filter(block =>
+        block.type === 'image'
+        || (block.type === 'text' && block.phase !== 'commentary'),
+      ),
+    };
+  }
 
   let trailingStart = normalized.length;
-  while (trailingStart > 0 && normalized[trailingStart - 1].type === 'text') trailingStart--;
+  while (trailingStart > 0 && (normalized[trailingStart - 1].type === 'text' || normalized[trailingStart - 1].type === 'image')) trailingStart--;
 
   const processRegion = trailingStart < normalized.length ? normalized.slice(0, trailingStart) : normalized;
   const outputBlocks = trailingStart < normalized.length ? normalized.slice(trailingStart) : [];
@@ -690,8 +770,9 @@ function categorizeAssistantBlocks(blocks: MessageBlock[]): {
   return {
     activityBlocks: processRegion.filter(b => b.type === 'tool_use' || b.type === 'tool_result'),
     thinkingBlocks: processRegion.filter(b => b.type === 'thinking'),
+    planBlocks: processRegion.filter(b => b.type === 'plan' && hasPlan(b.plan)),
     processNotes: processRegion.filter(b => b.type === 'text'),
-    outputBlocks,
+    outputBlocks: [...outputBlocks, ...processRegion.filter(b => b.type === 'image')],
   };
 }
 
@@ -704,7 +785,9 @@ function ActivitySection({ blocks, notes, t }: { blocks: MessageBlock[]; notes: 
     .filter(b => b.type === 'tool_use')
     .map(b => b.toolName || 'tool')
     .filter((name, i, list) => list.indexOf(name) === i);
-  const totalOps = blocks.length;
+  const totalOps = blocks.length + notes.length;
+  const notePreview = notes.map(block => block.content.split('\n').find(Boolean)?.trim() || '').find(Boolean) || '';
+  const preview = tools.length > 0 ? tools.join(' \u00b7 ') : notePreview;
 
   return (
     <div className="rounded-md border border-fg-6 bg-panel overflow-hidden shadow-sm">
@@ -714,7 +797,7 @@ function ActivitySection({ blocks, notes, t }: { blocks: MessageBlock[]; notes: 
       >
         <span className="h-[7px] w-[7px] rounded-full bg-cyan-400/60 shrink-0" />
         <span className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-fg-5">{t('hub.activity')}</span>
-        <span className="flex-1 min-w-0 text-[11.5px] font-mono text-fg-4 truncate">{tools.join(' \u00b7 ')}</span>
+        <span className="flex-1 min-w-0 text-[11.5px] font-mono text-fg-4 truncate">{preview}</span>
         {totalOps > 0 && (
           <span className="rounded border border-fg-6 bg-inset px-1.5 py-0.5 text-[10px] font-mono text-fg-5">{totalOps}</span>
         )}
@@ -820,14 +903,34 @@ function lastNLines(text: string, n: number): string {
    Output — markdown
    ═══════════════════════════════════════════════════════════════ */
 function OutputBlock({ blocks }: { blocks: MessageBlock[] }) {
-  const text = blocks.map(b => b.content).filter(Boolean).join('\n\n');
-  if (!text.trim()) return null;
+  const textBlocks = blocks.filter(b => b.type === 'text');
+  const imageBlocks = blocks.filter(b => b.type === 'image');
+  const text = textBlocks.map(b => b.content).filter(Boolean).join('\n\n');
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  if (!text.trim() && imageBlocks.length === 0) return null;
   return (
-    <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-        {text}
-      </ReactMarkdown>
-    </div>
+    <>
+      {text.trim() && (
+        <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+            {text}
+          </ReactMarkdown>
+        </div>
+      )}
+      {imageBlocks.length > 0 && (
+        <div className="flex flex-wrap gap-2 mt-2">
+          {imageBlocks.map((img, i) => (
+            <img
+              key={i}
+              src={img.content}
+              className="max-w-[400px] max-h-[300px] rounded-md border border-fg-6/50 object-contain cursor-zoom-in hover:opacity-90 transition-opacity"
+              onClick={() => setLightboxSrc(img.content)}
+            />
+          ))}
+        </div>
+      )}
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
+    </>
   );
 }
 
@@ -1098,12 +1201,14 @@ const InputComposer = memo(function InputComposer({ session, workdir, onStreamQu
     addImageAttachments(files);
   }, [addImageAttachments]);
 
-  const currentAgent = agents.find(a => a.agent === session.agent);
+  const defaultAgentEntry = agents.find(a => a.isDefault);
+  const currentAgent = defaultAgentEntry || agents.find(a => a.agent === session.agent);
   const cascadeAgent = pendingAgent ? agents.find(a => a.agent === pendingAgent) : currentAgent;
   const models = cascadeAgent?.models || [];
-  const currentModel = session.model || currentAgent?.selectedModel || '';
+  const currentModel = currentAgent?.selectedModel || session.model || '';
   const currentEffort = currentAgent?.selectedEffort || '';
-  const effortLevels = EFFORT_OPTIONS[(pendingAgent || session.agent) as keyof typeof EFFORT_OPTIONS] || ['low', 'medium', 'high'];
+  const effectiveAgent = currentAgent?.agent || session.agent || '';
+  const effortLevels = EFFORT_OPTIONS[(pendingAgent || effectiveAgent) as keyof typeof EFFORT_OPTIONS] || ['low', 'medium', 'high'];
   const activePreview = previewImageId ? imageAttachments.find(item => item.id === previewImageId) || null : null;
   const canSend = (!!input.trim() || imageAttachments.length > 0) && !sending;
 
@@ -1126,7 +1231,7 @@ const InputComposer = memo(function InputComposer({ session, workdir, onStreamQu
   };
 
   // Build summary label for the cascade trigger
-  const displayAgent = pendingAgent || session.agent || '';
+  const displayAgent = pendingAgent || effectiveAgent;
   const displayMeta = getAgentMeta(displayAgent);
   const displayModel = pendingModel || currentModel;
   const displayEffort = pendingEffort || currentEffort;
@@ -1285,7 +1390,7 @@ const InputComposer = memo(function InputComposer({ session, workdir, onStreamQu
                   {cascadeStep === 'agent' && agents.filter(a => a.installed).map(a => {
                     const am = getAgentMeta(a.agent);
                     return (
-                      <CascadeItem key={a.agent} selected={a.agent === (pendingAgent || session.agent)} onClick={() => { setPendingAgent(a.agent); setCascadeStep('model'); }}>
+                      <CascadeItem key={a.agent} selected={a.agent === (pendingAgent || effectiveAgent)} onClick={() => { setPendingAgent(a.agent); setCascadeStep('model'); }}>
                         <BrandIcon brand={a.agent} size={14} />
                         <span style={{ color: am.color }}>{am.label}</span>
                       </CascadeItem>
@@ -1307,7 +1412,7 @@ const InputComposer = memo(function InputComposer({ session, workdir, onStreamQu
                   {cascadeStep === 'effort' && effortLevels.map(e => (
                     <CascadeItem key={e} selected={e === (pendingEffort || currentEffort)} onClick={() => {
                       setPendingEffort(e);
-                      const finalAgent = pendingAgent || session.agent || '';
+                      const finalAgent = pendingAgent || effectiveAgent;
                       const finalModel = pendingModel || currentModel;
                       void applyCascade(finalAgent, finalModel, e);
                     }}>

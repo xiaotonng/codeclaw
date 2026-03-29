@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Bot } from '../src/bot.ts';
-import { initializeProjectSkills, listSkills } from '../src/code-agent.ts';
+import { getProjectSkillPaths, initializeProjectSkills, listSkills } from '../src/code-agent.ts';
 import { getSkillsListData, resolveSkillPrompt } from '../src/bot-commands.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 
@@ -64,6 +64,12 @@ describe('project skills', () => {
           source: 'skills',
         },
       ]);
+
+      expect(getProjectSkillPaths(workdir, 'install')).toEqual({
+        sharedSkillFile: path.join(workdir, '.pikiclaw', 'skills', 'install', 'SKILL.md'),
+        claudeSkillFile: path.join(workdir, '.claude', 'skills', 'install', 'SKILL.md'),
+        agentsSkillFile: path.join(workdir, '.agents', 'skills', 'install', 'SKILL.md'),
+      });
 
       const resolved = resolveSkillPrompt(bot, 1, 'sk_install', 'ship it');
       expect(resolved).not.toBeNull();

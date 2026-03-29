@@ -264,11 +264,7 @@ class TelegramChannel extends Channel {
     editMessages: true,
     typingIndicators: true,
     commandMenu: true,
-    callbackActions: true,
     messageReactions: true,
-    fileUpload: true,
-    fileDownload: true,
-    threads: true,
   };
 
   private token: string;

@@ -17,8 +17,6 @@ export function hasConfiguredChannelToken(
         && config.weixinBotToken
         && config.weixinAccountId
       );
-    case 'whatsapp':
-      return !!tokenOverride;
   }
 }
 

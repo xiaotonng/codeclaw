@@ -11,12 +11,20 @@ import type { Agent, AgentDetectOptions } from './code-agent.js';
 import type { UserConfig } from './user-config.js';
 import type { SetupState } from './onboarding.js';
 import { loadUserConfig, resolveUserWorkdir } from './user-config.js';
-import { listAgents, normalizeClaudeModelId } from './code-agent.js';
+import { listAgents } from './code-agent.js';
 import { collectSetupState } from './onboarding.js';
 import { validateFeishuConfig, validateTelegramConfig, validateWeixinConfig } from './config-validation.js';
 import { shouldCacheChannelStates } from './channel-states.js';
 import { DASHBOARD_TIMEOUTS } from './constants.js';
 import { writeScopedLog, type LogLevel } from './logging.js';
+import {
+  DEFAULT_AGENT_EFFORTS,
+  DEFAULT_AGENT_MODELS,
+  resolveAgentEffort,
+  resolveAgentModel,
+  setAgentEffortEnv,
+  setAgentModelEnv,
+} from './runtime-config.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -127,16 +135,9 @@ class Runtime {
 
   readonly knownAgents = new Set<Agent>(['claude', 'codex', 'gemini']);
 
-  readonly defaultModels: Record<Agent, string> = {
-    claude: 'claude-opus-4-6',
-    codex: 'gpt-5.4',
-    gemini: 'gemini-3.1-pro-preview',
-  };
+  readonly defaultModels: Record<Agent, string> = DEFAULT_AGENT_MODELS;
 
-  readonly defaultEfforts: Partial<Record<Agent, string>> = {
-    claude: 'high',
-    codex: 'xhigh',
-  };
+  readonly defaultEfforts: Partial<Record<Agent, string>> = DEFAULT_AGENT_EFFORTS;
 
   // -- Bot ref management --
 
@@ -179,68 +180,23 @@ class Runtime {
     return this.isAgent(raw) ? raw : 'codex';
   }
 
-  private modelEnv(agent: Agent): string | undefined {
-    switch (agent) {
-      case 'claude': return process.env.CLAUDE_MODEL;
-      case 'codex': return process.env.CODEX_MODEL;
-      case 'gemini': return process.env.GEMINI_MODEL;
-    }
-  }
-
-  private effortEnv(agent: Agent): string | undefined {
-    switch (agent) {
-      case 'claude': return process.env.CLAUDE_REASONING_EFFORT;
-      case 'codex': return process.env.CODEX_REASONING_EFFORT;
-      case 'gemini': return undefined;
-    }
-  }
-
-  private configModel(config: Partial<UserConfig>, agent: Agent): string | undefined {
-    switch (agent) {
-      case 'claude': return normalizeClaudeModelId(config.claudeModel || '') || undefined;
-      case 'codex': return String(config.codexModel || '').trim() || undefined;
-      case 'gemini': return String(config.geminiModel || '').trim() || undefined;
-    }
-  }
-
-  private configEffort(config: Partial<UserConfig>, agent: Agent): string | undefined {
-    switch (agent) {
-      case 'claude': return String(config.claudeReasoningEffort || '').trim().toLowerCase() || undefined;
-      case 'codex': return String(config.codexReasoningEffort || '').trim().toLowerCase() || undefined;
-      case 'gemini': return undefined;
-    }
-  }
-
   setModelEnv(agent: Agent, value: string): void {
-    switch (agent) {
-      case 'claude': process.env.CLAUDE_MODEL = value; break;
-      case 'codex': process.env.CODEX_MODEL = value; break;
-      case 'gemini': process.env.GEMINI_MODEL = value; break;
-    }
+    setAgentModelEnv(agent, value);
   }
 
   setEffortEnv(agent: Agent, value: string): void {
-    switch (agent) {
-      case 'claude': process.env.CLAUDE_REASONING_EFFORT = value; break;
-      case 'codex': process.env.CODEX_REASONING_EFFORT = value; break;
-      case 'gemini': break;
-    }
+    setAgentEffortEnv(agent, value);
   }
 
   getRuntimeModel(agent: Agent, config = loadUserConfig()): string {
     if (this.botRef) return this.botRef.modelForAgent(agent) || this.defaultModels[agent];
-    const value = String(
-      this.runtimePrefs.models[agent] || this.configModel(config, agent) || this.modelEnv(agent) || this.defaultModels[agent],
-    ).trim();
-    return agent === 'claude' ? normalizeClaudeModelId(value) : value;
+    return String(this.runtimePrefs.models[agent] || resolveAgentModel(config, agent)).trim();
   }
 
   getRuntimeEffort(agent: Agent, config = loadUserConfig()): string | null {
     if (agent === 'gemini') return null;
     if (this.botRef) return this.botRef.effortForAgent(agent);
-    const value = String(
-      this.runtimePrefs.efforts[agent] || this.configEffort(config, agent) || this.effortEnv(agent) || this.defaultEfforts[agent] || '',
-    ).trim().toLowerCase();
+    const value = String(this.runtimePrefs.efforts[agent] || resolveAgentEffort(config, agent) || '').trim().toLowerCase();
     return value || null;
   }
 

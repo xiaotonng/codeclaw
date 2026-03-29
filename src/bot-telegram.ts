@@ -2,8 +2,8 @@
  * bot-telegram.ts - Telegram bot orchestration: commands, callbacks, artifacts, lifecycle.
  *
  * Rendering, workdir browsing, and live preview state live in dedicated helper modules.
- * For a new IM (Lark, WhatsApp, ...), create a parallel bot-lark.ts / bot-whatsapp.ts
- * that extends Bot and composes channel-specific renderer/view helpers.
+ * New IM integrations should stay parallel to this file and compose shared runtime helpers
+ * instead of growing a single multi-platform bot entrypoint.
  */
 
 import os from 'node:os';

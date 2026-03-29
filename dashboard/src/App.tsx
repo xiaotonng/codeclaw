@@ -1,18 +1,25 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Suspense, lazy, useState, useEffect, useCallback, useMemo } from 'react';
 import { Routes, Route, useLocation } from 'react-router-dom';
 import { useStore } from './store';
 import { createT } from './i18n';
 import { Sidebar } from './components/Sidebar';
-import AgentTab from './components/tabs/AgentTab';
-import { IMAccessTab } from './components/tabs/IMAccessTab';
-import { PermissionsTab } from './components/tabs/PermissionsTab';
-import { ExtensionsTab } from './components/tabs/ExtensionsTab';
-import { SystemTab } from './components/tabs/SystemTab';
-import { SessionsTab } from './components/SessionsTab';
-import { TelegramModal, FeishuModal, WeixinModal, WorkdirModal, BrowserSetupModal, DesktopSetupModal } from './components/Modals';
-import { Toasts } from './components/ui';
+import { Spinner, Toasts } from './components/ui';
 import { api } from './api';
 import { getDashboardTabMeta, type DashboardTab } from './tabs';
+import { cn } from './utils';
+
+const SessionsTab = lazy(async () => ({ default: (await import('./components/SessionsTab')).SessionsTab }));
+const AgentTab = lazy(() => import('./components/tabs/AgentTab'));
+const IMAccessTab = lazy(async () => ({ default: (await import('./components/tabs/IMAccessTab')).IMAccessTab }));
+const PermissionsTab = lazy(async () => ({ default: (await import('./components/tabs/PermissionsTab')).PermissionsTab }));
+const ExtensionsTab = lazy(async () => ({ default: (await import('./components/tabs/ExtensionsTab')).ExtensionsTab }));
+const SystemTab = lazy(async () => ({ default: (await import('./components/tabs/SystemTab')).SystemTab }));
+const TelegramModal = lazy(async () => ({ default: (await import('./components/Modals')).TelegramModal }));
+const FeishuModal = lazy(async () => ({ default: (await import('./components/Modals')).FeishuModal }));
+const WeixinModal = lazy(async () => ({ default: (await import('./components/Modals')).WeixinModal }));
+const WorkdirModal = lazy(async () => ({ default: (await import('./components/Modals')).WorkdirModal }));
+const BrowserSetupModal = lazy(async () => ({ default: (await import('./components/Modals')).BrowserSetupModal }));
+const DesktopSetupModal = lazy(async () => ({ default: (await import('./components/Modals')).DesktopSetupModal }));
 
 type ModalState =
   | null
@@ -51,6 +58,17 @@ function PageWrapper({ title, description, children }: { title: string; descript
   );
 }
 
+function RouteFallback() {
+  return (
+    <div className="flex h-full items-center justify-center">
+      <div className="flex items-center gap-2 text-sm text-fg-4">
+        <Spinner />
+        Loading...
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   // Granular selectors -- each subscription triggers re-render only when its slice changes.
   // Actions (toast, reload) are stable refs and never cause re-renders.
@@ -62,6 +80,7 @@ export function App() {
 
   const location = useLocation();
   const tab = locationToTab(location.pathname);
+  const [sessionsTabReady, setSessionsTabReady] = useState(tab === 'sessions');
 
   const t = useMemo(() => createT(locale), [locale]);
   const [modal, setModal] = useState<ModalState>(null);
@@ -70,6 +89,10 @@ export function App() {
   const version = state?.version || '...';
 
   const [prompted, setPrompted] = useState(false);
+  useEffect(() => {
+    if (tab === 'sessions') setSessionsTabReady(true);
+  }, [tab]);
+
   useEffect(() => {
     if (
       state
@@ -126,47 +149,65 @@ export function App() {
         />
 
         <main className="flex-1 overflow-hidden">
-          <Routes>
-            <Route path="/" element={<SessionsTab />} />
-            <Route path="/im" element={
-              <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                <IMAccessTab
-                  onOpenWeixin={() => setModal({ type: 'weixin' })}
-                  onOpenTelegram={() => setModal({ type: 'telegram' })}
-                  onOpenFeishu={() => setModal({ type: 'feishu' })}
-                />
-              </PageWrapper>
-            } />
-            <Route path="/agents" element={
-              <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                <AgentTab />
-              </PageWrapper>
-            } />
-            <Route path="/permissions" element={
-              <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                <PermissionsTab />
-              </PageWrapper>
-            } />
-            <Route path="/extensions" element={
-              <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} onOpenDesktopSetup={() => setModal({ type: 'desktop-setup' })} />
-              </PageWrapper>
-            } />
-            <Route path="/system" element={
-              <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                <SystemTab onOpenWorkdir={() => setModal({ type: 'workdir' })} />
-              </PageWrapper>
-            } />
-          </Routes>
+          {sessionsTabReady && (
+            <Suspense fallback={<RouteFallback />}>
+              <div
+                className={cn('h-full', tab !== 'sessions' && 'hidden')}
+                aria-hidden={tab !== 'sessions'}
+              >
+                <SessionsTab active={tab === 'sessions'} />
+              </div>
+            </Suspense>
+          )}
+
+          {tab !== 'sessions' && (
+            <Suspense fallback={<RouteFallback />}>
+              <Routes>
+                <Route path="/im" element={
+                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                    <IMAccessTab
+                      onOpenWeixin={() => setModal({ type: 'weixin' })}
+                      onOpenTelegram={() => setModal({ type: 'telegram' })}
+                      onOpenFeishu={() => setModal({ type: 'feishu' })}
+                    />
+                  </PageWrapper>
+                } />
+                <Route path="/agents" element={
+                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                    <AgentTab />
+                  </PageWrapper>
+                } />
+                <Route path="/permissions" element={
+                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                    <PermissionsTab />
+                  </PageWrapper>
+                } />
+                <Route path="/extensions" element={
+                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                    <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} onOpenDesktopSetup={() => setModal({ type: 'desktop-setup' })} />
+                  </PageWrapper>
+                } />
+                <Route path="/system" element={
+                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                    <SystemTab onOpenWorkdir={() => setModal({ type: 'workdir' })} />
+                  </PageWrapper>
+                } />
+              </Routes>
+            </Suspense>
+          )}
         </main>
       </div>
 
-      <WeixinModal open={modal?.type === 'weixin'} onClose={closeModal} />
-      <TelegramModal open={modal?.type === 'telegram'} onClose={closeModal} />
-      <FeishuModal open={modal?.type === 'feishu'} onClose={closeModal} />
-      <BrowserSetupModal open={modal?.type === 'browser-setup'} onClose={closeModal} onSaved={() => reload()} />
-      <DesktopSetupModal open={modal?.type === 'desktop-setup'} onClose={closeModal} onSaved={() => reload()} />
-      <WorkdirModal open={modal?.type === 'workdir'} onClose={closeModal} />
+      {modal && (
+        <Suspense fallback={null}>
+          {modal.type === 'weixin' && <WeixinModal open onClose={closeModal} />}
+          {modal.type === 'telegram' && <TelegramModal open onClose={closeModal} />}
+          {modal.type === 'feishu' && <FeishuModal open onClose={closeModal} />}
+          {modal.type === 'browser-setup' && <BrowserSetupModal open onClose={closeModal} onSaved={() => reload()} />}
+          {modal.type === 'desktop-setup' && <DesktopSetupModal open onClose={closeModal} onSaved={() => reload()} />}
+          {modal.type === 'workdir' && <WorkdirModal open onClose={closeModal} />}
+        </Suspense>
+      )}
       <Toasts items={toasts} />
     </div>
   );

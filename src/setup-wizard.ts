@@ -5,7 +5,7 @@ import { buildSetupGuide, collectSetupState, type SetupState } from './onboardin
 import { getUserConfigPath, saveUserConfig } from './user-config.js';
 import { VALIDATION_TIMEOUTS } from './constants.js';
 
-type Channel = 'telegram' | 'feishu' | 'weixin' | 'whatsapp';
+type Channel = 'telegram' | 'feishu' | 'weixin';
 
 export interface TelegramBotIdentity {
   id: number;

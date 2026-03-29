@@ -9,7 +9,7 @@ import { Hono } from 'hono';
 import { spawn } from 'node:child_process';
 import { getAgentInstallCommand, getAgentLabel, getAgentPackage } from '../agent-npm.js';
 import { loadUserConfig, saveUserConfig, applyUserConfig, type UserConfig } from '../user-config.js';
-import { listAgents, listModels, normalizeClaudeModelId, type AgentDetectOptions, type UsageResult } from '../code-agent.js';
+import { listAgents, listModels, type AgentDetectOptions, type UsageResult } from '../code-agent.js';
 import type { Agent } from '../code-agent.js';
 import { getDriver } from '../agent-driver.js';
 import { DASHBOARD_TIMEOUTS } from '../constants.js';

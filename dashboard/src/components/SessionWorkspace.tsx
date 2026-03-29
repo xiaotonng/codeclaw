@@ -1,14 +1,15 @@
-import { useState, useEffect, useCallback, useRef, memo, useMemo } from 'react';
+import { Suspense, lazy, useState, useEffect, useCallback, useRef, memo, useMemo } from 'react';
 import { useStore } from '../store';
 import { createT } from '../i18n';
 import { api } from '../api';
-import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, shouldPollSessionStreamState, sessionListDisplayText } from '../utils';
+import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, shouldPollSessionStreamState, sessionListContextText, sessionListDisplayText } from '../utils';
 import { Badge, Dot, Spinner, Modal, ModalHeader, Button, Select, IconPicker } from './ui';
 import { BrandIcon } from './BrandIcon';
 import { DirBrowser } from './DirBrowser';
 import { PlanProgressCard, hasPlan } from './PlanProgressCard';
-import { SessionPanel } from './SessionPanel';
 import type { SessionInfo, WorkspaceEntry, DirEntry, StreamPlan, OpenTarget } from '../types';
+
+const SessionPanel = lazy(async () => ({ default: (await import('./SessionPanel')).SessionPanel }));
 
 /* ── Constants ── */
 const PAGE_SIZE = 5;
@@ -48,7 +49,11 @@ function targetLabelKey(target: OpenTarget) {
 /* ══════════════════════════════════════════════════════
    Main Three-Column Layout
    ══════════════════════════════════════════════════════ */
-export const SessionWorkspace = memo(function SessionWorkspace() {
+export const SessionWorkspace = memo(function SessionWorkspace({
+  active = true,
+}: {
+  active?: boolean;
+}) {
   // Granular selectors — only re-render when locale or runtimeWorkdir changes.
   // Store-level changes (toasts, host, tab, theme) do NOT trigger re-render here.
   const locale = useStore(s => s.locale);
@@ -105,13 +110,16 @@ export const SessionWorkspace = memo(function SessionWorkspace() {
   }, []);
 
   useEffect(() => {
+    if (!active) return;
     for (const ws of workspaces) {
-      if (!sessionsMap[ws.path] && !loadingMap[ws.path]) loadSessionsForWorkspace(ws.path);
+      if (!sessionsMap[ws.path] && !loadingMap[ws.path]) {
+        void loadSessionsForWorkspace(ws.path);
+      }
     }
-  }, [workspaces]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [active, loadSessionsForWorkspace, loadingMap, sessionsMap, workspaces]);
 
   useEffect(() => {
-    if (!initializedRef.current || workspaces.length === 0) return;
+    if (!active || !initializedRef.current || workspaces.length === 0) return;
     const tick = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       for (const ws of workspaces) {
@@ -120,7 +128,34 @@ export const SessionWorkspace = memo(function SessionWorkspace() {
     };
     const id = setInterval(tick, SIDEBAR_POLL_MS);
     return () => clearInterval(id);
-  }, [workspaces, loadSessionsForWorkspace]);
+  }, [active, workspaces, loadSessionsForWorkspace]);
+
+  useEffect(() => {
+    if (!active || !initializedRef.current || workspaces.length === 0) return;
+
+    const refreshVisibleWorkspaces = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      for (const ws of workspaces) {
+        void loadSessionsForWorkspace(ws.path, { background: true });
+      }
+    };
+
+    refreshVisibleWorkspaces();
+
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+
+    const handleVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      refreshVisibleWorkspaces();
+    };
+
+    document.addEventListener('visibilitychange', handleVisible);
+    window.addEventListener('focus', handleVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisible);
+      window.removeEventListener('focus', handleVisible);
+    };
+  }, [active, loadSessionsForWorkspace, workspaces]);
 
   /* ── Add / remove workspace — stable callbacks ── */
   const handleAddWorkspace = useCallback(async (wsPath: string) => {
@@ -270,11 +305,23 @@ export const SessionWorkspace = memo(function SessionWorkspace() {
             </div>
           </div>
         ) : (
-          <SessionPanel
-            key={sKey(selectedSession.agent, selectedSession.sessionId)}
-            session={selectedSessionInfo}
-            workdir={selectedSession.workdir}
-          />
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center">
+                <div className="flex items-center gap-2 text-sm text-fg-4">
+                  <Spinner />
+                  Loading session...
+                </div>
+              </div>
+            }
+          >
+            <SessionPanel
+              key={sKey(selectedSession.agent, selectedSession.sessionId)}
+              session={selectedSessionInfo}
+              workdir={selectedSession.workdir}
+              active={active}
+            />
+          </Suspense>
         )}
       </div>
 
@@ -282,6 +329,7 @@ export const SessionWorkspace = memo(function SessionWorkspace() {
       <RightPanel
         session={selectedSessionInfo}
         workdir={selectedSession?.workdir || ''}
+        active={active}
         t={t}
       />
 
@@ -476,6 +524,7 @@ const SessionCard = memo(function SessionCard({
   const meta = getAgentMeta(session.agent || '');
   const displayState = sessionDisplayState(session);
   const displayText = sessionListDisplayText(session).slice(0, 500) || session.sessionId.slice(0, 16);
+  const contextText = sessionListContextText(session, displayText).slice(0, 500);
   const modelShort = session.model ? shortenModel(session.model) : null;
 
   return (
@@ -515,6 +564,11 @@ const SessionCard = memo(function SessionCard({
         />
         <span className="truncate text-[12px] leading-snug text-fg-2">{displayText}</span>
       </div>
+      {contextText && (
+        <div className="mt-0.5 pl-[11px]">
+          <span className="block truncate text-[10px] leading-snug text-fg-5">{contextText}</span>
+        </div>
+      )}
     </button>
   );
 });
@@ -600,10 +654,12 @@ function sessionNextActionText(session: SessionInfo, displayState: 'running' | '
 const RightPanel = memo(function RightPanel({
   session,
   workdir,
+  active,
   t,
 }: {
   session: SessionInfo | null | undefined;
   workdir: string;
+  active: boolean;
   t: (key: string) => string;
 }) {
   const hostApp = useStore(s => s.state?.hostApp ?? null);
@@ -632,11 +688,11 @@ const RightPanel = memo(function RightPanel({
   }, [hostApp, platform]);
 
   useEffect(() => {
-    if (!session) {
+    if (!active || !session) {
       setStreamState(null);
       return;
     }
-    let active = true;
+    let mounted = true;
     let prevPhase: 'queued' | 'streaming' | 'done' | null = null;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -654,7 +710,7 @@ const RightPanel = memo(function RightPanel({
     const poll = async () => {
       try {
         const res = await api.getSessionStreamState(session.agent || '', session.sessionId);
-        if (!active) return;
+        if (!mounted) return;
         const phase = res.state?.phase ?? null;
         setStreamState(res.state ? {
           phase: res.state.phase,
@@ -671,10 +727,10 @@ const RightPanel = memo(function RightPanel({
     void poll();
     if (shouldPollSessionStreamState(displayState, false, null, null)) ensurePolling();
     return () => {
-      active = false;
+      mounted = false;
       stopPolling();
     };
-  }, [displayState, session, sessionAgent, sessionId]);
+  }, [active, displayState, session, sessionAgent, sessionId]);
 
   const openTargetOptions = (platform === 'darwin'
     ? ['vscode', 'finder']

@@ -21,8 +21,8 @@ import {
   type SendOpts,
   sleep,
 } from './channel-base.js';
-import { adaptMarkdownForFeishu } from './bot-feishu-render.js';
 import { FEISHU_LIMITS } from './constants.js';
+import { adaptMarkdownForFeishu } from './feishu-markdown.js';
 import { writeScopedLog, type LogLevel } from './logging.js';
 
 export { FeishuChannel };
@@ -316,13 +316,8 @@ class FeishuChannel extends Channel {
   override readonly capabilities = {
     ...DEFAULT_CHANNEL_CAPABILITIES,
     editMessages: true,
-    typingIndicators: false,
     commandMenu: true,
-    callbackActions: true,
     messageReactions: true,
-    fileUpload: true,
-    fileDownload: true,
-    threads: false,
   };
 
   private appId: string;

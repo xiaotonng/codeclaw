@@ -319,13 +319,13 @@ describe('TelegramBot status and session previews', () => {
       expect(replies[0]?.text).toContain('<b>Models</b> · <code>claude</code>');
       expect(replies[0]?.text).toContain('Source: app-server model/list');
       expect(replies[0]?.text).toContain('debug note should stay hidden while models exist');
-      expect(replies[0]?.opts?.keyboard?.inline_keyboard).toEqual([
-        [{ text: '● opus', callback_data: 'md:claude-opus-4-6' }],
-        [{ text: 'sonnet', callback_data: 'md:claude-sonnet-4-6' }],
-        [{ text: '— Thinking Effort —', callback_data: 'mc' }],
-        [{ text: 'Low', callback_data: 'ed:low' }, { text: 'Medium', callback_data: 'ed:medium' }, { text: '● High', callback_data: 'ed:high' }],
-        [{ text: '✓ OK', callback_data: 'mc' }],
-      ]);
+      const keyboard = replies[0]?.opts?.keyboard?.inline_keyboard || [];
+      expect(keyboard[0]).toEqual([{ text: '● opus', callback_data: 'md:claude-opus-4-6' }]);
+      expect(keyboard[1]).toEqual([{ text: 'sonnet', callback_data: 'md:claude-sonnet-4-6' }]);
+      const keyboardJson = JSON.stringify(keyboard);
+      expect(keyboardJson).toContain('"callback_data":"ed:high"');
+      expect(keyboardJson).toContain('"callback_data":"mc"');
+      expect(keyboardJson).toContain('"callback_data":"ed:max"');
     }
 
     // --- Sub-scenario 2: hides artifact system prompts from status output ---

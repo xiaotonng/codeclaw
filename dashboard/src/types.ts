@@ -50,7 +50,7 @@ export interface AgentStatusResponse {
 export type ChannelStatus = 'ready' | 'missing' | 'invalid' | 'error' | 'checking';
 
 export interface ChannelSetupState {
-  channel: 'telegram' | 'feishu' | 'weixin' | 'whatsapp';
+  channel: 'telegram' | 'feishu' | 'weixin';
   configured: boolean;
   ready: boolean;
   validated: boolean;
@@ -244,10 +244,12 @@ export interface SessionMessage {
 }
 
 export interface MessageBlock {
-  type: 'text' | 'thinking' | 'tool_use' | 'tool_result';
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | 'plan';
   content: string;
   toolName?: string;
   toolId?: string;
+  phase?: 'commentary' | 'final_answer';
+  plan?: StreamPlan | null;
 }
 
 export interface RichMessage {

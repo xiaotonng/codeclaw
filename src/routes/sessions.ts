@@ -10,8 +10,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadUserConfig } from '../user-config.js';
-import { listAgents, type Agent, type SessionInfo, type StreamPreviewPlan } from '../code-agent.js';
+import { listAgents, type Agent, type SessionInfo } from '../code-agent.js';
 import { getSessionStatusForBot } from '../session-status.js';
+import {
+  cancelSessionTask,
+  getSessionStreamState,
+  queueDashboardSessionTask,
+  steerSessionTask,
+} from '../session-control.js';
 import {
   querySessions, querySessionTail, querySessionMessages,
   getWorkspaceOverviews,
@@ -498,61 +504,23 @@ app.post('/api/session-hub/import', async (c) => {
 app.post('/api/session-hub/session/send', async (c) => {
   try {
     const { workdir, agent, sessionId, prompt, attachments, cleanup } = await parseSessionSendRequest(c);
-    if (!workdir || !agent || !sessionId || (!prompt && attachments.length === 0)) {
-      await cleanup();
-      return c.json({ ok: false, error: 'workdir, agent, sessionId, and either prompt or attachments are required' }, 400);
+    const queued = queueDashboardSessionTask({
+      workdir,
+      agent: agent as Agent,
+      sessionId,
+      prompt,
+      attachments,
+    });
+    await cleanup();
+    if (!queued.ok) {
+      const status = queued.error === 'Bot is not running' ? 503 : 400;
+      return c.json(queued, status);
     }
-    const bot = runtime.getBotRef();
-    if (!bot) {
-      await cleanup();
-      return c.json({ ok: false, error: 'Bot is not running' }, 503);
-    }
-    if (typeof (bot as any).queueSessionTask !== 'function') {
-      await cleanup();
-      return c.json({ ok: false, error: 'Bot task queue is unavailable' }, 500);
-    }
-    const taskId = `dash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const sessionKey = `${agent}:${sessionId}`;
-    const effectivePrompt = prompt || 'Please inspect the attached image(s).';
-
-    // Properly register session runtime via bot's upsertSessionRuntime
-    const session = (bot as any).upsertSessionRuntime?.({
-      agent, sessionId, workdir, workspacePath: null, modelId: null,
-    }) || {
-      key: sessionKey, agent, sessionId, workdir,
-      workspacePath: null, threadId: null, codexCumulative: undefined, modelId: null,
-      runningTaskIds: new Set<string>(),
-    };
-
     runtime.debug(
-      `[session-send] queuing task=${taskId} session=${sessionKey} attachments=${attachments.length} ` +
+      `[session-send] queued task=${queued.taskId} session=${queued.sessionKey} attachments=${attachments.length} ` +
       `prompt="${(prompt || '[attachments only]').slice(0, 80)}"`,
     );
-
-    // Emit 'queued' event
-    bot.emitStream(sessionKey, { type: 'queued', taskId, position: 0 });
-
-    // Queue a stream run and pipe onText to SSE listeners
-    // NOTE: must call as a method on bot to preserve `this` binding
-    void (bot as any).queueSessionTask(session, async () => {
-      bot.emitStream(sessionKey, { type: 'start', taskId, agent, sessionId });
-      try {
-        const result = await bot.runStream(
-          effectivePrompt, session, attachments,
-          (text: string, thinking: string, activity?: string, _meta?: unknown, plan?: StreamPreviewPlan | null) => {
-            bot.emitStream(sessionKey, { type: 'text', text, thinking, activity, plan });
-          },
-        );
-        bot.emitStream(sessionKey, { type: 'done', taskId, sessionId: result.sessionId || sessionId });
-      } catch (e: any) {
-        runtime.warn(`[session-send] stream error: ${e.message}`);
-        bot.emitStream(sessionKey, { type: 'done', taskId, sessionId, error: e.message });
-      } finally {
-        await cleanup();
-      }
-    });
-
-    return c.json({ ok: true, queued: true, taskId, sessionKey });
+    return c.json(queued);
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
   }
@@ -565,13 +533,7 @@ app.get('/api/session-hub/session/stream-state', (c) => {
   if (!agent || !sessionId) {
     return c.json({ ok: false, error: 'agent and sessionId query params required' }, 400);
   }
-  const bot = runtime.getBotRef();
-  if (!bot) {
-    return c.json({ ok: true, state: null });
-  }
-  const sessionKey = `${agent}:${sessionId}`;
-  const state = bot.getStreamSnapshot(sessionKey);
-  return c.json({ ok: true, state });
+  return c.json(getSessionStreamState(agent, sessionId));
 });
 
 app.post('/api/session-hub/session/recall', async (c) => {
@@ -581,12 +543,8 @@ app.post('/api/session-hub/session/recall', async (c) => {
     if (!taskId) {
       return c.json({ ok: false, error: 'taskId is required' }, 400);
     }
-    const bot = runtime.getBotRef();
-    if (!bot) {
-      return c.json({ ok: false, error: 'Bot is not running' }, 503);
-    }
-    const recalled = (bot as any).cancelQueuedTask?.(taskId) ?? false;
-    return c.json({ ok: true, recalled });
+    const result = cancelSessionTask(taskId);
+    return c.json(result, result.ok ? 200 : 503);
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
   }
@@ -599,12 +557,8 @@ app.post('/api/session-hub/session/steer', async (c) => {
     if (!taskId) {
       return c.json({ ok: false, error: 'taskId is required' }, 400);
     }
-    const bot = runtime.getBotRef();
-    if (!bot) {
-      return c.json({ ok: false, error: 'Bot is not running' }, 503);
-    }
-    const steered = (bot as any).steerTaskByActionId?.(taskId) ?? false;
-    return c.json({ ok: true, steered: !!steered });
+    const result = await steerSessionTask(taskId);
+    return c.json(result, result.ok ? 200 : 503);
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
   }

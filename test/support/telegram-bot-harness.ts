@@ -30,11 +30,7 @@ export function createTelegramBotHarness(): TelegramBotHarness {
       editMessages: true,
       typingIndicators: true,
       commandMenu: true,
-      callbackActions: true,
       messageReactions: true,
-      fileUpload: true,
-      fileDownload: true,
-      threads: true,
     },
     editMessage: vi.fn(async (_chatId: number, _msgId: number, text: string, opts?: any) => {
       edits.push({ text, opts });

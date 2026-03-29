@@ -12,7 +12,7 @@ src/
   bot.ts                        Shared bot base: config, sessions, runStream(), keep-alive
   bot-commands.ts               Channel-agnostic command data
   bot-command-ui.ts             Shared command selection model + action executor
-  bot-handler.ts                Generic message pipeline with live preview + MCP hook
+  bot-orchestration.ts          Shared session/message orchestration helpers
   bot-menu.ts                   Menu command definitions and skill command mapping
   bot-streaming.ts              Stream preview parsing helpers
   human-loop.ts                 Shared human-loop prompt state and answer helpers
@@ -25,6 +25,7 @@ src/
 
   bot-feishu.ts                 Feishu orchestration
   bot-feishu-render.ts          Feishu rendering helpers
+  feishu-markdown.ts            Shared Feishu markdown adaptation helpers
 
   channel-base.ts               Transport abstraction and capability flags
   channel-telegram.ts           Telegram transport
@@ -32,6 +33,7 @@ src/
 
   agent-driver.ts               AgentDriver interface + registry
   code-agent.ts                 Shared agent layer and session workspace management
+  project-skills.ts             Project skill discovery and legacy skill migration
   driver-claude.ts              Claude Code driver
   driver-codex.ts               Codex CLI driver
   driver-gemini.ts              Gemini CLI driver
@@ -46,8 +48,10 @@ src/
   dashboard.ts                  Web dashboard server and API
   dashboard-ui.ts               Bundled dashboard frontend
   session-status.ts             Runtime session status helpers
+  session-control.ts            Public session task control surface for dashboard/routes
   channel-states.ts             Channel validation caching
   config-validation.ts          Telegram / Feishu credential checks
+  runtime-config.ts             Shared agent/model/effort resolution
 
   process-control.ts            Restart, watchdog, process tree termination
   user-config.ts                ~/.pikiclaw/setting.json load/save/sync
@@ -76,7 +80,7 @@ Channel Bot Layer
   bot-telegram.ts / bot-feishu.ts
     ├ commands -> bot-commands.ts + renderer
     ├ callbacks -> bot-command-ui.ts
-    └ messages -> bot-handler.ts pipeline
+    └ streaming/session lifecycle -> bot-orchestration.ts + shared helpers
 
 Transport Layer
   channel-telegram.ts / channel-feishu.ts
@@ -107,7 +111,8 @@ Business logic lives in shared modules:
 - `bot.ts` owns runtime state
 - `bot-commands.ts` returns structured command data
 - `bot-command-ui.ts` builds shared selection UIs for sessions, agents, models, and skills
-- `bot-handler.ts` runs the generic message lifecycle
+- `bot-orchestration.ts` owns shared session/message orchestration primitives
+- `runtime-config.ts` centralizes model and reasoning-effort resolution
 
 Telegram and Feishu mostly differ in:
 
@@ -122,7 +127,6 @@ This keeps new IM integrations thin.
 
 `agent-driver.ts` exposes a small `AgentDriver` interface:
 
-- `detect()`
 - `doStream()`
 - `getSessions()`
 - `getSessionTail()`
@@ -132,13 +136,15 @@ This keeps new IM integrations thin.
 
 `code-agent.ts` imports all drivers for side effects, and all higher-level bot code talks to the registry instead of talking to a specific CLI directly.
 
+Binary detection stays in the shared agent layer, while driver modules stay focused on stream/session behavior.
+
 ### 3. Session workspaces are first-class
 
 Each conversation runs against a pikiclaw-managed session workspace. That workspace is used for:
 
 - staged attachments
 - session metadata and indexes
-- project skill discovery
+- project skill discovery via `project-skills.ts`
 - MCP tool visibility
 
 This is why file return, project skills, and per-session tool visibility can work consistently across agents.

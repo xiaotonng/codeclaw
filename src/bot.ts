@@ -14,7 +14,7 @@ import {
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
   type CodexInteractionRequest, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
-  type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId, normalizeClaudeModelId,
+  type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
   type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult,
 } from './code-agent.js';
 import {
@@ -31,6 +31,10 @@ import {
   isHumanLoopAwaitingText, setHumanLoopOption, setHumanLoopText, skipHumanLoopQuestion,
 } from './human-loop.js';
 import { writeScopedLog, type LogLevel } from './logging.js';
+import {
+  resolveAgentEffort,
+  resolveAgentModel,
+} from './runtime-config.js';
 
 export { updateSession, type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult, type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult, type SessionQueryResult };
 import { BOT_TIMEOUTS } from './constants.js';
@@ -224,24 +228,6 @@ function buildBrowserAutomationPrompt(browserEnabled: boolean): string {
     'Do not call browser_install unless a browser tool explicitly reports that Chrome or the browser is missing.',
     'If you need a new tab, use browser_tabs with action="new".',
   ].join('\n');
-}
-
-function configModelValue(config: Record<string, any>, agent: Agent): string {
-  switch (agent) {
-    case 'claude': return normalizeClaudeModelId(config.claudeModel || process.env.CLAUDE_MODEL || 'claude-opus-4-6');
-    case 'codex': return String(config.codexModel || process.env.CODEX_MODEL || 'gpt-5.4').trim();
-    case 'gemini': return String(config.geminiModel || process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview').trim();
-  }
-  return '';
-}
-
-function configReasoningEffortValue(config: Record<string, any>, agent: Agent): string | null {
-  switch (agent) {
-    case 'claude': return String(config.claudeReasoningEffort || process.env.CLAUDE_REASONING_EFFORT || 'high').trim().toLowerCase() || 'high';
-    case 'codex': return String(config.codexReasoningEffort || process.env.CODEX_REASONING_EFFORT || 'xhigh').trim().toLowerCase() || 'xhigh';
-    case 'gemini': return null;
-  }
-  return null;
 }
 
 interface HostBatteryData {
@@ -530,6 +516,30 @@ export interface ActiveHumanLoopPrompt {
   result: Promise<Record<string, any> | null>;
 }
 
+export interface SubmitSessionTaskOpts {
+  agent: Agent;
+  sessionId: string;
+  workdir: string;
+  prompt: string;
+  attachments?: string[];
+  sourceMessageId?: number | string;
+  chatId?: ChatId;
+  onText?: (
+    text: string,
+    thinking: string,
+    activity?: string,
+    meta?: StreamPreviewMeta,
+    plan?: StreamPreviewPlan | null,
+  ) => void;
+}
+
+export interface SubmittedSessionTask {
+  ok: true;
+  taskId: string;
+  sessionKey: string;
+  queued: true;
+}
+
 // ---------------------------------------------------------------------------
 // Bot
 // ---------------------------------------------------------------------------
@@ -608,6 +618,9 @@ export class Bot {
           phase: 'done',
           taskId: event.taskId,
           sessionId: event.sessionId,
+          text: prev?.text || '',
+          thinking: prev?.thinking || '',
+          activity: prev?.activity || '',
           error: event.error,
           plan: prev?.plan ?? null,
           updatedAt: now,
@@ -646,19 +659,19 @@ export class Bot {
     // Initialize per-agent configs
     this.agentConfigs = {
       codex: {
-        model: configModelValue(config, 'codex'),
-        reasoningEffort: configReasoningEffortValue(config, 'codex') || 'xhigh',
+        model: resolveAgentModel(config, 'codex'),
+        reasoningEffort: resolveAgentEffort(config, 'codex') || 'xhigh',
         fullAccess: envBool('CODEX_FULL_ACCESS', true),
         extraArgs: shellSplit(process.env.CODEX_EXTRA_ARGS || ''),
       },
       claude: {
-        model: configModelValue(config, 'claude'),
-        reasoningEffort: configReasoningEffortValue(config, 'claude') || 'high',
+        model: resolveAgentModel(config, 'claude'),
+        reasoningEffort: resolveAgentEffort(config, 'claude') || 'high',
         permissionMode: (process.env.CLAUDE_PERMISSION_MODE || 'bypassPermissions').trim(),
         extraArgs: shellSplit(process.env.CLAUDE_EXTRA_ARGS || ''),
       },
       gemini: {
-        model: configModelValue(config, 'gemini'),
+        model: resolveAgentModel(config, 'gemini'),
         approvalMode: envString('GEMINI_APPROVAL_MODE', 'yolo'),
         sandbox: envBool('GEMINI_SANDBOX', false),
         extraArgs: shellSplit(process.env.GEMINI_EXTRA_ARGS || ''),
@@ -834,6 +847,86 @@ export class Bot {
       if (cs.activeSessionKey !== session.key) continue;
       this.applySessionSelection(cs, session);
     }
+  }
+
+  protected moveSessionStreamSnapshot(previousKey: string, nextKey: string) {
+    if (!previousKey || !nextKey || previousKey === nextKey) return;
+
+    const previousSnapshot = this.streamSnapshots.get(previousKey) || null;
+    const nextSnapshot = this.streamSnapshots.get(nextKey) || null;
+    const mergedSnapshot = previousSnapshot && (
+      !nextSnapshot || previousSnapshot.updatedAt >= nextSnapshot.updatedAt
+    )
+      ? previousSnapshot
+      : nextSnapshot;
+
+    this.streamSnapshots.delete(previousKey);
+    if (mergedSnapshot) this.streamSnapshots.set(nextKey, mergedSnapshot);
+
+    const previousTimer = this.snapshotCleanupTimers.get(previousKey);
+    if (previousTimer) {
+      clearTimeout(previousTimer);
+      this.snapshotCleanupTimers.delete(previousKey);
+      if (mergedSnapshot?.phase === 'done') {
+        this.snapshotCleanupTimers.set(nextKey, setTimeout(() => {
+          this.streamSnapshots.delete(nextKey);
+          this.snapshotCleanupTimers.delete(nextKey);
+        }, 10_000));
+      }
+    }
+  }
+
+  protected promoteSessionRuntime(session: SessionRuntime, nextSessionId: string): SessionRuntime {
+    const resolvedSessionId = nextSessionId.trim();
+    if (!resolvedSessionId || session.sessionId === resolvedSessionId) return session;
+
+    const previousKey = session.key;
+    const previousSessionId = session.sessionId;
+    const nextKey = this.sessionKey(session.agent, resolvedSessionId);
+    const existing = this.sessionStates.get(nextKey);
+
+    if (existing && existing !== session) {
+      session.workspacePath = session.workspacePath ?? existing.workspacePath;
+      session.threadId = session.threadId ?? existing.threadId;
+      session.codexCumulative = session.codexCumulative ?? existing.codexCumulative;
+      session.modelId = session.modelId ?? existing.modelId ?? null;
+      for (const taskId of existing.runningTaskIds) session.runningTaskIds.add(taskId);
+    }
+
+    this.sessionStates.delete(previousKey);
+    this.sessionStates.delete(nextKey);
+    session.sessionId = resolvedSessionId;
+    session.key = nextKey;
+    this.sessionStates.set(nextKey, session);
+
+    for (const [, task] of this.activeTasks) {
+      if (task.sessionKey === previousKey) task.sessionKey = nextKey;
+    }
+
+    const previousChain = this.sessionChains.get(previousKey);
+    const nextChain = this.sessionChains.get(nextKey);
+    if (previousChain) this.sessionChains.delete(previousKey);
+    if (previousChain || nextChain) {
+      const mergedChain = previousChain && nextChain && previousChain !== nextChain
+        ? Promise.allSettled([previousChain, nextChain]).then(() => {})
+        : (previousChain || nextChain)!;
+      this.sessionChains.set(nextKey, mergedChain);
+    }
+
+    this.moveSessionStreamSnapshot(previousKey, nextKey);
+
+    for (const [, cs] of this.chats) {
+      const matchesPreviousSelection = cs.activeSessionKey === previousKey;
+      const matchesNextSelection = cs.activeSessionKey === nextKey;
+      const matchesSessionId = cs.agent === session.agent && (
+        (previousSessionId ? cs.sessionId === previousSessionId : false)
+        || cs.sessionId === resolvedSessionId
+      );
+      if (!matchesPreviousSelection && !matchesNextSelection && !matchesSessionId) continue;
+      this.applySessionSelection(cs, session);
+    }
+
+    return session;
   }
 
   protected isSessionSelected(sessionKey: string | null | undefined): boolean {
@@ -1207,6 +1300,102 @@ export class Bot {
     return this.getSelectedSession(this.chat(chatId));
   }
 
+  submitSessionTask(opts: SubmitSessionTaskOpts): SubmittedSessionTask {
+    const session = this.upsertSessionRuntime({
+      agent: opts.agent,
+      sessionId: opts.sessionId,
+      workdir: opts.workdir,
+      workspacePath: null,
+      modelId: null,
+    });
+    const taskId = `ext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const prompt = opts.prompt.trim();
+    const attachments = opts.attachments || [];
+    const currentSessionKey = () => this.activeTasks.get(taskId)?.sessionKey || session.key;
+
+    this.beginTask({
+      taskId,
+      chatId: opts.chatId ?? 'dashboard',
+      agent: session.agent,
+      sessionKey: session.key,
+      prompt,
+      attachments,
+      startedAt: Date.now(),
+      sourceMessageId: opts.sourceMessageId ?? taskId,
+    });
+    this.emitStream(session.key, { type: 'queued', taskId, position: this.getQueuePosition(session.key, taskId) });
+
+    void this.queueSessionTask(session, async () => {
+      const abortController = new AbortController();
+      const task = this.markTaskRunning(taskId, () => abortController.abort());
+      if (task?.cancelled) {
+        this.emitStream(currentSessionKey(), { type: 'cancelled', taskId });
+        this.finishTask(taskId);
+        return;
+      }
+
+      this.emitStream(currentSessionKey(), { type: 'start', taskId, agent: session.agent, sessionId: session.sessionId });
+      try {
+        const result = await this.runStream(
+          prompt,
+          session,
+          attachments,
+          (text, thinking, activity, meta, plan) => {
+            opts.onText?.(text, thinking, activity, meta, plan);
+            this.emitStream(currentSessionKey(), { type: 'text', text, thinking, activity, plan });
+          },
+          undefined,
+          undefined,
+          abortController.signal,
+        );
+        this.emitStream(currentSessionKey(), {
+          type: 'done',
+          taskId,
+          sessionId: result.sessionId || session.sessionId,
+          ...(result.ok ? {} : { error: result.error || result.message }),
+        });
+      } catch (error: any) {
+        this.emitStream(currentSessionKey(), {
+          type: 'done',
+          taskId,
+          sessionId: session.sessionId,
+          error: error?.message || String(error),
+        });
+      } finally {
+        this.finishTask(taskId);
+        this.syncSelectedChats(session);
+      }
+    }).catch(error => {
+      this.finishTask(taskId);
+      this.error(`[submitSessionTask] queue failed task=${taskId} error=${error?.message || error}`);
+    });
+
+    return { ok: true, taskId, sessionKey: session.key, queued: true };
+  }
+
+  cancelTask(taskId: string): { task: RunningTask | null; interrupted: boolean; cancelled: boolean } {
+    const task = this.activeTasks.get(taskId) || null;
+    if (!task) return { task: null, interrupted: false, cancelled: false };
+    if (task.status === 'queued') {
+      task.cancelled = true;
+      this.emitStream(task.sessionKey, { type: 'cancelled', taskId });
+      return { task, interrupted: false, cancelled: true };
+    }
+    if (task.status === 'running') {
+      task.cancelled = true;
+      try { task.abort?.(); } catch {}
+      return { task, interrupted: true, cancelled: false };
+    }
+    return { task, interrupted: false, cancelled: false };
+  }
+
+  async steerTask(taskId: string): Promise<{ task: RunningTask | null; interrupted: boolean; steered: boolean }> {
+    const task = this.activeTasks.get(taskId) || null;
+    if (!task || task.status !== 'queued') return { task, interrupted: false, steered: false };
+    const interrupted = this.interruptRunningTask(task.sessionKey, { freezePreview: true });
+    return { task, interrupted, steered: interrupted || !!task };
+  }
+
   resetConversationForChat(chatId: ChatId) {
     this.resetChatConversation(this.chat(chatId));
   }
@@ -1390,13 +1579,13 @@ export class Bot {
     else if (nextDefaultAgent !== this.defaultAgent) this.setDefaultAgent(nextDefaultAgent);
 
     for (const agent of ['claude', 'codex', 'gemini'] as Agent[]) {
-      const nextModel = configModelValue(config, agent);
+      const nextModel = resolveAgentModel(config, agent);
       if (nextModel && this.modelForAgent(agent) !== nextModel) {
         if (opts.initial) this.agentConfigs[agent].model = nextModel;
         else this.setModelForAgent(agent, nextModel);
       }
 
-      const nextEffort = configReasoningEffortValue(config, agent);
+      const nextEffort = resolveAgentEffort(config, agent);
       if (nextEffort && agent !== 'gemini' && this.effortForAgent(agent) !== nextEffort) {
         if (opts.initial) this.agentConfigs[agent].reasoningEffort = nextEffort;
         else this.setEffortForAgent(agent, nextEffort);
@@ -1432,10 +1621,23 @@ export class Bot {
     const effectiveSystemPrompt = isFirstTurnOfSession
       ? appendExtraPrompt(systemPrompt, mcpSystemPrompt)
       : undefined;
+    const syncNativeSessionId = (nativeSessionId: string) => {
+      const resolvedSessionId = nativeSessionId.trim();
+      if (!resolvedSessionId) return;
+      if ('key' in cs && typeof cs.key === 'string') {
+        const runtime = this.getSessionRuntimeByKey(cs.key, { allowAnyWorkdir: true });
+        if (runtime) {
+          this.promoteSessionRuntime(runtime, resolvedSessionId);
+          return;
+        }
+      }
+      cs.sessionId = resolvedSessionId;
+    };
     const opts: StreamOpts = {
       agent: cs.agent, prompt, workdir: sessionWorkdir, timeout: this.runTimeout,
       sessionId: cs.sessionId, model: null,
       thinkingEffort: agentConfig.reasoningEffort || 'high', onText,
+      onSessionId: syncNativeSessionId,
       attachments: attachments.length ? attachments : undefined,
       // codex-specific
       codexModel: cs.agent === 'codex' ? resolvedModel : this.codexModel,
@@ -1467,22 +1669,11 @@ export class Bot {
     if (result.outputTokens) this.stats.totalOutputTokens += result.outputTokens;
     if (result.cachedInputTokens) this.stats.totalCachedTokens += result.cachedInputTokens;
     if (result.codexCumulative) cs.codexCumulative = result.codexCumulative;
-    if (result.sessionId) cs.sessionId = result.sessionId;
+    if (result.sessionId) syncNativeSessionId(result.sessionId);
     if (result.workspacePath) cs.workspacePath = result.workspacePath;
     if (result.model) cs.modelId = result.model;
     if ('key' in cs && typeof cs.key === 'string') {
-      // If session was promoted from pending, update the runtime key
       const runtime = this.getSessionRuntimeByKey(cs.key, { allowAnyWorkdir: true });
-      if (runtime && result.sessionId && runtime.sessionId !== result.sessionId) {
-        this.sessionStates.delete(runtime.key);
-        runtime.sessionId = result.sessionId;
-        runtime.key = this.sessionKey(runtime.agent, result.sessionId);
-        this.sessionStates.set(runtime.key, runtime);
-        // Update all chats pointing to the old key
-        for (const [, chatState] of this.chats) {
-          if (chatState.activeSessionKey === cs.key) chatState.activeSessionKey = runtime.key;
-        }
-      }
       if (runtime) this.syncSelectedChats(runtime);
     }
     this.debug(`[runStream] completed turn=${this.stats.totalTurns} cumulative: in=${fmtTokens(this.stats.totalInputTokens)} out=${fmtTokens(this.stats.totalOutputTokens)} cached=${fmtTokens(this.stats.totalCachedTokens)}`);

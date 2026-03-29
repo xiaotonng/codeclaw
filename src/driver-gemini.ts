@@ -11,13 +11,13 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { GEMINI_USAGE_TIMEOUTS, SESSION_RUNNING_THRESHOLD_MS } from './constants.js';
 import {
-  type AgentInfo, type StreamOpts, type StreamResult,
+  type StreamOpts, type StreamResult,
   type SessionListResult, type SessionInfo, type SessionTailOpts, type SessionTailResult,
   type SessionMessagesOpts, type SessionMessagesResult,
   type TailMessage,
   type ModelListOpts, type ModelListResult,
   type UsageOpts, type UsageResult, type UsageWindowInfo,
-  run, agentLog, detectAgentBin, buildStreamPreviewMeta,
+  run, agentLog, buildStreamPreviewMeta,
   appendSystemPrompt, pushRecentActivity, firstNonEmptyLine, shortValue, normalizeErrorMessage,
   sanitizeSessionUserPreviewText,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
@@ -656,8 +656,6 @@ class GeminiDriver implements AgentDriver {
   readonly id = 'gemini';
   readonly cmd = 'gemini';
   readonly thinkLabel = 'Thinking';
-
-  detect(): AgentInfo { return detectAgentBin('gemini', 'gemini'); }
 
   async doStream(opts: StreamOpts): Promise<StreamResult> { return doGeminiStream(opts); }
 

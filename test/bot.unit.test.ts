@@ -221,6 +221,83 @@ describe('Bot thread-aware agent switching', () => {
   });
 });
 
+describe('Bot external session control', () => {
+  it('submits dashboard session tasks through the public API and publishes stream state', async () => {
+    const doStreamMock = vi.mocked(doStream);
+    doStreamMock.mockImplementationOnce(async opts => {
+      opts.onText('partial reply', 'thinking...');
+      return makeStreamResult('codex', {
+        sessionId: 'sess-dashboard',
+        message: 'done',
+        elapsedS: 1,
+      });
+    });
+
+    const bot = new Bot();
+    const submitted = bot.submitSessionTask({
+      agent: 'codex',
+      sessionId: 'sess-dashboard',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      prompt: 'continue',
+    });
+
+    expect(submitted.ok).toBe(true);
+    expect(submitted.sessionKey).toBe('codex:sess-dashboard');
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(bot.getStreamSnapshot('codex:sess-dashboard')).toMatchObject({
+      phase: 'done',
+      taskId: submitted.taskId,
+      sessionId: 'sess-dashboard',
+      text: 'partial reply',
+      thinking: 'thinking...',
+    });
+  });
+
+  it('migrates dashboard stream state and runtime tracking when codex promotes a pending session id', async () => {
+    const doStreamMock = vi.mocked(doStream);
+    doStreamMock.mockImplementationOnce(async opts => {
+      opts.onSessionId?.('sess-promoted');
+      opts.onText('partial reply', 'thinking...');
+      return makeStreamResult('codex', {
+        sessionId: 'sess-promoted',
+        message: 'done',
+        elapsedS: 1,
+      });
+    });
+
+    const bot = new Bot();
+    const submitted = bot.submitSessionTask({
+      agent: 'codex',
+      sessionId: 'pending_dashboard',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      prompt: 'continue',
+    });
+
+    expect(submitted.ok).toBe(true);
+    const deadline = Date.now() + 1000;
+    let promotedSnapshot = bot.getStreamSnapshot('codex:sess-promoted');
+    while (!promotedSnapshot && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      promotedSnapshot = bot.getStreamSnapshot('codex:sess-promoted');
+    }
+
+    expect(promotedSnapshot).toMatchObject({
+      phase: 'done',
+      taskId: submitted.taskId,
+      sessionId: 'sess-promoted',
+      text: 'partial reply',
+      thinking: 'thinking...',
+    });
+    expect(bot.getStreamSnapshot('codex:pending_dashboard')).toBeNull();
+
+    const runtime = bot.sessionStates.get('codex:sess-promoted');
+    expect(runtime?.runningTaskIds.size ?? 0).toBe(0);
+    expect(bot.activeTasks.size).toBe(0);
+    expect(bot.sessionStates.has('codex:pending_dashboard')).toBe(false);
+  });
+});
+
 describe('Bot gitignore management', () => {
   it('keeps .pikiclaw/skills tracked while ignoring managed runtime state', () => {
     const workdir = makeTmpDir('bot-unit-gitignore-');

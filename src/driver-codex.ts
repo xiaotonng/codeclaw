@@ -8,18 +8,20 @@ import { execSync, spawn } from 'node:child_process';
 import { registerDriver, type AgentDriver } from './agent-driver.js';
 import { terminateProcessTree } from './process-control.js';
 import {
-  type AgentInfo, type StreamOpts, type StreamResult,
+  type StreamOpts, type StreamResult,
   type StreamPreviewMeta, type StreamPreviewPlan, type StreamPreviewPlanStep,
   type CodexCumulativeUsage, type CodexInteractionRequest,
   type SessionListResult, type SessionInfo, type SessionTailOpts, type SessionTailResult,
   type SessionMessagesOpts, type SessionMessagesResult,
-  type TailMessage,
+  type TailMessage, type RichMessage, type MessageBlock,
+  mimeForExt,
   type ModelListOpts, type ModelListResult, type ModelInfo,
   type UsageOpts, type UsageResult, type UsageWindowInfo,
   // shared helpers
-  agentLog, agentWarn, detectAgentBin,
+  agentLog, agentWarn,
   buildStreamPreviewMeta, pushRecentActivity, normalizeActivityLine,
   firstNonEmptyLine, shortValue, numberOrNull,
+  normalizeStreamPreviewPlan,
   IMAGE_EXTS,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   mergeManagedAndNativeSessions,
@@ -227,6 +229,10 @@ function mapEffort(effort: string): string { return EFFORT_MAP[effort] ?? effort
 // ---------------------------------------------------------------------------
 
 interface CodexActiveToolCall { kind: string; summary: string; }
+interface PendingCodexAssistantMessage {
+  blocks: MessageBlock[];
+  toolNamesByCallId: Map<string, string>;
+}
 
 function isCodexToolCallItem(item: any): boolean {
   return item?.type === 'dynamicToolCall' || item?.type === 'mcpToolCall' || item?.type === 'collabAgentToolCall';
@@ -299,6 +305,137 @@ function summarizeCodexRawResponseItem(item: any): string | null {
     default:
       return null;
   }
+}
+
+function extractCodexMessageText(content: unknown): string {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((entry: any) => {
+      if (!entry || typeof entry !== 'object') return '';
+      if ((entry.type === 'output_text' || entry.type === 'input_text' || entry.type === 'text') && typeof entry.text === 'string') {
+        return entry.text.trim();
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+function extractCodexReasoningText(payload: any): string {
+  const fromSummary = Array.isArray(payload?.summary)
+    ? payload.summary
+      .map((entry: any) => typeof entry === 'string' ? entry : (typeof entry?.text === 'string' ? entry.text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .trim()
+    : '';
+  if (fromSummary) return fromSummary;
+  if (Array.isArray(payload?.content)) {
+    return payload.content
+      .map((entry: any) => typeof entry === 'string' ? entry : (typeof entry?.text === 'string' ? entry.text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  return typeof payload?.content === 'string' ? payload.content.trim() : '';
+}
+
+function parseCodexArguments(raw: unknown): any {
+  if (typeof raw !== 'string') return raw;
+  const text = raw.trim();
+  if (!text) return null;
+  try { return JSON.parse(text); } catch { return raw; }
+}
+
+function formatCodexArguments(raw: unknown): string {
+  const parsed = parseCodexArguments(raw);
+  if (parsed == null) return '';
+  if (typeof parsed === 'string') return parsed.trim();
+  try { return JSON.stringify(parsed, null, 2); } catch {}
+  return String(parsed);
+}
+
+function formatCodexPlanSummary(plan: StreamPreviewPlan): string {
+  const lines: string[] = [];
+  if (plan.explanation?.trim()) lines.push(plan.explanation.trim());
+  for (const step of plan.steps) lines.push(`[${step.status}] ${step.step}`);
+  return lines.join('\n').trim();
+}
+
+function buildCodexAssistantText(blocks: MessageBlock[]): string {
+  const finalText = blocks
+    .filter(block => block.type === 'text' && block.phase === 'final_answer' && block.content.trim())
+    .map(block => block.content.trim())
+    .join('\n\n')
+    .trim();
+  if (finalText) return finalText;
+
+  const commentaryText = blocks
+    .filter(block => block.type === 'text' && block.content.trim())
+    .map(block => block.content.trim())
+    .join('\n\n')
+    .trim();
+  if (commentaryText) return commentaryText;
+
+  const latestPlan = [...blocks].reverse().find(block => block.type === 'plan' && block.plan?.steps?.length);
+  if (latestPlan?.content.trim()) return latestPlan.content.trim();
+
+  const thinking = blocks.find(block => block.type === 'thinking' && block.content.trim())?.content.trim();
+  if (thinking) return thinking;
+
+  const toolNames = blocks
+    .filter(block => block.type === 'tool_use')
+    .map(block => block.toolName?.trim() || '')
+    .filter(Boolean);
+  if (toolNames.length) return toolNames.join(', ');
+
+  return blocks.find(block => block.type === 'tool_result' && block.content.trim())?.content.trim() || '';
+}
+
+function overlayCodexManagedPreview(workdir: string, sessionId: string, richMessages: RichMessage[]): RichMessage[] {
+  const managed = findPikiclawSession(workdir, 'codex', sessionId);
+  if (!managed) return richMessages;
+  const assistantIndex = [...richMessages]
+    .map((message, index) => ({ message, index }))
+    .reverse()
+    .find(entry => entry.message.role === 'assistant')?.index ?? -1;
+  if (assistantIndex < 0) return richMessages;
+
+  const current = richMessages[assistantIndex];
+  const blocks = [...current.blocks];
+  let changed = false;
+
+  if (managed.lastThinking?.trim() && !blocks.some(block => block.type === 'thinking' && block.content.trim())) {
+    const thinkingBlock: MessageBlock = { type: 'thinking', content: managed.lastThinking.trim() };
+    const insertIndex = blocks.findIndex(block => block.type === 'text' && block.phase === 'final_answer');
+    if (insertIndex >= 0) blocks.splice(insertIndex, 0, thinkingBlock);
+    else blocks.push(thinkingBlock);
+    changed = true;
+  }
+
+  if (managed.lastPlan?.steps?.length && !blocks.some(block => block.type === 'plan' && block.plan?.steps?.length)) {
+    const planBlock: MessageBlock = {
+      type: 'plan',
+      content: formatCodexPlanSummary(managed.lastPlan),
+      plan: managed.lastPlan,
+    };
+    const insertIndex = blocks.findIndex(block => block.type === 'text' && block.phase === 'final_answer');
+    if (insertIndex >= 0) blocks.splice(insertIndex, 0, planBlock);
+    else blocks.push(planBlock);
+    changed = true;
+  }
+
+  if (!changed) return richMessages;
+
+  const merged = [...richMessages];
+  merged[assistantIndex] = {
+    ...current,
+    text: buildCodexAssistantText(blocks) || current.text,
+    blocks,
+  };
+  return merged;
 }
 
 function buildCodexInteractionRequest(method: string, params: any, requestId: string): CodexInteractionRequest | null {
@@ -521,6 +658,7 @@ function codexErrorResult(
 ): StreamResult {
   return {
     ok: false, message: error, thinking: null,
+    plan: null,
     sessionId, workspacePath: null,
     model, thinkingEffort,
     elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
@@ -948,6 +1086,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       workspacePath: null, model: s.model, thinkingEffort: s.thinkingEffort,
       message: s.text.trim() || error || '(no textual response)',
       thinking: s.thinking.trim() || null,
+      plan: s.plan?.steps?.length ? s.plan : null,
       elapsedS: (Date.now() - start) / 1000,
       inputTokens: s.inputTokens, outputTokens: s.outputTokens,
       cachedInputTokens: s.cachedInputTokens, cacheCreationInputTokens: s.cacheCreationInputTokens,
@@ -1015,6 +1154,31 @@ function extractCodexTailQA(filePath: string): { lastQuestion: string | null; la
   return { lastQuestion, lastAnswer, lastMessageText };
 }
 
+function readCodexSessionHead(filePath: string): { sessionId: string; cwd: string; timestamp: string | null; isSubagent: boolean } | null {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(8 * 1024);
+    const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    const head = buf.toString('utf8', 0, bytesRead);
+    if (!head.includes('"session_meta"')) return null;
+
+    const idMatch = head.match(/"id"\s*:\s*"([^"]+)"/);
+    const cwdMatch = head.match(/"cwd"\s*:\s*"([^"]+)"/);
+    const tsMatch = head.match(/"timestamp"\s*:\s*"([^"]+)"/);
+    if (!idMatch || !cwdMatch) return null;
+
+    return {
+      sessionId: idMatch[1],
+      cwd: cwdMatch[1],
+      timestamp: tsMatch?.[1] || null,
+      isSubagent: /"source"\s*:\s*\{\s*"subagent"\s*:/.test(head) || /"thread_spawn"\s*:/.test(head),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function getNativeCodexSessions(workdir: string): SessionInfo[] {
   const home = process.env.HOME || '';
   if (!home) return [];
@@ -1038,20 +1202,12 @@ function getNativeCodexSessions(workdir: string): SessionInfo[] {
       // Read first chunk to extract session_meta fields via regex
       // (first line can be very large due to base_instructions, so we avoid full JSON parse)
       try {
-        const fd = fs.openSync(fullPath, 'r');
-        const buf = Buffer.alloc(1024); // only need the first ~1KB for type, id, cwd, timestamp
-        const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
-        fs.closeSync(fd);
-        const head = buf.toString('utf8', 0, bytesRead);
-        if (!head.includes('"session_meta"')) continue;
-        // Extract fields with regex (they appear early in the JSON before base_instructions)
-        const idMatch = head.match(/"id"\s*:\s*"([^"]+)"/);
-        const cwdMatch = head.match(/"cwd"\s*:\s*"([^"]+)"/);
-        const tsMatch = head.match(/"timestamp"\s*:\s*"([^"]+)"/);
-        if (!idMatch || !cwdMatch) continue;
-        const metaId = idMatch[1];
-        const metaCwd = cwdMatch[1];
-        if (path.resolve(metaCwd) !== resolvedWorkdir) continue;
+        const meta = readCodexSessionHead(fullPath);
+        if (!meta) continue;
+        if (meta.isSubagent) continue;
+        if (path.resolve(meta.cwd) !== resolvedWorkdir) continue;
+        const metaId = meta.sessionId;
+        const metaCwd = meta.cwd;
         if (seenIds.has(metaId)) continue;
         seenIds.add(metaId);
 
@@ -1067,7 +1223,7 @@ function getNativeCodexSessions(workdir: string): SessionInfo[] {
           workdir: metaCwd,
           workspacePath: null,
           model: null,
-          createdAt: tsMatch?.[1] || stat.birthtime.toISOString(),
+          createdAt: meta.timestamp || stat.birthtime.toISOString(),
           title,
           running: Date.now() - Date.parse(updatedAt) < SESSION_RUNNING_THRESHOLD_MS,
           runState: Date.now() - Date.parse(updatedAt) < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
@@ -1093,22 +1249,9 @@ function getNativeCodexSessions(workdir: string): SessionInfo[] {
 }
 
 function readCodexSessionMeta(filePath: string): { sessionId: string; cwd: string } | null {
-  try {
-    const fd = fs.openSync(filePath, 'r');
-    const buf = Buffer.alloc(4096);
-    const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
-    fs.closeSync(fd);
-    const firstLine = buf.toString('utf8', 0, bytesRead).split('\n')[0];
-    if (!firstLine) return null;
-    const parsed = JSON.parse(firstLine);
-    if (parsed?.type !== 'session_meta') return null;
-    const sessionId = typeof parsed?.payload?.id === 'string' ? parsed.payload.id : '';
-    const cwd = typeof parsed?.payload?.cwd === 'string' ? parsed.payload.cwd : '';
-    if (!sessionId || !cwd) return null;
-    return { sessionId, cwd };
-  } catch {
-    return null;
-  }
+  const meta = readCodexSessionHead(filePath);
+  if (!meta) return null;
+  return { sessionId: meta.sessionId, cwd: meta.cwd };
 }
 
 function findCodexRolloutPath(sessionId: string, workdir: string): string | null {
@@ -1242,6 +1385,11 @@ async function getCodexSessionTail(opts: SessionTailOpts): Promise<SessionTailRe
 // ---------------------------------------------------------------------------
 
 async function getCodexSessionMessages(opts: SessionMessagesOpts): Promise<SessionMessagesResult> {
+  if (opts.rich) {
+    const rolloutResult = getCodexSessionMessagesFromRollout(opts);
+    if (rolloutResult.ok) return rolloutResult;
+  }
+
   // Try RPC first
   const srv = getSharedServer();
   if (await srv.ensureRunning()) {
@@ -1250,19 +1398,49 @@ async function getCodexSessionMessages(opts: SessionMessagesOpts): Promise<Sessi
       if (!resp.error && resp.result?.thread) {
         const thread = resp.result.thread;
         const allMsgs: TailMessage[] = [];
+        const richMsgs: RichMessage[] = [];
         for (const turn of (thread.turns ?? [])) {
           for (const item of (turn.items ?? [])) {
             if (item.type === 'userMessage') {
               const parts: string[] = [];
-              for (const c of (item.content ?? [])) { if (c.type === 'text' && c.text) parts.push(c.text); }
-              if (parts.length) allMsgs.push({ role: 'user', text: stripInjectedPrompts(parts.join('\n')) });
+              const blocks: MessageBlock[] = [];
+              for (const c of (item.content ?? [])) {
+                if (c.type === 'text' && c.text) parts.push(c.text);
+                else if (c.type === 'localImage' && c.path) {
+                  // Read the image file if it still exists
+                  try {
+                    if (fs.existsSync(c.path) && fs.statSync(c.path).size <= 4 * 1024 * 1024) {
+                      const ext = path.extname(c.path).toLowerCase();
+                      const data = fs.readFileSync(c.path).toString('base64');
+                      blocks.push({ type: 'image', content: `data:${mimeForExt(ext)};base64,${data}` });
+                    }
+                  } catch { /* skip unreadable images */ }
+                }
+              }
+              if (parts.length || blocks.length) {
+                const text = stripInjectedPrompts(parts.join('\n'));
+                if (text) blocks.unshift({ type: 'text', content: text });
+                allMsgs.push({ role: 'user', text });
+                richMsgs.push({ role: 'user', text, blocks });
+              }
             } else if (item.type === 'agentMessage') {
-              if (item.text) allMsgs.push({ role: 'assistant', text: item.text });
+              if (item.text) {
+                allMsgs.push({ role: 'assistant', text: item.text });
+                richMsgs.push({
+                  role: 'assistant',
+                  text: item.text,
+                  blocks: [{
+                    type: 'text',
+                    content: item.text,
+                    phase: item.phase === 'commentary' ? 'commentary' : 'final_answer',
+                  }],
+                });
+              }
             }
           }
         }
         if (allMsgs.length > 0) {
-          return applyTurnWindow(allMsgs, opts);
+          return applyTurnWindow(allMsgs, opts, richMsgs);
         }
       }
     } catch { /* fall through to rollout */ }
@@ -1277,24 +1455,144 @@ function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionM
   if (!rolloutPath) return { ok: false, messages: [], totalTurns: 0, error: 'Session history file not found' };
 
   try {
-    // Read FULL file
     const content = fs.readFileSync(rolloutPath, 'utf-8');
     const lines = content.split('\n');
     const allMsgs: TailMessage[] = [];
+    const richMsgs: RichMessage[] = [];
+    const fallbackMsgs: TailMessage[] = [];
+    let pendingAssistant: PendingCodexAssistantMessage | null = null;
+    let sawAssistantResponseItems = false;
+
+    const ensureAssistant = (): PendingCodexAssistantMessage => {
+      if (!pendingAssistant) pendingAssistant = { blocks: [], toolNamesByCallId: new Map() };
+      return pendingAssistant;
+    };
+
+    const flushAssistant = () => {
+      if (!pendingAssistant) return;
+      const blocks = pendingAssistant.blocks.filter(block =>
+        block.type === 'plan'
+        || block.type === 'image'
+        || block.type === 'tool_use'
+        || block.type === 'tool_result'
+        || !!block.content.trim(),
+      );
+      pendingAssistant = null;
+      if (!blocks.length) return;
+      const text = buildCodexAssistantText(blocks);
+      allMsgs.push({ role: 'assistant', text });
+      richMsgs.push({ role: 'assistant', text, blocks });
+    };
+
     for (const raw of lines) {
-      if (!raw || raw[0] !== '{' || !raw.includes('"event_msg"')) continue;
+      if (!raw || raw[0] !== '{') continue;
       let ev: any;
       try { ev = JSON.parse(raw); } catch { continue; }
-      if (ev?.type !== 'event_msg' || !ev.payload || typeof ev.payload !== 'object') continue;
-      if (ev.payload.type === 'user_message' && typeof ev.payload.message === 'string') {
-        const text = stripInjectedPrompts(ev.payload.message).trim();
-        if (text) allMsgs.push({ role: 'user', text });
-      } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
-        const text = ev.payload.message.trim();
-        if (text) allMsgs.push({ role: 'assistant', text });
+      if (!ev?.payload || typeof ev.payload !== 'object') continue;
+
+      if (ev.type === 'event_msg') {
+        if (ev.payload.type === 'user_message' && typeof ev.payload.message === 'string') {
+          flushAssistant();
+          const text = stripInjectedPrompts(ev.payload.message).trim();
+          if (!text) continue;
+          const userMessage: TailMessage = { role: 'user', text };
+          fallbackMsgs.push(userMessage);
+          allMsgs.push(userMessage);
+          richMsgs.push({ role: 'user', text, blocks: [{ type: 'text', content: text }] });
+        } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
+          const text = ev.payload.message.trim();
+          if (text) fallbackMsgs.push({ role: 'assistant', text });
+        }
+        continue;
+      }
+
+      if (ev.type !== 'response_item') continue;
+      const payload = ev.payload;
+
+      if (payload.type === 'message') {
+        if (payload.role !== 'assistant') continue;
+        const text = extractCodexMessageText(payload.content);
+        if (!text) continue;
+        ensureAssistant().blocks.push({
+          type: 'text',
+          content: text,
+          phase: payload.phase === 'commentary' ? 'commentary' : 'final_answer',
+        });
+        sawAssistantResponseItems = true;
+        continue;
+      }
+
+      if (payload.type === 'reasoning') {
+        const text = extractCodexReasoningText(payload);
+        if (!text) continue;
+        ensureAssistant().blocks.push({ type: 'thinking', content: text });
+        sawAssistantResponseItems = true;
+        continue;
+      }
+
+      if (payload.type === 'function_call') {
+        const name = typeof payload.name === 'string' ? payload.name.trim() : '';
+        if (!name) continue;
+        const assistant = ensureAssistant();
+        const callId = typeof payload.call_id === 'string' ? payload.call_id : '';
+        if (callId) assistant.toolNamesByCallId.set(callId, name);
+        if (name === 'update_plan') {
+          const plan = normalizeStreamPreviewPlan(parseCodexArguments(payload.arguments));
+          if (plan) {
+            assistant.blocks.push({
+              type: 'plan',
+              content: formatCodexPlanSummary(plan),
+              plan,
+            });
+            sawAssistantResponseItems = true;
+          }
+          continue;
+        }
+        assistant.blocks.push({
+          type: 'tool_use',
+          content: formatCodexArguments(payload.arguments),
+          toolName: name,
+          toolId: callId || undefined,
+        });
+        sawAssistantResponseItems = true;
+        continue;
+      }
+
+      if (payload.type === 'function_call_output') {
+        const assistant = ensureAssistant();
+        const callId = typeof payload.call_id === 'string' ? payload.call_id : '';
+        const toolName = assistant.toolNamesByCallId.get(callId) || '';
+        const output = formatCodexArguments(payload.output);
+        if (toolName === 'update_plan' && output === 'Plan updated') continue;
+        assistant.blocks.push({
+          type: 'tool_result',
+          content: output,
+          toolName: toolName || undefined,
+          toolId: callId || undefined,
+        });
+        sawAssistantResponseItems = true;
+        continue;
+      }
+
+      const fallbackSummary = summarizeCodexRawResponseItem(payload);
+      if (fallbackSummary) {
+        ensureAssistant().blocks.push({
+          type: 'tool_use',
+          content: formatCodexArguments(payload),
+          toolName: fallbackSummary,
+        });
+        sawAssistantResponseItems = true;
       }
     }
-    return applyTurnWindow(allMsgs, opts);
+    flushAssistant();
+
+    if (!sawAssistantResponseItems && fallbackMsgs.some(message => message.role === 'assistant')) {
+      return applyTurnWindow(fallbackMsgs, opts);
+    }
+
+    const richWithOverlay = overlayCodexManagedPreview(opts.workdir, opts.sessionId, richMsgs);
+    const plainWithOverlay = richWithOverlay.map(message => ({ role: message.role, text: message.text }));
+    return applyTurnWindow(plainWithOverlay, opts, opts.rich ? richWithOverlay : undefined);
   } catch (e: any) {
     return { ok: false, messages: [], totalTurns: 0, error: e?.message || 'Failed to read session history' };
   }
@@ -1490,8 +1788,6 @@ class CodexDriver implements AgentDriver {
   readonly id = 'codex';
   readonly cmd = 'codex';
   readonly thinkLabel = 'Reasoning';
-
-  detect(): AgentInfo { return detectAgentBin('codex', 'codex'); }
 
   async doStream(opts: StreamOpts): Promise<StreamResult> { return doCodexStream(opts); }
 

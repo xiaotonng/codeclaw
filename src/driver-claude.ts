@@ -8,7 +8,7 @@ import { execSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { registerDriver, type AgentDriver } from './agent-driver.js';
 import {
-  type AgentInfo, type StreamOpts, type StreamResult,
+  type StreamOpts, type StreamResult,
   type SessionListResult, type SessionTailOpts, type SessionTailResult,
   type SessionMessagesOpts, type SessionMessagesResult,
   type TailMessage, type RichMessage, type MessageBlock,
@@ -16,7 +16,7 @@ import {
   type UsageOpts, type UsageResult, type UsageWindowInfo,
   type SessionInfo,
   // shared helpers
-  Q, run, agentError, agentLog, agentWarn, detectAgentBin,
+  Q, run, agentError, agentLog, agentWarn,
   appendSystemPrompt, buildStreamPreviewMeta, pushRecentActivity,
   summarizeClaudeToolUse, summarizeClaudeToolResult, joinErrorMessages,
   IMAGE_EXTS, mimeForExt,
@@ -755,6 +755,12 @@ function extractClaudeBlocks(content: any, skipSystemBlocks = false): MessageBlo
           ? block.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n')
           : '';
       blocks.push({ type: 'tool_result', content: resultText, toolId: block.tool_use_id });
+    } else if (block.type === 'image' && block.source?.type === 'base64' && block.source.data) {
+      const mediaType = block.source.media_type || 'image/png';
+      // Skip excessively large images (> 4MB base64) to keep API payloads sane
+      if (block.source.data.length <= 4 * 1024 * 1024) {
+        blocks.push({ type: 'image', content: `data:${mediaType};base64,${block.source.data}` });
+      }
     }
   }
   return blocks;
@@ -828,10 +834,13 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
           // Actual user message — flush previous and start new
           flush();
           const text = stripInjectedPrompts(extractClaudeText(ev.message?.content, true));
-          if (text) {
+          const userBlocks = extractClaudeBlocks(ev.message?.content, true);
+          // Include image blocks from the user message
+          const imageBlocks = userBlocks.filter(b => b.type === 'image');
+          if (text || imageBlocks.length) {
             pendingRole = 'user';
-            pendingTextParts = [text];
-            pendingBlocks = [{ type: 'text', content: text }];
+            pendingTextParts = text ? [text] : [];
+            pendingBlocks = text ? [{ type: 'text', content: text }, ...imageBlocks] : [...imageBlocks];
           }
         } else if (ev.type === 'assistant') {
           // If we were accumulating a user message, flush it
@@ -998,8 +1007,6 @@ class ClaudeDriver implements AgentDriver {
   readonly id = 'claude';
   readonly cmd = 'claude';
   readonly thinkLabel = 'Thinking';
-
-  detect(): AgentInfo { return detectAgentBin('claude', 'claude'); }
 
   async doStream(opts: StreamOpts): Promise<StreamResult> {
     return doClaudeStream(opts);

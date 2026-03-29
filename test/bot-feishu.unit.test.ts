@@ -13,11 +13,7 @@ function createBot() {
       editMessages: true,
       typingIndicators: false,
       commandMenu: true,
-      callbackActions: true,
       messageReactions: true,
-      fileUpload: true,
-      fileDownload: true,
-      threads: false,
     },
     setMessageReaction: vi.fn(async (chatId: string, messageId: string, reactionList: string[]) => {
       reactions.push({ chatId, messageId, reactions: reactionList });

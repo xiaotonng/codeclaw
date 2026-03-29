@@ -15,6 +15,14 @@ import { terminateProcessTree } from './process-control.js';
 import { AGENT_DETECT_TIMEOUTS, AGENT_STREAM_HARD_KILL_GRACE_MS } from './constants.js';
 import { writeScopedLog, type LogLevel } from './logging.js';
 export { type AgentDriver, registerDriver, getDriver, allDrivers, allDriverIds, hasDriver, shutdownAllDrivers } from './agent-driver.js';
+export {
+  getProjectSkillPaths,
+  initializeProjectSkills,
+  listSkills,
+  type ProjectSkillPaths,
+  type SkillInfo,
+  type SkillListResult,
+} from './project-skills.js';
 
 // Load all drivers (side-effect: each calls registerDriver)
 import './driver-claude.js';
@@ -149,6 +157,7 @@ export interface StreamResult {
   ok: boolean;
   message: string;
   thinking: string | null;
+  plan?: StreamPreviewPlan | null;
   sessionId: string | null;
   workspacePath: string | null;
   model: string | null;
@@ -230,6 +239,40 @@ export function numberOrNull(...values: unknown[]): number | null {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
   }
   return null;
+}
+
+function trimSessionText(value: unknown, max = 24_000): string | null {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return null;
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+}
+
+export function normalizeStreamPreviewPlan(value: unknown): StreamPreviewPlan | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const rawSteps = Array.isArray(record.steps)
+    ? record.steps
+    : Array.isArray(record.plan)
+      ? record.plan
+      : [];
+  const steps = rawSteps
+    .map((entry): StreamPreviewPlanStep | null => {
+      if (!entry || typeof entry !== 'object') return null;
+      const step = typeof (entry as any).step === 'string' ? (entry as any).step.trim() : '';
+      if (!step) return null;
+      const rawStatus = typeof (entry as any).status === 'string' ? (entry as any).status : 'pending';
+      const status = rawStatus === 'completed' || rawStatus === 'inProgress' || rawStatus === 'pending'
+        ? rawStatus
+        : 'pending';
+      return { step, status };
+    })
+    .filter((entry): entry is StreamPreviewPlanStep => !!entry);
+  if (!steps.length) return null;
+  return {
+    explanation: typeof record.explanation === 'string' && record.explanation.trim() ? record.explanation.trim() : null,
+    steps,
+  };
 }
 
 export function normalizeActivityLine(text: string): string { return text.replace(/\s+/g, ' ').trim(); }
@@ -592,8 +635,15 @@ const SESSION_PREVIEW_IGNORED_USER_PATTERNS = [
   /^\[Request interrupted by user(?: for tool use)?\]$/i,
 ];
 
+const SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE = /\[Image:[^\]]+\]/gi;
+const SESSION_PREVIEW_FILE_PLACEHOLDER_RE = /\[Attached file:[^\]]+\]/gi;
+
 export function sanitizeSessionUserPreviewText(text: string): string {
-  const cleaned = stripInjectedPrompts(text).trim();
+  const cleaned = stripInjectedPrompts(text)
+    .replace(SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE, ' ')
+    .replace(SESSION_PREVIEW_FILE_PLACEHOLDER_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!cleaned) return '';
   if (SESSION_PREVIEW_IGNORED_USER_PATTERNS.some(pattern => pattern.test(cleaned))) return '';
   return cleaned;
@@ -623,6 +673,8 @@ export interface ManagedSessionRecord {
   lastQuestion: string | null;
   lastAnswer: string | null;
   lastMessageText: string | null;
+  lastThinking: string | null;
+  lastPlan: StreamPreviewPlan | null;
   migratedFrom: { agent: Agent; sessionId: string } | null;
   migratedTo: { agent: Agent; sessionId: string } | null;
   linkedSessions: Array<{ agent: Agent; sessionId: string }>;
@@ -763,6 +815,8 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     lastQuestion: typeof raw?.lastQuestion === 'string' ? raw.lastQuestion : null,
     lastAnswer: typeof raw?.lastAnswer === 'string' ? raw.lastAnswer : null,
     lastMessageText: typeof raw?.lastMessageText === 'string' ? raw.lastMessageText : null,
+    lastThinking: trimSessionText(raw?.lastThinking),
+    lastPlan: normalizeStreamPreviewPlan(raw?.lastPlan),
     migratedFrom: raw?.migratedFrom ?? null,
     migratedTo: raw?.migratedTo ?? null,
     linkedSessions: Array.isArray(raw?.linkedSessions) ? raw.linkedSessions : [],
@@ -799,6 +853,8 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     lastQuestion: record.lastQuestion,
     lastAnswer: record.lastAnswer,
     lastMessageText: record.lastMessageText,
+    lastThinking: record.lastThinking,
+    lastPlan: record.lastPlan,
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,
@@ -1000,6 +1056,7 @@ function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): SessionWorksp
       runState: 'completed', runDetail: null, runUpdatedAt: new Date().toISOString(),
       classification: null, userStatus: null, userNote: null,
       lastQuestion: null, lastAnswer: null, lastMessageText: null,
+      lastThinking: null, lastPlan: null,
       migratedFrom: null, migratedTo: null, linkedSessions: [],
     };
   }
@@ -1263,8 +1320,14 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
       sessionId: effectiveSessionId,
       attachments: attachmentPaths.length ? attachmentPaths : undefined,
       onSessionId: (nativeSessionId: string) => {
-        if (!syncManagedSessionIdentity(session, opts.workdir, nativeSessionId)) return;
-        saveSessionRecord(opts.workdir, session.record);
+        if (syncManagedSessionIdentity(session, opts.workdir, nativeSessionId)) {
+          saveSessionRecord(opts.workdir, session.record);
+        }
+        try {
+          opts.onSessionId?.(nativeSessionId);
+        } catch (error: any) {
+          agentWarn(`[session] onSessionId callback failed: ${error?.message || error}`);
+        }
       },
     },
   };
@@ -1277,6 +1340,8 @@ function finalizeStreamResult(result: StreamResult, workdir: string, prompt: str
   session.record.lastQuestion = shortValue(prompt, 500);
   session.record.lastAnswer = shortValue(result.message, 500);
   session.record.lastMessageText = shortValue(result.message, 500) || shortValue(prompt, 500);
+  session.record.lastThinking = trimSessionText(result.thinking);
+  session.record.lastPlan = normalizeStreamPreviewPlan(result.plan);
   applySessionRunResult(session.record, result);
   saveSessionRecord(workdir, session.record);
   return { ...result, sessionId: session.sessionId, workspacePath: session.workspacePath };
@@ -1298,7 +1363,7 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       sessionId: opts.sessionId, workspacePath: null, model: opts.model, thinkingEffort: opts.thinkingEffort,
       elapsedS: 0, inputTokens: null, outputTokens: null, cachedInputTokens: null,
       cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null,
-      codexCumulative: null, error: message, stopReason: null, incomplete: true, activity: null,
+      codexCumulative: null, error: message, stopReason: null, incomplete: true, activity: null, plan: null,
     };
   }
 
@@ -1353,10 +1418,13 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       stopReason: null,
       incomplete: true,
       activity: null,
+      plan: null,
     };
     session.record.lastQuestion = shortValue(opts.prompt, 500);
     session.record.lastAnswer = shortValue(failedResult.message, 500);
     session.record.lastMessageText = shortValue(failedResult.message, 500) || shortValue(opts.prompt, 500);
+    session.record.lastThinking = null;
+    session.record.lastPlan = null;
     applySessionRunResult(session.record, failedResult);
     saveSessionRecord(opts.workdir, session.record);
     throw error;
@@ -1497,12 +1565,14 @@ export function getSessions(opts: SessionListOpts): Promise<SessionListResult> {
 
 export interface TailMessage { role: 'user' | 'assistant'; text: string; }
 
-/** A content block within a message — text, thinking, or tool activity. */
+/** A content block within a message — text, thinking, tool activity, or image. */
 export interface MessageBlock {
-  type: 'text' | 'thinking' | 'tool_use' | 'tool_result';
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | 'plan';
   content: string;
   toolName?: string;
   toolId?: string;
+  phase?: 'commentary' | 'final_answer';
+  plan?: StreamPreviewPlan | null;
 }
 
 /** Rich message with structured content blocks. */
@@ -1916,164 +1986,6 @@ export interface AgentListResult { agents: AgentInfo[]; }
 
 export function listAgents(options: AgentDetectOptions = {}): AgentListResult {
   return { agents: allDrivers().map(d => detectAgentBin(d.cmd, d.id, options)) };
-}
-
-// ---------------------------------------------------------------------------
-// Skill listing
-// ---------------------------------------------------------------------------
-
-export interface SkillInfo {
-  name: string;
-  label: string | null;
-  description: string | null;
-  source: 'skills';
-}
-
-export interface SkillListResult { skills: SkillInfo[]; workdir: string; }
-
-export interface ProjectSkillPaths {
-  sharedSkillFile: string | null;
-  claudeSkillFile: string | null;
-  agentsSkillFile: string | null;
-}
-
-function parseSkillMeta(content: string): { label: string | null; description: string | null } {
-  let label: string | null = null;
-  let description: string | null = null;
-  const fm = content.match(/^---\s*\n([\s\S]*?)\n---/);
-  if (fm) {
-    const lm = fm[1].match(/^label:\s*(.+)/m);
-    if (lm) label = lm[1].trim();
-    const dm = fm[1].match(/^description:\s*(.+)/m);
-    if (dm) description = dm[1].trim();
-  }
-  if (!label) { const hm = content.match(/^#\s+(.+)$/m); if (hm) label = hm[1].trim(); }
-  return { label, description };
-}
-
-function hasFile(filePath: string): boolean {
-  try { return fs.statSync(filePath).isFile(); } catch { return false; }
-}
-
-function hasDir(dirPath: string): boolean {
-  try { return fs.statSync(dirPath).isDirectory(); } catch { return false; }
-}
-
-function readSortedDir(dirPath: string): string[] {
-  try {
-    return fs.readdirSync(dirPath).sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' }));
-  } catch {
-    return [];
-  }
-}
-
-function listRelativeFiles(dirPath: string, prefix = ''): string[] {
-  const files: string[] = [];
-  for (const entry of readSortedDir(dirPath)) {
-    const abs = path.join(dirPath, entry);
-    const rel = prefix ? path.join(prefix, entry) : entry;
-    let stat: fs.Stats;
-    try { stat = fs.statSync(abs); } catch { continue; }
-    if (stat.isDirectory()) files.push(...listRelativeFiles(abs, rel));
-    else if (stat.isFile()) files.push(rel);
-  }
-  return files;
-}
-
-function realPathOrNull(filePath: string): string | null {
-  try { return fs.realpathSync(filePath); } catch { return null; }
-}
-
-function ensureDirSymlink(linkPath: string, targetDir: string) {
-  const desiredTarget = path.relative(path.dirname(linkPath), targetDir) || '.';
-  try {
-    const stat = fs.lstatSync(linkPath);
-    if (stat.isSymbolicLink()) {
-      const currentTarget = fs.readlinkSync(linkPath);
-      const currentReal = realPathOrNull(path.resolve(path.dirname(linkPath), currentTarget));
-      const desiredReal = realPathOrNull(targetDir);
-      if (currentTarget === desiredTarget || (currentReal && desiredReal && currentReal === desiredReal)) return;
-    }
-    fs.rmSync(linkPath, { recursive: true, force: true });
-  } catch {}
-  fs.mkdirSync(path.dirname(linkPath), { recursive: true });
-  fs.symlinkSync(desiredTarget, linkPath, 'dir');
-}
-
-
-function copyMergedTree(
-  sourceRoot: string,
-  targetRoot: string,
-  opts: { log?: (message: string) => void } = {},
-) {
-  for (const relPath of listRelativeFiles(sourceRoot)) {
-    const sourcePath = path.join(sourceRoot, relPath);
-    const targetPath = path.join(targetRoot, relPath);
-    if (hasFile(targetPath)) {
-      opts.log?.(`skills merge skipped existing file: ${relPath}`);
-      continue;
-    }
-    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-    fs.copyFileSync(sourcePath, targetPath);
-  }
-}
-
-export function initializeProjectSkills(workdir: string, opts: { log?: (message: string) => void } = {}): void {
-  const canonicalRoot = path.join(workdir, '.pikiclaw', 'skills');
-  const claudeRoot = path.join(workdir, '.claude', 'skills');
-  const agentsRoot = path.join(workdir, '.agents', 'skills');
-  const canonicalReal = realPathOrNull(canonicalRoot);
-
-  // Ensure canonical directory exists (never delete it).
-  fs.mkdirSync(canonicalRoot, { recursive: true });
-
-  // Merge legacy roots into canonical — only copy files that don't already exist.
-  // Skip roots that are already symlinks pointing back to canonical.
-  for (const legacyRoot of [claudeRoot, agentsRoot]) {
-    if (!hasDir(legacyRoot)) continue;
-    const legacyReal = realPathOrNull(legacyRoot);
-    if (legacyReal && canonicalReal && legacyReal === canonicalReal) continue;
-    copyMergedTree(legacyRoot, canonicalRoot, opts);
-  }
-
-  // Replace legacy dirs with symlinks to canonical.
-  for (const linkRoot of [claudeRoot, agentsRoot]) {
-    ensureDirSymlink(linkRoot, canonicalRoot);
-  }
-  opts.log?.(`skills merged into .pikiclaw/skills and linked to .claude/.agents workdir=${workdir}`);
-}
-
-export function getProjectSkillPaths(workdir: string, skillName: string): ProjectSkillPaths {
-  const sharedSkillFile = path.join(workdir, '.pikiclaw', 'skills', skillName, 'SKILL.md');
-  const agentsSkillFile = path.join(workdir, '.agents', 'skills', skillName, 'SKILL.md');
-  const claudeSkillFile = path.join(workdir, '.claude', 'skills', skillName, 'SKILL.md');
-  return {
-    sharedSkillFile: hasFile(sharedSkillFile) ? sharedSkillFile : null,
-    agentsSkillFile: hasFile(agentsSkillFile) ? agentsSkillFile : null,
-    claudeSkillFile: hasFile(claudeSkillFile) ? claudeSkillFile : null,
-  };
-}
-
-export function listSkills(workdir: string): SkillListResult {
-  const skills: SkillInfo[] = [];
-  const seen = new Set<string>();
-  const skillRoots = [
-    path.join(workdir, '.pikiclaw', 'skills'),
-  ];
-  for (const skillsDir of skillRoots) {
-    for (const entry of readSortedDir(skillsDir)) {
-      if (!entry || seen.has(entry)) continue;
-      const skillDir = path.join(skillsDir, entry);
-      const skillFile = path.join(skillDir, 'SKILL.md');
-      try { if (!fs.statSync(skillDir).isDirectory()) continue; } catch { continue; }
-      if (!hasFile(skillFile)) continue;
-      let meta = { label: null as string | null, description: null as string | null };
-      try { meta = parseSkillMeta(fs.readFileSync(skillFile, 'utf-8')); } catch {}
-      skills.push({ name: entry, label: meta.label, description: meta.description, source: 'skills' });
-      seen.add(entry);
-    }
-  }
-  return { skills, workdir };
 }
 
 // ---------------------------------------------------------------------------

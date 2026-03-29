@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { Agent } from './code-agent.js';
 import { USER_CONFIG_SYNC_DEFAULT_INTERVAL_MS } from './constants.js';
 
-export type ChannelName = 'telegram' | 'feishu' | 'weixin' | 'whatsapp';
+export type ChannelName = 'telegram' | 'feishu' | 'weixin';
 
 export interface WorkspaceEntry {
   /** Absolute path to project directory */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { adaptMarkdownForFeishu, buildStreamingBodyMarkdown, buildStreamPreviewMarkdown } from '../src/bot-feishu-render.ts';
+import { buildStreamingBodyMarkdown, buildStreamPreviewMarkdown } from '../src/bot-feishu-render.ts';
+import { adaptMarkdownForFeishu } from '../src/feishu-markdown.ts';
 
 describe('Feishu streaming preview render', () => {
   const input = {

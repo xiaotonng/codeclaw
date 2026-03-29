@@ -155,13 +155,53 @@ const SESSION_PREVIEW_IGNORED_USER_PATTERNS = [
   /^\[Request interrupted by user(?: for tool use)?\]$/i,
 ];
 
+const SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE = /\[Image:[^\]]+\]/gi;
+const SESSION_PREVIEW_FILE_PLACEHOLDER_RE = /\[Attached file:[^\]]+\]/gi;
+
+function cleanSessionPreviewText(text?: string | null): string {
+  return String(text || '')
+    .replace(SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE, ' ')
+    .replace(SESSION_PREVIEW_FILE_PLACEHOLDER_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function firstMeaningfulLine(text?: string | null): string {
+  for (const line of String(text || '').split('\n')) {
+    const cleaned = cleanSessionPreviewText(line)
+      .replace(/^[#>*\-\s`]+/, '')
+      .trim();
+    if (cleaned) return cleaned;
+  }
+  return '';
+}
+
 export function sanitizeSessionQuestionPreview(text?: string | null): string {
-  const cleaned = String(text || '').trim();
+  const cleaned = cleanSessionPreviewText(text);
   if (!cleaned) return '';
   if (SESSION_PREVIEW_IGNORED_USER_PATTERNS.some(pattern => pattern.test(cleaned))) return '';
   return cleaned;
 }
 
 export function sessionListDisplayText(session: Pick<SessionInfo, 'lastQuestion' | 'title' | 'sessionId'>): string {
-  return sanitizeSessionQuestionPreview(session.lastQuestion) || session.title || session.sessionId;
+  return sanitizeSessionQuestionPreview(session.lastQuestion) || cleanSessionPreviewText(session.title) || session.sessionId;
+}
+
+export function sessionListContextText(
+  session: Pick<SessionInfo, 'title' | 'lastAnswer' | 'classification' | 'runDetail' | 'sessionId'>,
+  primary: string,
+): string {
+  const title = cleanSessionPreviewText(session.title);
+  if (title && title !== primary) return title;
+
+  const summary = firstMeaningfulLine(session.classification?.summary);
+  if (summary && summary !== primary) return summary;
+
+  const answer = firstMeaningfulLine(session.lastAnswer);
+  if (answer && answer !== primary) return answer;
+
+  const detail = cleanSessionPreviewText(session.runDetail);
+  if (detail && !/interrupted by user/i.test(detail) && detail !== primary) return detail;
+
+  return '';
 }

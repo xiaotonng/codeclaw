@@ -8,6 +8,7 @@ export function makeStreamResult(
     ok: true,
     message: 'ok',
     thinking: null,
+    plan: null,
     sessionId: 'sess-1',
     workspacePath: null,
     model: agent === 'codex' ? 'gpt-5.4' : 'claude-opus-4-6',

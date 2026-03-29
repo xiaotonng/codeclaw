@@ -6,7 +6,7 @@
  */
 
 import type {
-  AgentInfo, StreamOpts, StreamResult,
+  StreamOpts, StreamResult,
   SessionListResult, SessionTailOpts, SessionTailResult,
   SessionMessagesOpts, SessionMessagesResult,
   ModelListOpts, ModelListResult,
@@ -20,7 +20,6 @@ export interface AgentDriver {
   /** UI label for thinking/reasoning display */
   readonly thinkLabel: string;
 
-  detect(): AgentInfo;
   doStream(opts: StreamOpts): Promise<StreamResult>;
   getSessions(workdir: string, limit?: number): Promise<SessionListResult>;
   getSessionTail(opts: SessionTailOpts): Promise<SessionTailResult>;

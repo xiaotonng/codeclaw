@@ -282,7 +282,6 @@ Environment variables (Feishu):
 
 Notes:
   - weixin setup is QR-based in the dashboard and currently supports text-only replies.
-  - whatsapp is planned but not implemented yet.
   - --safe-mode delegates to the agent's own permission model; it does not add
     a pikiclaw-specific approval workflow.
 
@@ -590,9 +589,6 @@ async function launchChannels(
         await bot.run();
         break;
       }
-      case 'whatsapp':
-        process.stderr.write('WhatsApp channel is not yet implemented. Coming soon.\n');
-        break;
     }
   }
 
