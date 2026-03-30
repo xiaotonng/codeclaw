@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Bot } from '../src/bot.ts';
-import { getProjectSkillPaths, initializeProjectSkills, listSkills } from '../src/code-agent.ts';
-import { getSkillsListData, resolveSkillPrompt } from '../src/bot-commands.ts';
+import { Bot } from '../src/bot/bot.ts';
+import { getProjectSkillPaths, initializeProjectSkills, listSkills } from '../src/agent/index.ts';
+import { getSkillsListData, resolveSkillPrompt } from '../src/bot/commands.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 
 const envSnapshot = captureEnv(['PIKICLAW_CONFIG', 'PIKICLAW_WORKDIR']);

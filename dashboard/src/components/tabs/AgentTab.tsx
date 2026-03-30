@@ -54,6 +54,15 @@ type CopyPack = {
   installing: string;
   noEffort: string;
   loadFailed: string;
+  latestVersion: string;
+  updateAvailable: string;
+  updateSkipped: string;
+  updateFailed: string;
+  update: string;
+  updating: string;
+  checkUpdate: string;
+  checking: string;
+  upToDate: string;
 };
 
 function getCopy(locale: Locale): CopyPack {
@@ -91,6 +100,15 @@ function getCopy(locale: Locale): CopyPack {
       installing: '安装中...',
       noEffort: '不支持调整',
       loadFailed: '无法加载智能体状态',
+      latestVersion: '最新版本',
+      updateAvailable: '有新版本可用',
+      updateSkipped: '自动更新已跳过',
+      updateFailed: '自动更新失败',
+      update: '手动升级',
+      updating: '升级中...',
+      checkUpdate: '检查更新',
+      checking: '检查中...',
+      upToDate: '已是最新',
     };
   }
 
@@ -127,6 +145,15 @@ function getCopy(locale: Locale): CopyPack {
     installing: 'Installing...',
     noEffort: 'Not supported',
     loadFailed: 'Failed to load agent status',
+    latestVersion: 'Latest',
+    updateAvailable: 'Update available',
+    updateSkipped: 'Auto-update skipped',
+    updateFailed: 'Auto-update failed',
+    update: 'Update',
+    updating: 'Updating...',
+    checkUpdate: 'Check update',
+    checking: 'Checking...',
+    upToDate: 'Up to date',
   };
 }
 
@@ -234,6 +261,10 @@ function AgentRow({
   t,
   installing,
   onInstall,
+  updatingAgent,
+  checkingAgent,
+  onUpdate,
+  onCheckUpdate,
   loading = false,
 }: {
   agent: AgentRuntimeStatus;
@@ -241,6 +272,10 @@ function AgentRow({
   t: (key: string) => string;
   installing: boolean;
   onInstall: (agent: AgentRuntimeStatus) => void;
+  updatingAgent: boolean;
+  checkingAgent: boolean;
+  onUpdate: (agent: AgentRuntimeStatus) => void;
+  onCheckUpdate: (agent: AgentRuntimeStatus) => void;
   loading?: boolean;
 }) {
   const meta = getAgentMeta(agent.agent);
@@ -286,6 +321,14 @@ function AgentRow({
               </div>
               <div className="mt-1 text-[12px] leading-relaxed text-fg-5">
                 {copy.version}: {versionText}
+                {agent.latestVersion && agent.updateAvailable && (
+                  <span className="ml-1.5 text-amber-400">
+                    → {agent.latestVersion}
+                  </span>
+                )}
+                {agent.latestVersion && !agent.updateAvailable && agent.installed && (
+                  <span className="ml-1.5 text-emerald-400">✓</span>
+                )}
               </div>
             </div>
           </div>
@@ -343,7 +386,7 @@ function AgentRow({
           <div className="mt-1.5 text-[12px] leading-relaxed text-fg-5">{displayModelSummary}</div>
         </div>
 
-        <div className={cn('flex justify-start xl:justify-end', agent.installed && 'xl:self-start')}>
+        <div className={cn('flex flex-col items-start gap-1.5 xl:items-end', agent.installed && 'xl:self-start')}>
           {loading && (
             <div className="inline-flex h-7 items-center gap-2 rounded-md border border-edge bg-transparent px-2.5 text-[11px] text-fg-5">
               <Spinner className="h-3 w-3" />
@@ -354,6 +397,22 @@ function AgentRow({
             <Button variant="outline" size="sm" disabled={installing} onClick={() => onInstall(agent)}>
               {installing ? copy.installing : copy.install}
             </Button>
+          )}
+          {!loading && agent.installed && agent.updateAvailable && (
+            <Button variant="primary" size="sm" disabled={updatingAgent} onClick={() => onUpdate(agent)}>
+              {updatingAgent ? copy.updating : copy.update}
+            </Button>
+          )}
+          {!loading && agent.installed && !agent.updateAvailable && (
+            <Button variant="ghost" size="sm" disabled={checkingAgent} onClick={() => onCheckUpdate(agent)}>
+              {checkingAgent ? copy.checking : copy.checkUpdate}
+            </Button>
+          )}
+          {!loading && agent.installed && agent.updateAvailable && agent.updateStatus === 'skipped' && agent.updateDetail && (
+            <div className="text-[11px] leading-relaxed text-amber-400">{copy.updateSkipped}: {agent.updateDetail}</div>
+          )}
+          {!loading && agent.installed && agent.updateStatus === 'failed' && agent.updateDetail && (
+            <div className="text-[11px] leading-relaxed text-red-400">{copy.updateFailed}: {agent.updateDetail}</div>
           )}
         </div>
       </div>
@@ -512,6 +571,42 @@ export function AgentTab() {
       setInstallingAgent(current => (current === agent.agent ? null : current));
     }
   }, [installingAgent, refresh, t, toast]);
+
+  const [updatingAgent, setUpdatingAgent] = useState<Agent | null>(null);
+  const [checkingAgent, setCheckingAgent] = useState<Agent | null>(null);
+
+  const handleUpdate = useCallback(async (agent: AgentRuntimeStatus) => {
+    if (updatingAgent) return;
+    setUpdatingAgent(agent.agent);
+    try {
+      const result = await api.updateAgent(agent.agent);
+      if (!result.ok) throw new Error(result.error || t('config.agentInstallFailed'));
+      applySnapshot(setSnapshot, result);
+      toast(copy.upToDate);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : copy.updateFailed;
+      toast(message, false);
+      void refresh();
+    } finally {
+      setUpdatingAgent(current => (current === agent.agent ? null : current));
+    }
+  }, [copy.updateFailed, copy.upToDate, refresh, t, toast, updatingAgent]);
+
+  const handleCheckUpdate = useCallback(async (agent: AgentRuntimeStatus) => {
+    if (checkingAgent) return;
+    setCheckingAgent(agent.agent);
+    try {
+      const result = await api.checkAgentUpdate(agent.agent);
+      if (!result.ok) throw new Error(result.error || copy.loadFailed);
+      applySnapshot(setSnapshot, result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : copy.loadFailed;
+      toast(message, false);
+      void refresh();
+    } finally {
+      setCheckingAgent(current => (current === agent.agent ? null : current));
+    }
+  }, [checkingAgent, copy.loadFailed, refresh, toast]);
   const initialLoading = loading && !snapshot;
 
   const defaultAgentValue = initialLoading
@@ -573,6 +668,10 @@ export function AgentTab() {
               installing={installingAgent === agent.agent}
               loading={initialLoading}
               onInstall={handleInstall}
+              updatingAgent={updatingAgent === agent.agent}
+              checkingAgent={checkingAgent === agent.agent}
+              onUpdate={handleUpdate}
+              onCheckUpdate={handleCheckUpdate}
             />
           ))}
         </div>

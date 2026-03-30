@@ -2,17 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../src/code-agent.ts', async importOriginal => {
-  const actual = await importOriginal<typeof import('../src/code-agent.ts')>();
+vi.mock('../src/agent/index.ts', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/agent/index.ts')>();
   return {
     ...actual,
     doStream: vi.fn(),
   };
 });
 
-import { doStream } from '../src/code-agent.ts';
-import { ensureManagedSession } from '../src/code-agent.ts';
-import { Bot } from '../src/bot.ts';
+import { doStream } from '../src/agent/index.ts';
+import { ensureManagedSession } from '../src/agent/index.ts';
+import { Bot } from '../src/bot/bot.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 import { makeStreamResult } from './support/stream-result.ts';
 

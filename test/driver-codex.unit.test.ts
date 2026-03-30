@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { getSessionMessages, shutdownCodexServer } from '../src/code-agent.ts';
+import { getSessionMessages, shutdownCodexServer } from '../src/agent/index.ts';
 import { withTempHome } from './support/env.ts';
 
 afterEach(() => {

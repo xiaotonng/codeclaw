@@ -1,4 +1,4 @@
-import type { Agent, StreamResult } from '../../src/code-agent.ts';
+import type { Agent, StreamResult } from '../../src/agent/index.ts';
 
 export function makeStreamResult(
   agent: Agent,

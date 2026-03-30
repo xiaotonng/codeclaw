@@ -9,7 +9,7 @@ import {
   resolveMcpServerCommand,
   resolvePlaywrightMcpProxyCommand,
   resolveSendFilePath,
-} from '../src/mcp-bridge.ts';
+} from '../src/agent/mcp/bridge.ts';
 import { makeTmpDir } from './support/env.ts';
 
 function writeFile(filePath: string, content = '') {
@@ -21,14 +21,14 @@ describe('resolveMcpServerCommand', () => {
   it('reuses the current CLI entrypoint from source and falls back to the compiled session server', () => {
     // --- Source entrypoint scenario ---
     const root1 = makeTmpDir('pikiclaw-mcp-bridge-');
-    const cliPath = path.join(root1, 'src', 'cli.ts');
+    const cliPath = path.join(root1, 'src', 'cli', 'main.ts');
     writeFile(cliPath, 'console.log("cli");\n');
 
     const command1 = resolveMcpServerCommand({
       execPath: '/usr/local/bin/node',
       execArgv: ['--loader', 'tsx', '--inspect=9229'],
       argv: ['node', cliPath],
-      moduleUrl: `file://${path.join(root1, 'src', 'mcp-bridge.ts')}`,
+      moduleUrl: `file://${path.join(root1, 'src', 'agent', 'mcp', 'bridge.ts')}`,
     });
 
     expect(command1).toEqual({
@@ -38,15 +38,15 @@ describe('resolveMcpServerCommand', () => {
 
     // --- Compiled session server fallback scenario ---
     const root2 = makeTmpDir('pikiclaw-mcp-bridge-');
-    const distDir = path.join(root2, 'dist');
-    const serverPath = path.join(distDir, 'mcp-session-server.js');
+    const mcpDir = path.join(root2, 'dist', 'agent', 'mcp');
+    const serverPath = path.join(mcpDir, 'session-server.js');
     writeFile(serverPath, 'console.log("server");\n');
 
     const command2 = resolveMcpServerCommand({
       execPath: '/usr/local/bin/node',
       execArgv: [],
       argv: ['node', path.join(root2, 'other.js')],
-      moduleUrl: `file://${path.join(distDir, 'mcp-bridge.js')}`,
+      moduleUrl: `file://${path.join(mcpDir, 'bridge.js')}`,
     });
 
     expect(command2).toEqual({

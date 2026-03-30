@@ -1,3 +1,7 @@
+/**
+ * Managed browser profile directory for Playwright integration.
+ */
+
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,7 +12,7 @@ import {
   PLAYWRIGHT_MCP_PACKAGE_NAME,
   PLAYWRIGHT_MCP_PACKAGE_SPEC,
   PLAYWRIGHT_MCP_BROWSER_ARGS,
-} from './constants.js';
+} from './core/constants.js';
 
 export type ManagedBrowserProfileStatus = 'ready' | 'needs_setup' | 'chrome_missing';
 

@@ -49,8 +49,8 @@ describe('Gemini usage resolution', () => {
       ],
     }) + '\n200');
 
-    const { getDriver } = await import('../src/agent-driver.ts');
-    const { getUsage } = await import('../src/code-agent.ts');
+    const { getDriver } = await import('../src/agent/driver.ts');
+    const { getUsage } = await import('../src/agent/index.ts');
     const driver = getDriver('gemini');
 
     const usage = await driver.getUsageLive!({ agent: 'gemini', model: 'gemini-2.5-pro' });
@@ -86,8 +86,8 @@ describe('Gemini usage resolution', () => {
   it('returns a surfaced HTTP error when the live quota query fails without cached data', async () => {
     execSyncMock.mockReturnValue(JSON.stringify({ error: { message: 'invalid token' } }) + '\n401');
 
-    const { getDriver } = await import('../src/agent-driver.ts');
-    const { getUsage } = await import('../src/code-agent.ts');
+    const { getDriver } = await import('../src/agent/driver.ts');
+    const { getUsage } = await import('../src/agent/index.ts');
     const driver = getDriver('gemini');
 
     const usage = await driver.getUsageLive!({ agent: 'gemini' });
@@ -136,7 +136,7 @@ describe('Gemini session tail', () => {
       kind: 'chat',
     }, null, 2));
 
-    const { getSessionTail } = await import('../src/code-agent.ts');
+    const { getSessionTail } = await import('../src/agent/index.ts');
     const tail = await getSessionTail({
       agent: 'gemini',
       sessionId: 'gemini-session-1',
@@ -191,7 +191,7 @@ describe('Gemini session listing', () => {
       kind: 'chat',
     }, null, 2));
 
-    const { getSessions } = await import('../src/code-agent.ts');
+    const { getSessions } = await import('../src/agent/index.ts');
     const result = await getSessions({ agent: 'gemini', workdir, limit: 5 });
 
     expect(result.ok).toBe(true);
@@ -212,7 +212,7 @@ describe('Gemini session listing', () => {
       projects: { [workdir]: 'pikiclaw' },
     }));
 
-    const { getSessions } = await import('../src/code-agent.ts');
+    const { getSessions } = await import('../src/agent/index.ts');
     const result = await getSessions({ agent: 'gemini', workdir, limit: 5 });
 
     expect(result.ok).toBe(true);

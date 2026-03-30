@@ -13,7 +13,7 @@ const {
   };
 });
 
-vi.mock('../src/runtime.ts', () => ({
+vi.mock('../src/dashboard/runtime.ts', () => ({
   runtime: runtimeMock,
 }));
 
@@ -27,7 +27,7 @@ describe('session-control', () => {
     const submitSessionTask = vi.fn(() => ({ ok: true, queued: true, taskId: 'task-1', sessionKey: 'codex:sess-1' }));
     getBotRefMock.mockReturnValue({ submitSessionTask });
 
-    const { queueDashboardSessionTask } = await import('../src/session-control.ts');
+    const { queueDashboardSessionTask } = await import('../src/dashboard/session-control.ts');
     const result = queueDashboardSessionTask({
       workdir: '/tmp/pikiclaw',
       agent: 'codex',
@@ -59,7 +59,7 @@ describe('session-control', () => {
       cancelSessionTask,
       getSessionStreamState,
       steerSessionTask,
-    } = await import('../src/session-control.ts');
+    } = await import('../src/dashboard/session-control.ts');
 
     expect(getSessionStreamState('codex', 'sess-1')).toEqual({
       ok: true,

@@ -16,7 +16,7 @@ vi.mock('node:child_process', async importOriginal => {
 const ORIGINAL_ENV = { ...process.env };
 
 async function loadModule() {
-  return import('../src/process-control.ts');
+  return import('../src/core/process-control.ts');
 }
 
 beforeEach(() => {
