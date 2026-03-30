@@ -1,10 +1,10 @@
 {
   "name": "pikiclaw",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Put the world's smartest AI agents in your pocket. Command local Claude & Gemini via IM. | 让最好用的 IM 变成你电脑上的顶级 Agent 控制台",
   "type": "module",
   "bin": {
-    "pikiclaw": "dist/cli.js"
+    "pikiclaw": "dist/cli/main.js"
   },
   "files": [
     "dist/",
@@ -29,7 +29,7 @@
   },
   "scripts": {
     "dev": "bash scripts/dev.sh",
-    "command": "set -ae && . ./.env && set +a && tsx src/run.ts",
+    "command": "set -ae && . ./.env && set +a && tsx src/cli/run.ts",
     "build:dashboard": "vite build --config dashboard/vite.config.ts",
     "build": "npm run build:dashboard && tsc",
     "prepack": "npm run build",

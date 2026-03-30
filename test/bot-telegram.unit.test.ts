@@ -10,11 +10,11 @@ vi.mock('node:child_process', async importOriginal => {
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { TelegramBot } from '../src/bot-telegram.ts';
-import { TelegramChannel } from '../src/channel-telegram.ts';
-import * as agentDriver from '../src/agent-driver.ts';
-import type { Agent, StreamResult } from '../src/code-agent.ts';
-import { ensureManagedSession } from '../src/code-agent.ts';
+import { TelegramBot } from '../src/channels/telegram/bot.ts';
+import { TelegramChannel } from '../src/channels/telegram/channel.ts';
+import * as agentDriver from '../src/agent/driver.ts';
+import type { Agent, StreamResult } from '../src/agent/index.ts';
+import { ensureManagedSession } from '../src/agent/index.ts';
 import { makeTmpDir } from './support/env.ts';
 import { makeStreamResult } from './support/stream-result.ts';
 import { createTelegramBotHarness } from './support/telegram-bot-harness.ts';

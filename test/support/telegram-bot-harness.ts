@@ -1,10 +1,10 @@
-import type { TgContext } from '../../src/channel-telegram.ts';
-import { TelegramBot } from '../../src/bot-telegram.ts';
+import type { TgContext } from '../../src/channels/telegram/channel.ts';
+import { TelegramBot } from '../../src/channels/telegram/bot.ts';
 import { vi } from 'vitest';
 
 // Prevent Bot constructor from touching real filesystem (skills merge, gitignore, etc.)
-vi.mock('../../src/code-agent.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/code-agent.ts')>();
+vi.mock('../../src/agent/index.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/agent/index.ts')>();
   return { ...actual, initializeProjectSkills: vi.fn() };
 });
 

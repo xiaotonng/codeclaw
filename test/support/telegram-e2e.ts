@@ -1,4 +1,4 @@
-import type { TelegramChannel, TgCallbackContext, TgContext, TgMessage } from '../../src/channel-telegram.ts';
+import type { TelegramChannel, TgCallbackContext, TgContext, TgMessage } from '../../src/channels/telegram/channel.ts';
 
 export interface ReceivedMsg {
   text: string;

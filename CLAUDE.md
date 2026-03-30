@@ -1,86 +1,134 @@
 # Pikiclaw
 
-IM-driven bridge for local coding agents. Messages arrive from Telegram or Feishu, pikiclaw streams them into a local agent session, and sends output, files, and screenshots back through the chat channel.
+IM-driven bridge for local coding agents. Messages arrive from Telegram, Feishu, or WeChat, pikiclaw streams them into a local agent session, and sends output, files, and screenshots back through the chat channel.
 
 ## Project Structure
 
 ```text
 src/
-  cli.ts                        Entry point: daemon/watchdog, dashboard, channel launch
-  cli-channels.ts               Channel resolution helpers
+  core/                              # Zero-business-logic infrastructure
+    constants.ts                     Centralized timeouts, retries, numeric constants
+    logging.ts                       Structured logging with scoped writers
+    version.ts                       Package version from package.json
+    process-control.ts               Restart coordination, watchdog, process tree kill
+    utils.ts                         Pure utilities: env parsing, formatting, shell helpers
+    config/
+      user-config.ts                 ~/.pikiclaw/setting.json load/save/sync
+      runtime-config.ts              Runtime agent model and effort resolution
+      validation.ts                  Channel credential validation
 
-  bot.ts                        Shared bot runtime and config
-  bot-commands.ts               Shared command data layer
-  bot-command-ui.ts             Shared selection UI models and action executor
-  bot-handler.ts                Generic message pipeline
-  bot-menu.ts                   Built-in menu commands and skill command mapping
-  bot-streaming.ts              Stream preview parsing helpers
+  agent/                             # Agent abstraction layer
+    index.ts                         Barrel re-export (loads drivers, exposes public API)
+    types.ts                         All shared type definitions (StreamOpts, SessionInfo, …)
+    utils.ts                         Agent utilities: logging, error normalization, tool summaries
+    session.ts                       Session workspace CRUD, classification, export/import
+    stream.ts                        CLI spawn framework, stream orchestration, detection
+    driver.ts                        AgentDriver interface + pluggable registry
+    skills.ts                        Project skill discovery (.pikiclaw/skills)
+    auto-update.ts                   Background agent CLI version checking
+    npm.ts                           NPM helpers for agent package management
+    drivers/
+      claude.ts                      Claude Code CLI driver
+      codex.ts                       Codex CLI driver
+      gemini.ts                      Gemini CLI driver
+    mcp/
+      bridge.ts                      Per-stream MCP bridge orchestration
+      session-server.ts              Stdio MCP server for agent CLIs
+      playwright-proxy.ts            Playwright MCP proxy for browser automation
+      tools/
+        workspace.ts                 im_list_files / im_send_file
+        desktop.ts                   Desktop GUI automation via Appium
+        types.ts                     MCP tool type definitions
 
-  bot-telegram.ts               Telegram bot orchestration
-  bot-telegram-render.ts        Telegram rendering
-  bot-telegram-live-preview.ts  Channel-agnostic live preview controller
-  bot-telegram-directory.ts     Telegram workdir browser
+  bot/                               # Channel-agnostic bot orchestration
+    bot.ts                           Bot base class: chat state, task queue, streaming
+    host.ts                          Host system data: battery, CPU, memory
+    commands.ts                      Channel-agnostic command data layer
+    command-ui.ts                    Interactive selection UI and action executor
+    orchestration.ts                 Session/message orchestration helpers
+    menu.ts                          Menu command definitions, skill mapping
+    streaming.ts                     Stream preview parsing
+    render-shared.ts                 Shared rendering utilities
+    human-loop.ts                    Human-in-the-loop prompt state machine
+    human-loop-codex.ts              Codex user-input → IM prompt mapping
+    session-hub.ts                   Cross-agent session querying
+    session-status.ts                Runtime session status for dashboard
 
-  bot-feishu.ts                 Feishu bot orchestration
-  bot-feishu-render.ts          Feishu rendering
+  channels/                          # IM channel implementations (physically isolated)
+    base.ts                          Abstract Channel transport + capability flags
+    states.ts                        Channel validation caching
+    telegram/
+      channel.ts                     Telegram transport layer
+      bot.ts                         Telegram bot orchestration
+      render.ts                      Telegram message rendering
+      live-preview.ts                Live preview controller
+      directory.ts                   Workdir browser
+    feishu/
+      channel.ts                     Feishu transport layer
+      bot.ts                         Feishu bot orchestration
+      render.ts                      Feishu card rendering
+      markdown.ts                    Feishu markdown helpers
+    weixin/
+      channel.ts                     WeChat transport layer
+      api.ts                         WeChat API integration
+      bot.ts                         WeChat bot orchestration
 
-  channel-base.ts               Abstract channel transport
-  channel-telegram.ts           Telegram transport
-  channel-feishu.ts             Feishu transport
+  dashboard/                         # Dashboard server + API
+    server.ts                        Hono HTTP server
+    runtime.ts                       Runtime singleton (bot ref, prefs, cache)
+    platform.ts                      Platform detection helpers
+    session-control.ts               Public session task control surface
+    routes/
+      config.ts                      Config/channel/extension API routes
+      agents.ts                      Agent/model API routes
+      sessions.ts                    Session/workspace API routes
 
-  agent-driver.ts               AgentDriver interface + registry
-  code-agent.ts                 Shared agent layer, session workspaces, skills, MCP bridge
-  driver-claude.ts              Claude driver
-  driver-codex.ts               Codex driver
-  driver-gemini.ts              Gemini driver
+  cli/                               # CLI entry points
+    main.ts                          Entry point: daemon, args, setup, channel launch
+    channels.ts                      Channel resolution helpers
+    setup-wizard.ts                  Interactive terminal setup
+    onboarding.ts                    Setup/doctor state assessment
+    run.ts                           Standalone local commands
 
-  mcp-bridge.ts                 Per-stream MCP bridge orchestration
-  mcp-session-server.ts         MCP stdio server launched by agent CLIs
-  tools/
-    workspace.ts                im_list_files / im_send_file
-    capture.ts                  take_screenshot
-    gui.ts                      Reserved GUI tool module
-    types.ts                    MCP tool definitions and helpers
-
-  server.ts                     Hono-based dashboard server
-  runtime.ts                    Dashboard runtime singleton (bot ref, prefs, cache)
-  routes/
-    config.ts                   Config/channel/extension/permission API routes
-    agents.ts                   Agent/model API routes
-    sessions.ts                 Session/workspace API routes
-  config-validation.ts          Channel credential checks
-  channel-states.ts             Channel validation caching
-  session-status.ts             Runtime session helpers
-
-  user-config.ts                ~/.pikiclaw/setting.json persistence
-  onboarding.ts                 setup/doctor state
-  setup-wizard.ts               terminal setup flow
-  process-control.ts            restart + watchdog helpers
-  run.ts                        standalone local commands
+  browser-profile.ts                 Managed browser profile for Playwright
 ```
+
+## Layered Architecture
+
+Dependencies flow strictly downward:
+
+```
+cli/  →  dashboard/  →  channels/*  →  bot/  →  agent/  →  core/
+```
+
+- **core/** has zero business-logic dependencies
+- **agent/** depends only on core/
+- **bot/** depends on agent/ and core/
+- **channels/** depend on bot/, agent/, and core/
+- **dashboard/** and **cli/** sit at the top
 
 ## Key Concepts
 
-- `bot.ts` owns shared runtime state and `runStream()`
-- `bot-commands.ts` returns structured data for command responses
-- `bot-command-ui.ts` centralizes session/agent/model/skill selection logic
-- `bot-handler.ts` runs the standard placeholder -> preview -> stream -> final reply flow
-- `code-agent.ts` dispatches to registered drivers and handles session workspace mechanics
-- `mcp-bridge.ts` injects session-scoped MCP tools into each stream
-- `server.ts` is the Hono-based dashboard server; `runtime.ts` holds the singleton bot ref and dashboard state
-- `routes/*.ts` are modular Hono route handlers for all dashboard API endpoints
-- Dashboard frontend uses react-router-dom for page routing (Vite + React SPA served as static files)
+- `bot/bot.ts` owns shared runtime state and `runStream()`
+- `agent/index.ts` is the barrel entry point for all agent functionality
+- `agent/session.ts` handles all session workspace CRUD and classification
+- `agent/stream.ts` contains the CLI spawn framework and `doStream()` orchestration
+- `agent/mcp/bridge.ts` injects session-scoped MCP tools into each stream
+- Each channel in `channels/*/` is physically isolated — modifying Telegram never requires touching Feishu code
+- Dashboard frontend uses react-router-dom (Vite + React SPA served as static files)
 
-## Current Product Surface
+## Quick Reference: Where to Look
 
-- Channels: Telegram and Feishu
-- Agents: Claude Code, Codex CLI, Gemini CLI
-- Skills: `.pikiclaw/skills` and `.claude/commands`
-- Session-scoped MCP tools:
-  - `im_list_files`
-  - `im_send_file`
-  - `take_screenshot`
-- Dashboard setup and runtime monitoring
+| Task | Files to read |
+|------|---------------|
+| Add a new agent driver | `agent/driver.ts`, any `agent/drivers/*.ts` as example |
+| Modify session management | `agent/session.ts`, `agent/types.ts` |
+| Change streaming behavior | `agent/stream.ts`, `bot/bot.ts` (runStream) |
+| Add a Telegram command | `channels/telegram/bot.ts`, `bot/commands.ts` |
+| Modify Feishu rendering | `channels/feishu/render.ts`, `bot/render-shared.ts` |
+| Add a dashboard API route | `dashboard/routes/*.ts`, `dashboard/runtime.ts` |
+| Change MCP tool behavior | `agent/mcp/tools/*.ts`, `agent/mcp/bridge.ts` |
+| Modify user config schema | `core/config/user-config.ts` |
 
 ## Test Commands
 
@@ -94,7 +142,6 @@ npx vitest run test/code-agent.unit.test.ts
 
 - Persistent config is `~/.pikiclaw/setting.json`
 - The dashboard is part of the normal runtime, not just a setup helper
-- GUI automation tools are not fully implemented yet; `src/tools/gui.ts` is still a placeholder
 - This machine always has a production/self-bootstrap communication path via `npx pikiclaw@latest`; do not kill, replace, or "clean up" that process when the task only concerns dev mode
 - `npm run dev` is the local-only development path: it runs with `--no-daemon`, stays on the checked-out source tree, and rewrites `~/.pikiclaw/dev/dev.log` from scratch on each launch
 - If a test or validation step needs a running `pikiclaw` process, use `npm run dev`

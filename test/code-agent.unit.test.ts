@@ -25,7 +25,7 @@ import {
   shutdownCodexServer,
   stageSessionFiles,
   type StreamOpts,
-} from '../src/code-agent.ts';
+} from '../src/agent/index.ts';
 import { makeTmpDir, withTempHome } from './support/env.ts';
 
 const tmpDir = path.join(os.tmpdir(), 'pikiclaw-test-' + process.pid);

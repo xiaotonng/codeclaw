@@ -4,7 +4,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { TelegramChannel } from '../src/channel-telegram.ts';
+import { TelegramChannel } from '../src/channels/telegram/channel.ts';
 import { makeTmpDir } from './support/env.ts';
 
 function createTestChannel(overrides: Record<string, any> = {}) {

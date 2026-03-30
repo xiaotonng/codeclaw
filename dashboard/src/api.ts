@@ -94,6 +94,10 @@ export const api = {
     ),
   updateRuntimeAgent: (patch: Record<string, unknown>) =>
     post<{ ok: boolean; error?: string } & AgentStatusResponse>('/api/runtime-agent', patch),
+  checkAgentUpdate: (agent: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string } & AgentStatusResponse>('/api/agent-check-update', { agent }, { timeoutMs: 30_000, ...opts }),
+  updateAgent: (agent: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string } & AgentStatusResponse>('/api/agent-update', { agent }, { timeoutMs: 600_000, ...opts }),
   saveConfig: (patch: Record<string, unknown>) => post<{ ok: boolean; configPath?: string }>('/api/config', patch),
   validateTelegramConfig: (token: string, allowedChatIds = '', opts?: ApiRequestOptions) =>
     post<{ ok: boolean; error?: string | null; bot?: { username: string; displayName?: string }; normalizedAllowedChatIds?: string }>(

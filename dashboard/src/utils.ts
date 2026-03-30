@@ -184,7 +184,7 @@ export function sanitizeSessionQuestionPreview(text?: string | null): string {
 }
 
 export function sessionListDisplayText(session: Pick<SessionInfo, 'lastQuestion' | 'title' | 'sessionId'>): string {
-  return sanitizeSessionQuestionPreview(session.lastQuestion) || cleanSessionPreviewText(session.title) || session.sessionId;
+  return cleanSessionPreviewText(session.title) || sanitizeSessionQuestionPreview(session.lastQuestion) || session.sessionId;
 }
 
 export function sessionListContextText(

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTurnWindow, type TailMessage } from '../src/code-agent.ts';
+import { applyTurnWindow, type TailMessage } from '../src/agent/index.ts';
 
 function conversation(turns: number): TailMessage[] {
   const messages: TailMessage[] = [];

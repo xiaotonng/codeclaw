@@ -39,6 +39,10 @@ export interface AgentRuntimeStatus extends AgentInfo {
   isDefault: boolean;
   models: ModelInfo[];
   usage: UsageResult | null;
+  latestVersion?: string | null;
+  updateAvailable?: boolean;
+  updateStatus?: string | null;
+  updateDetail?: string | null;
 }
 
 export interface AgentStatusResponse {

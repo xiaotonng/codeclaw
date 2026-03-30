@@ -12,7 +12,7 @@ mkdir -p "${DEV_DIR}"
 # Kill any previous dev processes (npm -> bash -> tsx -> node tree)
 _killed=0
 # 1) Kill by "tsx src/cli.ts --no-daemon" pattern (the actual node worker)
-if pkill -f 'tsx src/cli.ts --no-daemon' 2>/dev/null; then
+if pkill -f 'tsx src/cli/main.ts --no-daemon' 2>/dev/null; then
   _killed=1
 fi
 # 2) Kill whatever is listening on the dev dashboard port
@@ -42,5 +42,5 @@ unset CLAUDECODE
 
 {
   npm run build:dashboard
-  npx tsx src/cli.ts --no-daemon "$@"
+  npx tsx src/cli/main.ts --no-daemon "$@"
 } 2>&1 | node scripts/retained-tee.mjs "${LOG_FILE}"

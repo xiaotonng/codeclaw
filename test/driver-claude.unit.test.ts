@@ -61,7 +61,7 @@ describe('Claude usage resolution', () => {
         throw new Error(`Unexpected command: ${cmd}`);
       });
 
-      const { getUsage } = await import('../src/code-agent.ts');
+      const { getUsage } = await import('../src/agent/index.ts');
       const usage = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
 
       // Should fall through to telemetry, not report the OAuth error
@@ -95,7 +95,7 @@ describe('Claude usage resolution', () => {
         throw new Error('No OAuth token');
       });
 
-      const { getUsage } = await import('../src/code-agent.ts');
+      const { getUsage } = await import('../src/agent/index.ts');
       const usage = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
 
       expect(usage.ok).toBe(true);
@@ -115,7 +115,7 @@ describe('Claude context fallback', () => {
   });
 
   it('uses 1M fallback for Opus and Sonnet base models', async () => {
-    const { doClaudeStream } = await import('../src/code-agent.ts');
+    const { doClaudeStream } = await import('../src/agent/index.ts');
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-claude-context-'));
     const fakeBin = path.join(tmpDir, 'bin');
     fs.mkdirSync(fakeBin, { recursive: true });
