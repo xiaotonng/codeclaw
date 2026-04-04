@@ -333,6 +333,11 @@ class FeishuChannel extends Channel {
   private running = false;
   private messageChains = new Map<string, Promise<void>>();
 
+  /** Recently processed message IDs — guards against Feishu server retries. */
+  private _seenMessageIds = new Set<string>();
+  private _seenMessageIdQueue: string[] = [];
+  private static readonly SEEN_MESSAGE_CAP = 256;
+
   /** Tracks CardKit-backed cards: messageId → { cardId, sequence, lastContent, streaming } */
   private cardStates = new Map<string, { cardId: string; sequence: number; lastContent: string; streaming: boolean }>();
 
@@ -471,13 +476,11 @@ class FeishuChannel extends Channel {
 
   private _registerEvents() {
     this.eventDispatcher.register({
-      'im.message.receive_v1': async (data: any) => {
-        try {
-          await this._handleMessageEvent(data);
-        } catch (e: any) {
+      'im.message.receive_v1': (data: any) => {
+        void this._handleMessageEvent(data).catch(e => {
           this._log(`[dispatch] error: ${e}`, 'warn');
           this._hError?.(e instanceof Error ? e : new Error(String(e)));
-        }
+        });
       },
       'card.action.trigger': (data: any) => {
         void this._dispatchCardAction(data).catch(e => {
@@ -511,6 +514,18 @@ class FeishuChannel extends Channel {
     const msgType = msg.message_type as string;
 
     if (!chatId || !messageId) return;
+
+    // Dedup: Feishu server may retry events when the ack is slow
+    if (this._seenMessageIds.has(messageId)) {
+      this._debug(`[recv] dedup: message=${messageId} already processed, skipping`);
+      return;
+    }
+    this._seenMessageIds.add(messageId);
+    this._seenMessageIdQueue.push(messageId);
+    while (this._seenMessageIdQueue.length > FeishuChannel.SEEN_MESSAGE_CAP) {
+      this._seenMessageIds.delete(this._seenMessageIdQueue.shift()!);
+    }
+
     if (!this._isAllowed(chatId)) { this._debug(`[recv] blocked: chat=${chatId} not allowed`); return; }
     this.knownChats.add(chatId);
 
