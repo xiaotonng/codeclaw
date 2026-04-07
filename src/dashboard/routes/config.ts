@@ -6,7 +6,7 @@ import { Hono } from 'hono';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { loadUserConfig, saveUserConfig, applyUserConfig, hasUserConfigFile } from '../../core/config/user-config.js';
 import { isSetupReady } from '../../cli/onboarding.js';
 import { validateFeishuConfig, validateTelegramConfig, validateWeixinConfig } from '../../core/config/validation.js';
@@ -435,6 +435,39 @@ app.get('/api/ls-dir', (c) => {
   }
 });
 
+// Git changes for a directory (uncommitted + staged)
+app.get('/api/git-changes', (c) => {
+  const dir = c.req.query('path');
+  if (!dir) return c.json({ ok: false, error: 'path is required' }, 400);
+  try {
+    if (!fs.existsSync(path.join(dir, '.git'))) {
+      return c.json({ ok: true, changes: [], isGit: false });
+    }
+    // --no-optional-locks avoids contention with other git processes
+    const result = spawnSync('git', ['diff', '--name-status', 'HEAD', '--no-renames'], {
+      cwd: dir,
+      timeout: 5_000,
+      encoding: 'utf-8',
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    });
+    const lines = (result.stdout || '').trim().split('\n').filter(Boolean);
+    const changes = lines.map(line => {
+      const [status, ...rest] = line.split('\t');
+      const file = rest.join('\t');
+      return {
+        status: status === 'A' ? 'added' as const
+          : status === 'D' ? 'deleted' as const
+          : 'modified' as const,
+        file,
+        path: path.join(dir, file),
+      };
+    });
+    return c.json({ ok: true, changes, isGit: true });
+  } catch (err) {
+    return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
 // Open file/directory in a selected editor or file browser
 app.post('/api/open-in-editor', async (c) => {
   try {
@@ -452,5 +485,62 @@ app.post('/api/open-in-editor', async (c) => {
     return c.json({ ok: false, error: detail }, 500);
   }
 });
+
+// Open git diff for a file in the selected editor
+app.post('/api/open-diff', async (c) => {
+  try {
+    const body = await c.req.json();
+    const filePath = typeof body?.filePath === 'string' ? body.filePath.trim() : '';
+    const target = isOpenTarget(body?.target) ? body.target : 'vscode';
+    if (!filePath) return c.json({ ok: false, error: 'filePath is required' }, 400);
+
+    const dir = path.dirname(filePath);
+    const relFile = path.basename(filePath);
+
+    // Write the original (HEAD) version to a temp file
+    const origResult = spawnSync('git', ['show', `HEAD:${path.relative(findGitRoot(dir), filePath)}`], {
+      cwd: dir,
+      timeout: 5_000,
+      encoding: 'buffer',
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    });
+
+    if (origResult.status !== 0) {
+      // New file — no HEAD version, just open the file
+      openPathWithTarget(filePath, target, false);
+      return c.json({ ok: true });
+    }
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-diff-'));
+    const origPath = path.join(tmpDir, `${relFile}.orig`);
+    fs.writeFileSync(origPath, origResult.stdout);
+
+    // Use editor CLI diff command (fire-and-forget)
+    const cli = target === 'cursor' ? 'cursor' : target === 'windsurf' ? 'windsurf' : 'code';
+    const child = spawn(cli, ['--diff', origPath, filePath], {
+      cwd: dir,
+      stdio: 'ignore',
+      detached: true,
+    });
+    child.unref();
+
+    // Clean up temp after a delay
+    setTimeout(() => fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {}), 30_000);
+    return c.json({ ok: true });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    runtime.log(`[open-diff] failed: ${detail}`);
+    return c.json({ ok: false, error: detail }, 500);
+  }
+});
+
+function findGitRoot(dir: string): string {
+  let current = dir;
+  while (current !== path.dirname(current)) {
+    if (fs.existsSync(path.join(current, '.git'))) return current;
+    current = path.dirname(current);
+  }
+  return dir;
+}
 
 export default app;

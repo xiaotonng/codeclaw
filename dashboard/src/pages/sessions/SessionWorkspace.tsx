@@ -9,7 +9,7 @@ import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../
 import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
 import { PlanProgressCard, hasPlan } from '../../components/PlanProgressCard';
-import type { SessionInfo, WorkspaceEntry, DirEntry, StreamPlan, OpenTarget } from '../../types';
+import type { SessionInfo, WorkspaceEntry, DirEntry, GitChange, StreamPlan, OpenTarget } from '../../types';
 import { InputComposer } from './InputComposer';
 import { UserBubble } from './TurnView';
 import { ThinkingDots } from './LivePreview';
@@ -1059,11 +1059,9 @@ const RightPanel = memo(function RightPanel({
   const outcome = session.classification?.outcome || null;
   const summaryText = sessionSummaryText(session, t);
   const nextActionText = sessionNextActionText(session, displayState, t);
+  const hasNextAction = nextActionText !== t('hub.noNextAction');
   const liveLabel = streamState?.activity?.trim() || (streamState?.thinking ? t('hub.thinkingLive') : '');
   const livePlan = hasPlan(streamState?.plan) ? streamState.plan : null;
-  const artifactBasePath = session.workspacePath || workdir;
-  const hasWorkspace = !!session.workspacePath;
-  const linkedCount = session.linkedSessions?.length || 0;
 
   return (
     <div className="panel-isolated w-[252px] shrink-0 flex flex-col overflow-hidden rounded-xl border border-edge bg-panel backdrop-blur-sm" style={{ boxShadow: 'var(--th-card-shadow)' }}>
@@ -1086,7 +1084,7 @@ const RightPanel = memo(function RightPanel({
           </div>
 
           <InfoBlock label={t('hub.summary')} content={summaryText} />
-          <InfoBlock label={t('hub.nextAction')} content={nextActionText} muted={nextActionText === t('hub.noNextAction')} />
+          {hasNextAction && <InfoBlock label={t('hub.nextAction')} content={nextActionText} />}
 
           {livePlan && (
             <PlanProgressCard
@@ -1106,13 +1104,6 @@ const RightPanel = memo(function RightPanel({
               <div className="mt-1 pl-[14px] text-[11px] text-fg-4 font-mono break-words">{liveLabel}</div>
             </div>
           )}
-
-          <div className="grid grid-cols-2 gap-2 text-[11px]">
-            <MetaStat label={t('hub.lastUpdated')} value={fmtRelative(session.runUpdatedAt || session.createdAt)} />
-            <MetaStat label={t('hub.turns')} value={session.numTurns ? String(session.numTurns) : '—'} />
-            <MetaStat label={t('hub.workspace')} value={hasWorkspace ? t('hub.artifacts') : t('hub.projectFiles')} />
-            <MetaStat label={t('hub.linked')} value={linkedCount ? String(linkedCount) : '—'} />
-          </div>
         </div>
 
         <div className="px-2 flex items-center gap-2">
@@ -1131,27 +1122,13 @@ const RightPanel = memo(function RightPanel({
           </Button>
         </div>
 
-        <SectionHeader
-          title={hasWorkspace ? t('hub.artifacts') : t('hub.projectFiles')}
-          open={filesOpen}
-          onToggle={() => setFilesOpen(v => !v)}
+        <ChangedFiles
+          workdir={workdir}
+          sessionId={sessionId}
+          openTarget={openTarget}
+          t={t}
+          toast={toast}
         />
-        {filesOpen && (
-          artifactBasePath ? (
-            <div className="space-y-2">
-              <div className="rounded-lg border border-edge/40 bg-panel-alt/20 px-3 py-2">
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-fg-5">
-                  {hasWorkspace ? t('hub.workspacePath') : t('hub.projectPath')}
-                </div>
-                <div className="mt-1 break-all font-mono text-[10px] leading-[1.5] text-fg-4">{artifactBasePath}</div>
-                {!hasWorkspace && <div className="mt-1 text-[10px] leading-[1.5] text-fg-5">{t('hub.projectFilesHint')}</div>}
-              </div>
-              <FileTree basePath={artifactBasePath} includeHidden={hasWorkspace} openTarget={openTarget} onOpenPath={handleOpenPath} t={t} />
-            </div>
-          ) : (
-            <div className="py-3 text-center text-[11px] text-fg-5">{t('hub.noFiles')}</div>
-          )
-        )}
       </div>
     </div>
   );
@@ -1172,6 +1149,96 @@ function MetaStat({ label, value }: { label: string; value: string }) {
       <div className="text-[10px] text-fg-5">{label}</div>
       <div className="mt-0.5 text-[11px] font-medium text-fg-2">{value}</div>
     </div>
+  );
+}
+
+/* ── Changed Files (git changes) ── */
+const CHANGE_STATUS_COLORS: Record<string, string> = {
+  added: 'text-ok',
+  modified: 'text-accent',
+  deleted: 'text-err',
+};
+const CHANGE_STATUS_LABELS: Record<string, string> = {
+  added: 'hub.added',
+  modified: 'hub.modified',
+  deleted: 'hub.deleted',
+};
+
+function ChangedFiles({
+  workdir,
+  sessionId,
+  openTarget,
+  t,
+  toast,
+}: {
+  workdir: string;
+  sessionId: string;
+  openTarget: OpenTarget;
+  t: (key: string) => string;
+  toast: (msg: string, ok: boolean) => void;
+}) {
+  const [changes, setChanges] = useState<GitChange[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api.gitChanges(workdir)
+      .then(res => {
+        if (!cancelled && res.ok) setChanges(res.changes);
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [workdir, sessionId]);
+
+  if (loading) return <div className="flex justify-center py-3"><Spinner className="h-3 w-3 text-fg-5" /></div>;
+  if (changes.length === 0) return null;
+
+  const handleOpenDiff = async (change: GitChange) => {
+    if (change.status === 'deleted') return;
+    try {
+      const res = await api.openDiff(change.path, openTarget);
+      if (!res.ok) throw new Error(res.error || 'Failed to open diff');
+    } catch (error: any) {
+      toast(error?.message || String(error), false);
+    }
+  };
+
+  return (
+    <>
+      <SectionHeader
+        title={t('hub.changes')}
+        badge={changes.length}
+        open={open}
+        onToggle={() => setOpen(v => !v)}
+      />
+      {open && (
+        <div className="space-y-px">
+          {changes.map(change => (
+            <button
+              key={change.file}
+              onClick={() => handleOpenDiff(change)}
+              className={cn(
+                'flex items-center gap-1.5 w-full py-1 rounded text-[11px] text-fg-3 transition-colors',
+                change.status === 'deleted' ? 'cursor-default opacity-60' : 'hover:bg-panel-h/50 cursor-pointer',
+              )}
+              style={{ paddingLeft: 8, paddingRight: 8 }}
+              title={change.status === 'deleted' ? undefined : t('hub.openDiff')}
+            >
+              <span className={cn('text-[9px] font-bold uppercase shrink-0 w-[14px]', CHANGE_STATUS_COLORS[change.status] || 'text-fg-5')}>
+                {change.status[0].toUpperCase()}
+              </span>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="shrink-0 text-fg-5">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" />
+              </svg>
+              <span className="truncate flex-1 text-left">{change.file}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 

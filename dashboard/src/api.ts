@@ -4,6 +4,7 @@ import type {
   BrowserSetupResponse,
   BrowserStatusResponse,
   OpenTarget,
+  GitChangesResult,
   HostInfo,
   LsDirResult,
   PermissionRequestResult,
@@ -146,6 +147,10 @@ export const api = {
     const qs = params.toString();
     return json<LsDirResult>(`/api/ls-dir${qs ? '?' + qs : ''}`);
   },
+  gitChanges: (dir: string) =>
+    json<GitChangesResult>(`/api/git-changes?path=${encodeURIComponent(dir)}`),
+  openDiff: (filePath: string, target?: OpenTarget) =>
+    post<{ ok: boolean; error?: string }>('/api/open-diff', { filePath, target }),
   getBrowser: () => json<BrowserStatusResponse>('/api/browser'),
   setupBrowser: (opts?: ApiRequestOptions) =>
     post<BrowserSetupResponse>('/api/browser/setup', {}, { timeoutMs: 120_000, ...opts }),

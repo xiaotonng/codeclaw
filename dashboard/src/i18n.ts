@@ -277,6 +277,7 @@ const zhCN: Record<string, string> = {
   'hub.added': '新增',
   'hub.read': '读取',
   'hub.deleted': '删除',
+  'hub.openDiff': '查看变更',
 
   // Plugins
   'plugins.title': '插件中心',
@@ -696,6 +697,7 @@ const en: Record<string, string> = {
   'hub.added': 'Added',
   'hub.read': 'Read',
   'hub.deleted': 'Deleted',
+  'hub.openDiff': 'View diff',
 
   'plugins.title': 'Plugin Center',
   'plugins.customSkills': 'Custom Skills',
