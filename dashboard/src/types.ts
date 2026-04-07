@@ -322,6 +322,19 @@ export interface BrowserSetupResponse {
   error?: string;
 }
 
+export interface GitChange {
+  status: 'added' | 'modified' | 'deleted';
+  file: string;
+  path: string;
+}
+
+export interface GitChangesResult {
+  ok: boolean;
+  changes: GitChange[];
+  isGit: boolean;
+  error?: string;
+}
+
 export interface DirEntry {
   name: string;
   path: string;

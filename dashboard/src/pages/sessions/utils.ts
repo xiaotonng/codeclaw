@@ -69,6 +69,10 @@ export function groupIntoTurns(msgs: RichMessage[]): Turn[] {
   let cur: Turn = { user: null, assistant: null };
   for (const m of msgs) {
     if (m.role === 'user') {
+      // Continuation summaries mid-assistant should not start a new turn —
+      // they are system-injected (context compression / interruption markers)
+      // and the subsequent assistant blocks belong to the same logical response.
+      if (cur.assistant && isContinuationSummary(m.text)) continue;
       if (cur.user || cur.assistant) { turns.push(cur); cur = { user: null, assistant: null }; }
       cur.user = m;
     } else if (cur.assistant) cur.assistant = mergeRichMessages(cur.assistant, m);

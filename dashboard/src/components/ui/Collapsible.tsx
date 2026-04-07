@@ -53,7 +53,7 @@ export function CollapsibleCard({
         <span className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-fg-5">
           {label}
         </span>
-        <span className="flex-1 min-w-0">{preview}</span>
+        <span className="flex-1 min-w-0 overflow-hidden">{preview}</span>
         {badge}
         <ChevronIcon open={open} />
       </button>

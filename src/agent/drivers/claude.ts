@@ -790,6 +790,21 @@ function extractClaudeBlocks(content: any, skipSystemBlocks = false, todoWriteTo
   return blocks;
 }
 
+/** Detect system-injected user events (context compression summaries, interruption markers)
+ *  that should not split the assistant turn when parsing session JSONL. */
+function isSystemInjectedUserEvent(text: string): boolean {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return true;
+  // Interruption markers injected by Claude Code
+  if (/^\[Request interrupted by user(?: for tool use)?\]$/i.test(trimmed)) return true;
+  // Context compression summaries are typically very long
+  if (trimmed.length > 800) return true;
+  // Known continuation markers
+  const lower = trimmed.toLowerCase();
+  const markers = ['continued from a previous', 'summary below covers', 'earlier portion of the conversation', 'here is a summary of', 'conversation summary'];
+  return markers.some(m => lower.includes(m));
+}
+
 function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesResult {
   const home = process.env.HOME || '';
   const projectDir = path.join(home, '.claude', 'projects', claudeProjectDirName(opts.workdir));
@@ -856,6 +871,13 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
               }
             }
             continue;
+          }
+
+          // Context compression summaries and interruption markers should not
+          // split the current assistant turn — skip them so the response stays merged.
+          if (pendingRole === 'assistant') {
+            const probe = extractClaudeText(ev.message?.content, true);
+            if (isSystemInjectedUserEvent(probe)) continue;
           }
 
           // Actual user message — flush previous and start new
