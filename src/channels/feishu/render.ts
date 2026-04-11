@@ -262,12 +262,6 @@ function buildPreviewMarkdown(input: StreamPreviewRenderInput, options?: { inclu
   return parts.join('\n\n');
 }
 
-export function buildStreamingBodyMarkdown(input: StreamPreviewRenderInput): string {
-  // CardKit streaming content uses a separate status element, so keep the
-  // body focused on live plan/activity/thinking/output without duplicating the footer.
-  return buildPreviewMarkdown(input, { includeFooter: false });
-}
-
 export function buildStreamPreviewMarkdown(input: StreamPreviewRenderInput): string {
   return buildPreviewMarkdown(input, { includeFooter: true });
 }
@@ -275,11 +269,6 @@ export function buildStreamPreviewMarkdown(input: StreamPreviewRenderInput): str
 export const feishuPreviewRenderer: LivePreviewRenderer = {
   renderInitial: buildInitialPreviewMarkdown,
   renderStream: buildStreamPreviewMarkdown,
-};
-
-export const feishuStreamingPreviewRenderer: LivePreviewRenderer = {
-  renderInitial: () => '',
-  renderStream: buildStreamingBodyMarkdown,
 };
 
 // ---------------------------------------------------------------------------

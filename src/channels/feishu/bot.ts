@@ -60,7 +60,6 @@ import {
 } from '../../core/process-control.js';
 import {
   feishuPreviewRenderer,
-  feishuStreamingPreviewRenderer,
   buildInitialPreviewMarkdown,
   buildHumanLoopPromptMarkdown,
   buildFinalReplyRender,
@@ -696,7 +695,7 @@ export class FeishuBot extends Bot {
 
     const model = session.modelId || this.modelForAgent(session.agent);
     const effort = this.effortForAgent(session.agent);
-    const placeholderId = await this.channel.sendStreamingCard(ctx.chatId, buildInitialPreviewMarkdown(session.agent, model, effort, waiting, queuePosition), {
+    const placeholderId = await this.channel.send(ctx.chatId, buildInitialPreviewMarkdown(session.agent, model, effort, waiting, queuePosition), {
       replyTo: ctx.messageId || undefined,
       keyboard: placeholderKeyboard,
     });
@@ -724,15 +723,12 @@ export class FeishuBot extends Bot {
           try { await this.channel.editMessage(ctx.chatId, placeholderId, buildInitialPreviewMarkdown(session.agent, model, effort, false), { keyboard: runningKeyboard }); } catch {}
         }
         if (placeholderId) {
-          const renderer = this.channel.isStreamingCard(placeholderId)
-            ? feishuStreamingPreviewRenderer
-            : feishuPreviewRenderer;
           livePreview = new LivePreview({
             agent: session.agent,
             chatId: ctx.chatId,
             placeholderMessageId: placeholderId,
             channel: this.channel,
-            renderer,
+            renderer: feishuPreviewRenderer,
             streamEditIntervalMs: 700,
             startTimeMs: start,
             canEditMessages: supportsChannelCapability(this.channel, 'editMessages'),
@@ -785,9 +781,6 @@ export class FeishuBot extends Bot {
         const errorText = `**Error**\n\n\`${msgText.slice(0, 500)}\``;
         if (placeholderId) {
           try {
-            if (this.channel.isStreamingCard(placeholderId)) {
-              await this.channel.endStreaming(placeholderId, 'Response interrupted.');
-            }
             await this.channel.editMessage(ctx.chatId, placeholderId, errorText);
           } catch {
             await this.channel.send(ctx.chatId, errorText).catch(() => null);
@@ -815,9 +808,6 @@ export class FeishuBot extends Bot {
     const previewMarkdown = livePreview?.getRenderedPreview()?.trim() || '';
     if (!previewMarkdown) return [placeholderId];
     try {
-      if (this.channel.isStreamingCard(placeholderId)) {
-        await this.channel.endStreaming(placeholderId, 'Steered to a new reply.');
-      }
       await this.channel.editMessage(ctx.chatId, placeholderId, previewMarkdown, {
         keyboard: { rows: [] },
       });
@@ -841,9 +831,6 @@ export class FeishuBot extends Bot {
       // Fits in one card — edit the placeholder
       if (placeholderId) {
         try {
-          if (this.channel.isStreamingCard(placeholderId)) {
-            await this.channel.endStreaming(placeholderId, 'Response complete.');
-          }
           await this.channel.editMessage(ctx.chatId, placeholderId, rendered.fullText);
           messageIds.push(placeholderId);
           return messageIds;
@@ -869,9 +856,6 @@ export class FeishuBot extends Bot {
       const firstText = `${rendered.headerText}${firstBody}${rendered.footerText}`;
       if (placeholderId) {
         try {
-          if (this.channel.isStreamingCard(placeholderId)) {
-            await this.channel.endStreaming(placeholderId, 'Response complete.');
-          }
           await this.channel.editMessage(ctx.chatId, placeholderId, firstText);
           messageIds.push(placeholderId);
         } catch {

@@ -35,6 +35,7 @@ export function TelegramModal({ open, onClose }: { open: boolean; onClose: () =>
   const [showToken, setShowToken] = useState(false);
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
   const requestRef = useRef<AbortController | null>(null);
 
   const stateRef = useRef(state);
@@ -46,6 +47,7 @@ export function TelegramModal({ open, onClose }: { open: boolean; onClose: () =>
       setIds(stateRef.current?.config.telegramAllowedChatIds || '');
       setShowToken(false);
       setResult(null);
+      setGuideOpen(!stateRef.current?.config.telegramBotToken);
     } else {
       requestRef.current?.abort();
       requestRef.current = null;
@@ -123,6 +125,27 @@ export function TelegramModal({ open, onClose }: { open: boolean; onClose: () =>
     <Modal open={open} onClose={handleRequestClose}>
       <ModalHeader title={t('modal.configureTelegram')} onClose={handleRequestClose} />
       <div className="space-y-4">
+        {/* Setup guide */}
+        <div className="rounded-lg border border-edge bg-panel-alt">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-fg-3 hover:text-fg-2 transition-colors"
+            onClick={() => setGuideOpen(!guideOpen)}
+          >
+            <span>{t('modal.tgGuideTitle')}</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`transition-transform ${guideOpen ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9" /></svg>
+          </button>
+          {guideOpen && (
+            <div className="space-y-1 border-t border-edge px-3 pb-3 pt-2 text-xs leading-relaxed text-fg-4">
+              <p>{t('modal.tgGuideStep1')}</p>
+              <p>{t('modal.tgGuideStep2')}</p>
+              <p>{t('modal.tgGuideStep3')}</p>
+              <p>{t('modal.tgGuideStep4')}</p>
+              <p className="mt-2 text-[11px] text-fg-5">{t('modal.tgGuideIdTip')}</p>
+            </div>
+          )}
+        </div>
+
         <div>
           <Label>{t('modal.botToken')}</Label>
           <div className="flex gap-2">
@@ -169,6 +192,7 @@ export function FeishuModal({ open, onClose }: { open: boolean; onClose: () => v
   const [secret, setSecret] = useState('');
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
   const requestRef = useRef<AbortController | null>(null);
 
   const stateRef = useRef(state);
@@ -179,6 +203,7 @@ export function FeishuModal({ open, onClose }: { open: boolean; onClose: () => v
       setAppId(stateRef.current?.config.feishuAppId || '');
       setSecret(stateRef.current?.config.feishuAppSecret || '');
       setResult(null);
+      setGuideOpen(!stateRef.current?.config.feishuAppId);
     } else {
       requestRef.current?.abort();
       requestRef.current = null;
@@ -255,6 +280,31 @@ export function FeishuModal({ open, onClose }: { open: boolean; onClose: () => v
     <Modal open={open} onClose={handleRequestClose}>
       <ModalHeader title={t('modal.configureFeishu')} onClose={handleRequestClose} />
       <div className="space-y-4">
+        {/* Setup guide */}
+        <div className="rounded-lg border border-edge bg-panel-alt">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-fg-3 hover:text-fg-2 transition-colors"
+            onClick={() => setGuideOpen(!guideOpen)}
+          >
+            <span>{t('modal.feishuGuideTitle')}</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`transition-transform ${guideOpen ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9" /></svg>
+          </button>
+          {guideOpen && (
+            <div className="space-y-1 border-t border-edge px-3 pb-3 pt-2 text-xs leading-relaxed text-fg-4">
+              <p>{t('modal.feishuGuideStep1')}</p>
+              <p>{t('modal.feishuGuideStep2')}</p>
+              <p>{t('modal.feishuGuideStep3')}</p>
+              <p>{t('modal.feishuGuideStep4')}</p>
+              <p className="ml-3 font-mono text-[11px] text-fg-5">{t('modal.feishuGuidePerms')}</p>
+              <p>{t('modal.feishuGuideStep5')}</p>
+              <p>{t('modal.feishuGuideStep6')}</p>
+              <p>{t('modal.feishuGuideStep7')}</p>
+              <p className="mt-2 text-[11px] text-fg-5">{t('modal.feishuGuideCardKitTip')}</p>
+            </div>
+          )}
+        </div>
+
         <div>
           <Label>{t('modal.appId')}</Label>
           <Input className="font-mono text-xs" placeholder={t('modal.feishuPlaceholder')} value={appId} onChange={e => setAppId(e.target.value)} />

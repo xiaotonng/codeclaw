@@ -6,8 +6,7 @@
  *   - Client.im: message send/edit/delete, image/file upload, resource download
  *   - Automatic tenant_access_token management
  *
- * CardKit streaming APIs (typewriter effect) use the SDK's cardkit.v1 wrappers
- * and degrade to regular interactive cards when the tenant/app cannot use them.
+ * All messages are sent as regular interactive cards (no CardKit streaming).
  */
 
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -124,39 +123,6 @@ function describeError(err: unknown): string {
     if (value != null && value !== '') parts.push(`${key}=${value}`);
   }
   return parts.join(' | ');
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function describeFeishuApiError(err: unknown): string {
-  const base = describeError(err);
-  const method = String((err as any)?.config?.method || '').toUpperCase();
-  const url = String((err as any)?.config?.url || '').trim();
-  const response = (err as any)?.response?.data;
-  const parts = [base];
-  if (method || url) parts.push(`request=${[method, url].filter(Boolean).join(' ')}`);
-  if (response != null) parts.push(`response=${safeJson(response)}`);
-  return parts.join(' | ');
-}
-
-function isCardKitCapabilityError(err: unknown): boolean {
-  const text = describeFeishuApiError(err).toLowerCase();
-  return [
-    'status code 400',
-    'permission',
-    'scope',
-    'forbidden',
-    'unsupported',
-    'not support',
-    'cardkit',
-    'streaming',
-  ].some(token => text.includes(token));
 }
 
 function isRetryableWsStartError(err: unknown): boolean {
@@ -278,36 +244,6 @@ function buildCardFromView(view: FeishuCardView): lark.InteractiveCard {
   return card;
 }
 
-function buildCard(markdown: string, opts?: { title?: string; template?: FeishuCardTemplate; rows?: FeishuCardActionRow[] }): lark.InteractiveCard {
-  return buildCardFromView({
-    markdown,
-    title: opts?.title,
-    template: opts?.template,
-    rows: opts?.rows,
-  });
-}
-
-function buildCardKitMarkdownData(markdown: string, opts?: { clearStreamingStatus?: boolean }): string {
-  const adapted = adaptMarkdownForFeishu(markdown);
-  const content = adapted.length > FEISHU_CARD_MAX
-    ? `${adapted.slice(0, FEISHU_CARD_MAX)}\n\n...(truncated)`
-    : adapted;
-  const elements = opts?.clearStreamingStatus
-    ? [
-        { tag: 'markdown', content: '', element_id: 'status' },
-        { tag: 'markdown', content, element_id: 'content' },
-      ]
-    : [
-        { tag: 'markdown', content },
-      ];
-  return JSON.stringify({
-    schema: '2.0',
-    body: {
-      elements,
-    },
-  });
-}
-
 // ---------------------------------------------------------------------------
 // FeishuChannel
 // ---------------------------------------------------------------------------
@@ -338,14 +274,8 @@ class FeishuChannel extends Channel {
   private _seenMessageIdQueue: string[] = [];
   private static readonly SEEN_MESSAGE_CAP = 256;
 
-  /** Tracks CardKit-backed cards: messageId → { cardId, sequence, lastContent, streaming } */
-  private cardStates = new Map<string, { cardId: string; sequence: number; lastContent: string; streaming: boolean }>();
-
   /** Maps open_id → chat_id for resolving menu event context. */
   private _openIdToChat = new Map<string, string>();
-
-  /** Disable CardKit after tenant/app-level failures to avoid repeated 400s. */
-  private cardKitEnabled = true;
 
   private _hCommand: FeishuCommandHandler | null = null;
   private _hMessage: FeishuMessageHandler | null = null;
@@ -755,12 +685,6 @@ class FeishuChannel extends Channel {
   async editCard(chatId: number | string, msgId: number | string, view: FeishuCardView): Promise<void> {
     if (!view.markdown.trim()) return;
 
-    const cardState = this.cardStates.get(String(msgId));
-    if (cardState) {
-      await this.editMessage(chatId, msgId, view.markdown, { keyboard: { rows: view.rows || [] } });
-      return;
-    }
-
     const card = buildCardFromView(view);
     this._logOutgoing('edit', `chat=${chatId} msg_id=${msgId} chars=${view.markdown.length} rows=${view.rows?.length || 0}`);
     try {
@@ -778,38 +702,6 @@ class FeishuChannel extends Channel {
   async editMessage(chatId: number | string, msgId: number | string, text: string, opts: SendOpts = {}): Promise<void> {
     if (!text.trim()) return;
 
-    const cardState = this.cardStates.get(String(msgId));
-    if (cardState?.streaming) {
-      if (cardState.lastContent && !text.startsWith(cardState.lastContent)) {
-        this._debug(`[edit] CardKit preview lost append-only shape for msg=${msgId}; switching to regular card edits`);
-        await this.replaceStreamingCardWithRegularCard(chatId, msgId, text, opts, 'Streaming preview stabilized.');
-        return;
-      } else if (text.length > FEISHU_CARD_MAX) {
-        this._debug(`[edit] CardKit preview length cap reached for msg=${msgId}; switching to regular card edits`);
-        await this.replaceStreamingCardWithRegularCard(chatId, msgId, text, opts, 'Preview truncated.');
-        return;
-      } else {
-        cardState.sequence++;
-        cardState.lastContent = text;
-        this._logOutgoing('stream-push', `card=${cardState.cardId} seq=${cardState.sequence} chars=${text.length}`);
-        try {
-          await this.client.cardkit.v1.cardElement.content({
-            path: { card_id: cardState.cardId, element_id: 'content' },
-            data: { content: text, sequence: cardState.sequence },
-          });
-        } catch (e: any) {
-          if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
-          this._log(`[edit] CardKit push error: ${describeFeishuApiError(e)}`, 'warn');
-        }
-        return;
-      }
-    }
-    if (cardState) {
-      await this.updateCardKitMessage(String(msgId), text);
-      return;
-    }
-
-    // Fallback: regular PATCH for non-streaming cards
     const rows = keyboardToRows(opts.keyboard);
     await this.editCard(chatId, msgId, {
       markdown: text,
@@ -818,7 +710,6 @@ class FeishuChannel extends Channel {
   }
 
   async deleteMessage(_chatId: number | string, msgId: number | string): Promise<void> {
-    this.cardStates.delete(String(msgId));
     try {
       await this.client.im.message.delete({
         path: { message_id: String(msgId) },
@@ -841,196 +732,6 @@ class FeishuChannel extends Channel {
         path: { message_id: messageId },
         data: { reaction_type: { emoji_type: emojiType } },
       }).catch(() => {});
-    }
-  }
-
-  // ========================================================================
-  // Streaming cards (CardKit v1) — typewriter effect
-  // ========================================================================
-
-  /**
-   * Create a streaming card entity and send it as a message.
-   * Returns the messageId (for session tracking) or null on failure.
-   *
-   * While streaming is active, `editMessage()` transparently pushes content
-   * via the CardKit API instead of PATCH. Call `endStreaming()` to finalize.
-   */
-  async sendStreamingCard(chatId: string, initialContent: string, opts?: { replyTo?: string; keyboard?: any }): Promise<string | null> {
-    const sendRegularCard = (text: string) => {
-      const markdown = text || 'Generating...';
-      const rows = keyboardToRows(opts?.keyboard);
-      return opts?.replyTo
-        ? this.replyCard(opts.replyTo, { markdown, rows })
-        : this.send(chatId, markdown, { keyboard: opts?.keyboard });
-    };
-
-    if (!this.cardKitEnabled) {
-      return sendRegularCard(initialContent);
-    }
-
-    const rows = keyboardToRows(opts?.keyboard);
-    const elements: any[] = [
-      { tag: 'markdown', content: initialContent || 'Generating...', element_id: 'status' },
-      { tag: 'markdown', content: '', element_id: 'content' },
-    ];
-    for (const row of rows) {
-      const actions = row.actions.filter(Boolean);
-      if (!actions.length) continue;
-      const element: any = { tag: 'action', actions };
-      const layout = row.layout || inferActionLayout(actions);
-      if (layout) element.layout = layout;
-      elements.push(element);
-    }
-
-    const cardData = {
-      schema: '2.0',
-      config: {
-        streaming_mode: true,
-        summary: { content: '[Generating...]' },
-        streaming_config: {
-          print_frequency_ms: { default: 30 },
-          print_step: { default: 3 },
-        },
-      },
-      body: {
-        elements,
-      },
-    };
-
-    // Step 1: Create card entity via CardKit
-    let cardId: string;
-    try {
-      const createResp = await this.client.cardkit.v1.card.create({
-        data: {
-          type: 'card_json',
-          data: JSON.stringify(cardData),
-        },
-      });
-      const nextCardId = createResp?.data?.card_id;
-      if (!nextCardId) throw new Error('no card_id returned');
-      cardId = nextCardId;
-    } catch (e: any) {
-      if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
-      this._log(`[streaming] CardKit create failed: ${describeFeishuApiError(e)}, falling back to regular card`, 'warn');
-      return sendRegularCard(initialContent);
-    }
-
-    // Step 2: Send card as message (reply to user's message if replyTo is set)
-    const cardContent = JSON.stringify({ type: 'card', data: { card_id: cardId } });
-    try {
-      this._logOutgoing('sendStreamingCard', `chat=${chatId} card=${cardId}${opts?.replyTo ? ` reply_to=${opts.replyTo}` : ''}`);
-      let sendResp: any;
-      if (opts?.replyTo) {
-        sendResp = await this.client.im.message.reply({
-          path: { message_id: opts.replyTo },
-          data: { msg_type: 'interactive', content: cardContent },
-        });
-      } else {
-        sendResp = await this.client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: { receive_id: chatId, msg_type: 'interactive', content: cardContent },
-        });
-      }
-      const messageId = sendResp?.data?.message_id;
-      if (!messageId) throw new Error('no message_id returned');
-
-      // Track streaming state — editMessage() will use CardKit for this messageId
-      this.cardStates.set(messageId, { cardId, sequence: 1, lastContent: '', streaming: true });
-      return messageId;
-    } catch (e: any) {
-      this._log(`[streaming] send card message failed: ${e?.message || e}`, 'warn');
-      return sendRegularCard(initialContent);
-    }
-  }
-
-  /** Check if a message is currently a streaming card (CardKit v2). */
-  isStreamingCard(messageId: string): boolean {
-    return this.cardStates.get(messageId)?.streaming === true;
-  }
-
-  /**
-   * End streaming mode on a CardKit card.
-   * Subsequent edits may continue through CardKit full-card updates or switch
-   * to regular message patching, depending on the fallback path.
-   */
-  async endStreaming(messageId: string, summary?: string): Promise<void> {
-    const state = this.cardStates.get(messageId);
-    if (!state) return;
-
-    state.sequence++;
-    const settings = {
-      config: {
-        streaming_mode: false,
-        summary: { content: summary || 'Response complete.' },
-      },
-    };
-
-    this._logOutgoing('endStreaming', `card=${state.cardId} seq=${state.sequence}`);
-    try {
-      await this.client.cardkit.v1.card.settings({
-        path: { card_id: state.cardId },
-        data: {
-          settings: JSON.stringify(settings),
-          sequence: state.sequence,
-        },
-      });
-    } catch (e: any) {
-      if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
-      this._log(`[streaming] end streaming error: ${describeFeishuApiError(e)}`, 'warn');
-    }
-    state.streaming = false;
-    state.lastContent = '';
-  }
-
-  private async replaceStreamingCardWithRegularCard(
-    chatId: number | string,
-    msgId: number | string,
-    text: string,
-    opts: SendOpts,
-    summary: string,
-  ): Promise<void> {
-    await this.endStreaming(String(msgId), summary);
-
-    const rows = keyboardToRows(opts.keyboard);
-    const card = buildCardFromView({ markdown: text, rows });
-    this._logOutgoing('edit', `chat=${chatId} msg_id=${msgId} chars=${text.length} rows=${rows.length}`);
-    try {
-      await this.client.im.message.patch({
-        path: { message_id: String(msgId) },
-        data: { content: JSON.stringify(card) },
-      });
-      this.cardStates.delete(String(msgId));
-    } catch (e: any) {
-      const msg = String(e?.message || e).toLowerCase();
-      if (msg.includes('not modified') || msg.includes('edit is not allowed')) {
-        this.cardStates.delete(String(msgId));
-        return;
-      }
-      throw e;
-    }
-  }
-
-  private async updateCardKitMessage(messageId: string, text: string): Promise<void> {
-    const state = this.cardStates.get(messageId);
-    if (!state) throw new Error(`CardKit state missing for message ${messageId}`);
-
-    state.sequence++;
-    state.lastContent = text;
-    this._logOutgoing('card-update', `card=${state.cardId} seq=${state.sequence} chars=${text.length}`);
-    try {
-      await this.client.cardkit.v1.card.update({
-        path: { card_id: state.cardId },
-        data: {
-          card: {
-            type: 'card_json',
-            data: buildCardKitMarkdownData(text, { clearStreamingStatus: true }),
-          },
-          sequence: state.sequence,
-        },
-      });
-    } catch (e: any) {
-      if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
-      throw e;
     }
   }
 
@@ -1238,9 +939,4 @@ class FeishuChannel extends Channel {
     this._debug(`[send] ${action} ${meta}`);
   }
 
-  private disableCardKit(reason: string) {
-    if (!this.cardKitEnabled) return;
-    this.cardKitEnabled = false;
-    this._log(`[streaming] CardKit disabled for this process: ${reason}`, 'warn');
-  }
 }
