@@ -42,6 +42,9 @@ const SESSION_PREFETCH_TURNS = 12;
 const LIVE_SESSION_STATE_MAX_AGE_MS = 15 * 60 * 1000;
 const sKey = (agent: string, id: string) => `${agent}:${id}`;
 
+let _slotKeySeq = 0;
+function nextMountKey() { return `mk-${Date.now().toString(36)}-${(++_slotKeySeq).toString(36)}`; }
+
 type FilterMode = 'all' | 'running' | 'review';
 
 function isOpenTarget(value: string | null | undefined): value is OpenTarget {
@@ -91,7 +94,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
   const [sidebarLoading, setSidebarLoading] = useState(true);
   // Multi-session window state: fixed-size slots determined by layoutMode
-  type SessionSlot = { agent: string; sessionId: string; workdir: string };
+  // mountKey stays stable across session promotion (pending→native) so the
+  // React tree keeps the panel mounted instead of remounting and losing state.
+  type SessionSlot = { agent: string; sessionId: string; workdir: string; mountKey: string };
   // Layout: 1/2/3/6 visible session slots
   type LayoutMode = 1 | 2 | 3 | 6;
 
@@ -107,7 +112,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [openSessions, setOpenSessionsRaw] = useState<SessionSlot[]>(() => {
     try {
       const v = sessionStorage.getItem('pikiclaw-open-sessions');
-      if (v) { const parsed = JSON.parse(v); if (Array.isArray(parsed)) return parsed; }
+      if (v) {
+        const parsed = JSON.parse(v);
+        if (Array.isArray(parsed)) return parsed.map((s: any) => ({ ...s, mountKey: s.mountKey || nextMountKey() }));
+      }
     } catch {}
     return [];
   });
@@ -164,8 +172,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setActiveSlotIndex(0);
       return;
     }
+    const withKey = next.mountKey ? next : { ...next, mountKey: nextMountKey() };
     setOpenSessions(prev => {
-      const existingIdx = prev.findIndex(s => s.agent === next.agent && s.sessionId === next.sessionId);
+      const existingIdx = prev.findIndex(s => s.agent === withKey.agent && s.sessionId === withKey.sessionId);
       if (existingIdx >= 0) {
         // Already open — just activate
         setActiveSlotIndex(existingIdx);
@@ -173,13 +182,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       }
       // Room available — fill leftmost empty slot (= end of dense array)
       if (prev.length < layoutModeRef.current) {
-        const newList = [...prev, next];
+        const newList = [...prev, withKey];
         setActiveSlotIndex(newList.length - 1);
         return newList;
       }
       // All slots full — replace active slot (evict what user is currently viewing)
       const newList = [...prev];
-      newList[activeSlotRef.current] = next;
+      newList[activeSlotRef.current] = withKey;
       return newList;
     });
   }, []);
@@ -474,14 +483,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   /* ── New session — transition after InputComposer creates it ── */
   const [newSessionPendingPrompt, setNewSessionPendingPrompt] = useState<string | null>(null);
-  // Ref survives across session promotions (pending_xxx → real ID changes React key,
-  // remounting SessionPanel). The state gets consumed on first mount but the ref
-  // preserves the text so handlePanelSessionChange can restore it.
-  const pendingPromptTextRef = useRef<string | null>(null);
 
   const handleNewSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
-    // Optimistically add the new session to the sidebar so it appears immediately
     setSessionsMap(prev => {
       const existing = prev[next.workdir] || [];
       const alreadyPresent = existing.some(s => s.sessionId === next.sessionId && s.agent === next.agent);
@@ -496,9 +500,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       };
       return { ...prev, [next.workdir]: [stub, ...existing] };
     });
-    pendingPromptTextRef.current = pendingPrompt || null;
-    // Capture the slot NewSessionView occupies (set during render)
     const targetSlot = newSessionSlotRef.current;
+    const slot: SessionSlot = { ...next, mountKey: nextMountKey() };
     // CRITICAL: setNewSessionPendingPrompt MUST be inside startTransition so it commits
     // atomically with the slot/active changes. If set outside, the "pending" render still
     // shows the OLD active panel which would consume the prompt before the new panel mounts.
@@ -506,13 +509,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setNewSessionPendingPrompt(pendingPrompt || null);
       setShowNewSession(null);
       setOpenSessions(prev => {
-        if (targetSlot >= prev.length) {
-          // NewSessionView was in an empty slot — append
-          return [...prev, next];
-        }
-        // NewSessionView was replacing a full slot — swap in-place
+        if (targetSlot >= prev.length) return [...prev, slot];
         const updated = [...prev];
-        updated[targetSlot] = next;
+        updated[targetSlot] = slot;
         return updated;
       });
       setActiveSlotIndex(targetSlot >= 0 ? targetSlot : 0);
@@ -531,24 +530,19 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   const handlePanelSessionChange = useCallback((next: { agent: string; sessionId: string; workdir: string }, fromSlotIdx?: number) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
-    // Session promotion (pending_xxx → native ID) remounts SessionPanel due to key change.
-    // Capture the pending prompt text before clearing the ref.
-    const restoredPrompt = (fromSlotIdx != null && pendingPromptTextRef.current) ? pendingPromptTextRef.current : null;
-    if (restoredPrompt) pendingPromptTextRef.current = null; // consumed — only restore once per new session
-    // CRITICAL: setNewSessionPendingPrompt MUST be inside startTransition (see handleNewSessionCreated).
     startTransition(() => {
-      if (restoredPrompt) setNewSessionPendingPrompt(restoredPrompt);
       if (fromSlotIdx != null) {
-        // Slot-aware: replace the exact slot that triggered the change (session promotion)
+        // Session promotion: update sessionId but preserve mountKey so the
+        // panel stays mounted and doesn't lose streaming state.
         setOpenSessions(prev => {
           if (fromSlotIdx >= prev.length) return prev;
           const updated = [...prev];
-          updated[fromSlotIdx] = next;
+          updated[fromSlotIdx] = { ...prev[fromSlotIdx], agent: next.agent, sessionId: next.sessionId, workdir: next.workdir };
           return updated;
         });
         setActiveSlotIndex(fromSlotIdx);
       } else {
-        setSelectedSession(next);
+        setSelectedSession({ ...next, mountKey: nextMountKey() });
       }
     });
     void loadSessionsForWorkspace(next.workdir, { background: true, force: true });
@@ -854,7 +848,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                       }
                     >
                       <SessionPanel
-                        key={sKey(slot.agent, slot.sessionId)}
+                        key={slot.mountKey}
                         session={info}
                         workdir={slot.workdir}
                         active={active && isActive}

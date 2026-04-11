@@ -2,7 +2,7 @@ import { Suspense, lazy, useState, useEffect, useCallback, useMemo } from 'react
 import { Routes, Route, useLocation } from 'react-router-dom';
 import { useStore } from './store';
 import { createT } from './i18n';
-import { Sidebar } from './components/Sidebar';
+import { Sidebar, type RestartPhase } from './components/Sidebar';
 import { Spinner, Toasts } from './components/ui';
 import { api } from './api';
 import { getDashboardTabMeta, type DashboardTab } from './tabs';
@@ -107,52 +107,46 @@ export function App() {
     }
   }, [state, prompted, location.pathname]);
 
-  const [restarting, setRestarting] = useState(false);
+  // Restart: phase-based overlay
+  const [restartPhase, setRestartPhase] = useState<RestartPhase>(null);
 
-  const handleRestart = useCallback(async () => {
-    try {
-      const result = await api.restart();
-      if (!result.ok) {
-        toast(result.error || t('modal.restartFailed'), false);
-        return;
-      }
-      setRestarting(true);
-      // Poll until the server is back (new process responds)
-      let recovered = false;
-      for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 600));
+  const onRestartClick = useCallback(() => {
+    if (restartPhase === 'restarting' || restartPhase === 'reconnecting') return;
+    if (restartPhase === 'confirm') {
+      // Confirmed — fire restart
+      setRestartPhase('restarting');
+      (async () => {
         try {
-          await api.getState();
-          recovered = true;
-          break;
-        } catch { /* server still down */ }
-      }
-      if (recovered) {
-        await reload();
-        toast(t('modal.restartSuccess'));
-      } else {
-        toast(t('modal.restartFailed'), false);
-      }
-      setRestarting(false);
-    } catch {
-      toast(t('modal.restartFailed'), false);
-      setRestarting(false);
+          const result = await api.restart();
+          if (!result.ok) {
+            toast(result.error || t('modal.restartFailed'), false);
+            setRestartPhase(null);
+            return;
+          }
+          setRestartPhase('reconnecting');
+          let recovered = false;
+          for (let i = 0; i < 30; i++) {
+            await new Promise(r => setTimeout(r, 600));
+            try { await api.getState(); recovered = true; break; } catch {}
+          }
+          if (recovered) {
+            await reload();
+            toast(t('modal.restartSuccess'));
+          } else {
+            toast(t('modal.restartFailed'), false);
+          }
+        } catch {
+          toast(t('modal.restartFailed'), false);
+        }
+        setRestartPhase(null);
+      })();
+    } else {
+      setRestartPhase('confirm');
+      setTimeout(() => setRestartPhase(p => (p === 'confirm' ? null : p)), 3000);
     }
-  }, [toast, t, reload]);
+  }, [restartPhase, toast, t, reload]);
 
   const tabMeta = getDashboardTabMeta(tab, t);
-
-  const [confirmingRestart, setConfirmingRestart] = useState(false);
-  const onRestartClick = useCallback(() => {
-    if (restarting) return;
-    if (confirmingRestart) {
-      setConfirmingRestart(false);
-      handleRestart();
-    } else {
-      setConfirmingRestart(true);
-      setTimeout(() => setConfirmingRestart(false), 3000);
-    }
-  }, [restarting, confirmingRestart, handleRestart]);
 
   return (
     <div className="noise-overlay">
@@ -165,8 +159,7 @@ export function App() {
       <div className="relative h-screen flex flex-col overflow-hidden">
         <Sidebar
           version={version}
-          confirmingRestart={confirmingRestart}
-          restarting={restarting}
+          restartPhase={restartPhase}
           onRestartClick={onRestartClick}
         />
 
@@ -231,6 +224,27 @@ export function App() {
         </Suspense>
       )}
       <Toasts items={toasts} />
+
+      {/* Full-page restart overlay */}
+      {(restartPhase === 'restarting' || restartPhase === 'reconnecting') && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-[var(--th-bg)]/80 backdrop-blur-sm animate-in">
+          <div className="flex flex-col items-center gap-4">
+            <div className="relative h-10 w-10">
+              <svg
+                width="40" height="40" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+                className="animate-spin text-fg-2" style={{ animationDuration: '1.2s' }}
+              >
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+            </div>
+            <span className="text-sm font-medium text-fg-3">
+              {restartPhase === 'restarting' ? t('modal.restarting') : t('modal.reconnecting')}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -19,15 +19,15 @@ const TAB_ROUTES: Record<string, string> = {
   system: '/system',
 };
 
+export type RestartPhase = null | 'confirm' | 'restarting' | 'reconnecting';
+
 export function Sidebar({
   version,
-  confirmingRestart,
-  restarting,
+  restartPhase,
   onRestartClick,
 }: {
   version: string;
-  confirmingRestart: boolean;
-  restarting?: boolean;
+  restartPhase: RestartPhase;
   onRestartClick: () => void;
 }) {
   const state = useStore(s => s.state);
@@ -39,6 +39,9 @@ export function Sidebar({
 
   const tabs = getDashboardTabs(t);
   const appStatus = resolveAppStatusBadge(state, t);
+
+  const busy = restartPhase === 'restarting' || restartPhase === 'reconnecting';
+  const confirming = restartPhase === 'confirm';
 
   return (
     <header className="sticky top-0 z-40 bg-[var(--th-sidebar)] border-b border-edge backdrop-blur-[20px] [backdrop-filter:blur(20px)_saturate(1.2)]">
@@ -86,25 +89,27 @@ export function Sidebar({
             <span className="font-medium">{appStatus.badgeContent}</span>
           </div>
           <Button
-            variant={confirmingRestart ? 'secondary' : 'outline'}
+            variant={confirming ? 'secondary' : 'outline'}
             size="sm"
             onClick={onRestartClick}
-            disabled={restarting}
-            title={restarting ? t('modal.restarting') : confirmingRestart ? t('modal.confirmRestart') : t('sidebar.restart')}
+            disabled={busy}
+            title={busy ? t('modal.restarting') : confirming ? t('modal.confirmRestart') : t('sidebar.restart')}
             className={cn(
-              restarting ? 'pointer-events-none opacity-70' : '',
-              confirmingRestart && !restarting ? 'border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/10 hover:text-amber-100' : '',
+              busy ? 'pointer-events-none opacity-70' : '',
+              confirming ? 'border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/10 hover:text-amber-100' : '',
             )}
           >
             <svg
               width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-              className={restarting ? 'animate-spin' : ''}
-              style={restarting ? { animationDuration: '1s' } : undefined}
+              className={busy ? 'animate-spin' : ''}
+              style={busy ? { animationDuration: '1s' } : undefined}
             >
               <polyline points="23 4 23 10 17 10" />
               <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
             </svg>
-            <span className="hidden md:inline">{restarting ? t('modal.restarting') : confirmingRestart ? t('modal.confirmRestart') : t('sidebar.restart')}</span>
+            <span className="hidden md:inline">
+              {busy ? t('modal.restarting') : confirming ? t('modal.confirmRestart') : t('sidebar.restart')}
+            </span>
           </Button>
           <Button
             variant="ghost"

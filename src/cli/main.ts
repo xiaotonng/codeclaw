@@ -324,6 +324,11 @@ async function enterDaemonIfNeeded(args: Record<string, any>): Promise<void> {
   if (args.daemon && !process.env.PIKICLAW_DAEMON_CHILD) {
     await runDaemon(process.argv.slice(2));
   }
+  if (!args.daemon) {
+    // --no-daemon: clear inherited env so requestProcessRestart uses the
+    // direct-spawn path instead of handing off to a non-existent daemon.
+    delete process.env.PIKICLAW_DAEMON_CHILD;
+  }
 }
 
 /** Install SIGUSR2 restart handler and clean it up on exit. */

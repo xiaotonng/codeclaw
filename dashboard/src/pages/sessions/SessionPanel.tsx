@@ -87,6 +87,7 @@ export const SessionPanel = memo(function SessionPanel({
   const localStreamPendingRef = useRef(false);
   const clearPendingOnLoadRef = useRef(false);
   const initialPendingConsumedRef = useRef(false);
+  const promotingRef = useRef(false);
 
   // Consume initialPendingPrompt from new-session flow — show immediately and start polling
   useEffect(() => {
@@ -184,10 +185,13 @@ export const SessionPanel = memo(function SessionPanel({
    *  All open panels receive full updates regardless of active state. */
   const applyStreamSnapshot = useCallback((state: any | null) => {
     // Detect session promotion: backend promoted pending_XXX → native ID.
-    // Navigate to the promoted session so subsequent messages use the correct ID.
+    // Update sessionKeyRef immediately so subsequent WS events match the new key,
+    // then notify parent — but do NOT return: the snapshot carries live stream data
+    // that must be applied to avoid swallowing content during promotion.
     if (state?.sessionId && state.sessionId !== session.sessionId) {
+      promotingRef.current = true;
+      sessionKeyRef.current = `${session.agent}:${state.sessionId}`;
       onSessionChange?.({ agent: session.agent || '', sessionId: state.sessionId, workdir });
-      return;
     }
     if (!state) {
       const prev = prevPhaseRef.current;
@@ -267,6 +271,14 @@ export const SessionPanel = memo(function SessionPanel({
 
   const sk = snapshotKey(session.agent || '', session.sessionId);
   useEffect(() => {
+    // During session promotion (pending→native), the sessionId prop changes but the
+    // panel stays mounted (stable mountKey). Skip the full reset to preserve live
+    // stream state — only refresh history with the new session ID.
+    if (promotingRef.current) {
+      promotingRef.current = false;
+      void loadLatestTurns({ keepOlder: true, force: true });
+      return;
+    }
     let c = false;
     const cachedLatest = peekSessionMessages({
       workdir,

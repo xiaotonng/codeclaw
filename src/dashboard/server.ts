@@ -46,7 +46,12 @@ const WS_KEEPALIVE_MS = 25_000;
 // WebSocket push layer (replaces SSE)
 // ---------------------------------------------------------------------------
 
-function attachWebSocketServer(httpServer: http.Server) {
+interface WsHandle {
+  /** Forcibly close every WebSocket client so the HTTP server can shut down. */
+  closeAllClients(): void;
+}
+
+function attachWebSocketServer(httpServer: http.Server): WsHandle {
   const wss = new WebSocketServer({ noServer: true });
   const clients = new Set<WebSocket>();
 
@@ -98,12 +103,16 @@ function attachWebSocketServer(httpServer: http.Server) {
   };
   runtime.events.on('dashboard-event', onEvent);
 
-  httpServer.on('close', () => {
+  const closeAllClients = () => {
     runtime.events.off('dashboard-event', onEvent);
     for (const ws of clients) ws.close();
     clients.clear();
     wss.close();
-  });
+  };
+
+  httpServer.on('close', closeAllClients);
+
+  return { closeAllClients };
 }
 
 // ---------------------------------------------------------------------------
@@ -153,15 +162,19 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
 
   // -- Process runtime registration --
   let nodeServer: http.Server | null = null;
+  let wsHandle: WsHandle | null = null;
+
+  const RESTART_CLOSE_TIMEOUT_MS = 3000;
 
   const unregisterProcessRuntime = registerProcessRuntime({
     label: 'dashboard',
     prepareForRestart: () => new Promise<void>(resolve => {
-      if (!nodeServer) {
-        resolve();
-        return;
-      }
-      nodeServer.close(() => resolve());
+      if (!nodeServer) { resolve(); return; }
+      // Close all WebSocket clients first — otherwise server.close() hangs
+      // waiting for persistent connections to end.
+      wsHandle?.closeAllClients();
+      const timer = setTimeout(resolve, RESTART_CLOSE_TIMEOUT_MS);
+      nodeServer.close(() => { clearTimeout(timer); resolve(); });
     }),
   });
 
@@ -184,7 +197,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
         const server = http.createServer(requestListener);
 
         // Attach WebSocket BEFORE listening — ensures upgrade events are captured
-        attachWebSocketServer(server);
+        wsHandle = attachWebSocketServer(server);
 
         server.listen(port, () => {
           if (settled) return;

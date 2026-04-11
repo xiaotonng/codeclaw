@@ -483,7 +483,6 @@ export function WorkdirModal({ open, onClose }: { open: boolean; onClose: () => 
   const runtimeWorkdir = state?.bot?.workdir || state?.runtimeWorkdir || '';
   const [selectedPath, setSelectedPath] = useState('');
   const [switching, setSwitching] = useState(false);
-  // Reset key forces DirBrowser to re-initialize when modal reopens
   const [browseKey, setBrowseKey] = useState(0);
 
   useEffect(() => {
@@ -500,29 +499,54 @@ export function WorkdirModal({ open, onClose }: { open: boolean; onClose: () => 
     setSwitching(true);
     try {
       const r = await api.switchWorkdir(p);
-      if (r.ok) { toast(t('modal.switchedTo') + r.workdir); onClose(); setTimeout(reload, 300); }
-      else toast(r.error || t('modal.switchFailed'), false);
-    } catch { toast(t('modal.switchFailed'), false); }
-    finally { setSwitching(false); }
+      if (r.ok) {
+        await reload();
+        toast(t('modal.switchedTo') + r.workdir);
+        onClose();
+      } else {
+        toast(r.error || t('modal.switchFailed'), false);
+      }
+    } catch {
+      toast(t('modal.switchFailed'), false);
+    } finally {
+      setSwitching(false);
+    }
   };
 
   return (
     <Modal
       open={open}
-      onClose={onClose}
+      onClose={switching ? undefined : onClose}
       panelStyle={{
         width: 'min(500px, calc(100vw - 2rem))',
         maxWidth: 'min(500px, calc(100vw - 2rem))',
       }}
     >
-      <ModalHeader title={t('modal.switchWorkdir')} onClose={onClose} />
-      <DirBrowser key={browseKey} initialPath={runtimeWorkdir} onSelect={handleSelect} t={t} />
-      <div className="flex justify-end gap-2 mt-4">
-        <Button variant="ghost" onClick={onClose} disabled={switching}>{t('modal.cancel')}</Button>
-        <Button variant="primary" onClick={handleConfirm} disabled={switching}>
-          {switching ? t('status.loading') : t('modal.selectDir')}
-        </Button>
-      </div>
+      {switching ? (
+        <div className="flex flex-col items-center justify-center py-12 gap-4 animate-in">
+          <svg
+            width="32" height="32" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+            className="animate-spin text-fg-3" style={{ animationDuration: '1.2s' }}
+          >
+            <polyline points="23 4 23 10 17 10" />
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+          <span className="text-sm font-medium text-fg-3">{t('modal.switching')}</span>
+          <span className="text-xs text-fg-5 max-w-[280px] truncate">{selectedPath}</span>
+        </div>
+      ) : (
+        <>
+          <ModalHeader title={t('modal.switchWorkdir')} onClose={onClose} />
+          <DirBrowser key={browseKey} initialPath={runtimeWorkdir} onSelect={handleSelect} t={t} />
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="ghost" onClick={onClose}>{t('modal.cancel')}</Button>
+            <Button variant="primary" onClick={handleConfirm}>
+              {t('modal.selectDir')}
+            </Button>
+          </div>
+        </>
+      )}
     </Modal>
   );
 }

@@ -287,6 +287,8 @@ export class Bot {
   private snapshotCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Maps promoted session keys (old → new) so poll endpoints can resolve pending IDs. */
   private promotedSessionKeys = new Map<string, string>();
+  /** Reverse map (new → old[]) so pushSnapshotToSSE can broadcast on promoted-from aliases. */
+  private promotedFromAliases = new Map<string, string[]>();
 
   /** Get the current streaming snapshot for a session (used by polling endpoint).
    *  If the session was promoted (pending → native), follows the redirect transparently. */
@@ -315,12 +317,19 @@ export class Bot {
   private pushSnapshotToSSE(sessionKey: string, immediate: boolean) {
     if (!this._onStreamSnapshot) return;
     const snap = this.streamSnapshots.get(sessionKey) ?? null;
-    const emit = () => this._onStreamSnapshot!(sessionKey, snap ? { ...snap } : null);
+    const cb = this._onStreamSnapshot;
+    const emitAll = () => {
+      cb(sessionKey, snap ? { ...snap } : null);
+      // Also broadcast on promoted-from aliases so clients still listening
+      // on the old (pending) key receive updates after session promotion.
+      const aliases = this.promotedFromAliases.get(sessionKey);
+      if (aliases) for (const alias of aliases) cb(alias, snap ? { ...snap } : null);
+    };
     if (immediate) {
       const timer = this.streamPushTimers.get(sessionKey);
       if (timer) { clearTimeout(timer); this.streamPushTimers.delete(sessionKey); }
       this.streamPushPending.delete(sessionKey);
-      emit();
+      emitAll();
     } else {
       // Coalesce: if a timer is pending, just mark dirty
       this.streamPushPending.set(sessionKey, true);
@@ -329,7 +338,7 @@ export class Bot {
         this.streamPushTimers.delete(sessionKey);
         if (this.streamPushPending.get(sessionKey)) {
           this.streamPushPending.delete(sessionKey);
-          emit();
+          emitAll();
         }
       }, 80));
     }
@@ -386,11 +395,14 @@ export class Bot {
           queuedTaskId: prev?.queuedTaskId,
           updatedAt: now,
         });
-        // Auto-clean 'done' snapshot after 10s so stale state doesn't linger
+        // Auto-clean 'done' snapshot after 30s so stale state doesn't linger.
+        // Extended from 10s to give clients time to pick up the final state
+        // after session promotion or WS reconnects.
         this.snapshotCleanupTimers.set(sessionKey, setTimeout(() => {
           this.streamSnapshots.delete(sessionKey);
           this.snapshotCleanupTimers.delete(sessionKey);
-        }, 10_000));
+          this.promotedFromAliases.delete(sessionKey);
+        }, 30_000));
         break;
       }
       case 'cancelled': {
@@ -400,6 +412,7 @@ export class Bot {
           delete snap.queuedTaskId;
         } else {
           this.streamSnapshots.delete(sessionKey);
+          this.promotedFromAliases.delete(sessionKey);
         }
         break;
       }
@@ -696,6 +709,9 @@ export class Bot {
 
     // Track promotion so poll endpoints can resolve pending → native
     this.promotedSessionKeys.set(previousKey, nextKey);
+    const aliases = this.promotedFromAliases.get(nextKey) || [];
+    aliases.push(previousKey);
+    this.promotedFromAliases.set(nextKey, aliases);
 
     // Update the promoted snapshot's sessionId to reflect the native ID
     const promotedSnap = this.streamSnapshots.get(nextKey);
