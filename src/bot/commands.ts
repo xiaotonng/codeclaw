@@ -12,7 +12,10 @@
 import path from 'node:path';
 import type { Bot, ChatId, Agent, SessionInfo, SessionRuntime, ChatState, StreamResult } from './bot.js';
 import { fmtTokens, fmtUptime, fmtBytes } from './bot.js';
-import { getProjectSkillPaths, normalizeClaudeModelId, sanitizeSessionUserPreviewText } from '../agent/index.js';
+import {
+  getProjectSkillPaths, normalizeClaudeModelId, sanitizeSessionUserPreviewText,
+  listAllMcpExtensions, listSkills as listAllSkills,
+} from '../agent/index.js';
 import { getDriver } from '../agent/driver.js';
 import { buildWelcomeIntro, buildSkillCommandName, indexSkillsByCommand, SKILL_CMD_PREFIX } from './menu.js';
 import { buildBotMenuState } from './orchestration.js';
@@ -424,6 +427,39 @@ export function resolveSkillPrompt(bot: Bot, chatId: ChatId, cmd: string, args: 
     prompt = `${workdirHint}Read the skill definition at \`${fallbackPath}\` and execute the instructions defined there.${suffix}`;
   }
   return { prompt, skillName: skill.name };
+}
+
+// ---------------------------------------------------------------------------
+// Extensions
+// ---------------------------------------------------------------------------
+
+export interface ExtensionSummaryData {
+  mcpCount: number;
+  mcpExtensions: Array<{ name: string; scope: string; enabled: boolean; command: string }>;
+  skillCount: number;
+  skills: Array<{ name: string; scope: string; label: string }>;
+}
+
+export function getExtensionSummaryData(bot: Bot, chatId: ChatId): ExtensionSummaryData {
+  const workdir = bot.chatWorkdir(chatId);
+  const mcpExts = listAllMcpExtensions(workdir) as Array<{ name: string; scope: string; config: { enabled?: boolean; disabled?: boolean; command?: string; args?: string[] } }>;
+  const skillResult = listAllSkills(workdir) as { skills: Array<{ name: string; scope: string; label: string | null }> };
+
+  return {
+    mcpCount: mcpExts.length,
+    mcpExtensions: mcpExts.map(e => ({
+      name: e.name,
+      scope: e.scope,
+      enabled: e.config.enabled !== false && !e.config.disabled,
+      command: [e.config.command || '', ...(e.config.args || [])].join(' ').trim(),
+    })),
+    skillCount: skillResult.skills.length,
+    skills: skillResult.skills.map((s: any) => ({
+      name: s.name,
+      scope: s.scope || 'project',
+      label: s.label || s.name,
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------

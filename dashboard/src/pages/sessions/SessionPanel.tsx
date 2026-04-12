@@ -49,7 +49,8 @@ export const SessionPanel = memo(function SessionPanel({
   onPendingPromptConsumed?: () => void;
 }) {
   const locale = useStore(s => s.locale);
-  const agentEffort = useStore(s => s.agentStatus?.agents?.find(a => a.agent === session.agent)?.selectedEffort ?? null);
+  const globalEffort = useStore(s => s.agentStatus?.agents?.find(a => a.agent === session.agent)?.selectedEffort ?? null);
+  const agentEffort = session.thinkingEffort || globalEffort;
   const t = useMemo(() => createT(locale), [locale]);
   const meta = getAgentMeta(session.agent || '');
   const displayState = sessionDisplayState(session);

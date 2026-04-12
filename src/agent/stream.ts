@@ -333,6 +333,7 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
 function finalizeStreamResult(result: StreamResult, workdir: string, prompt: string, session: SessionWorkspaceInfo): StreamResult {
   if (result.sessionId) syncManagedSessionIdentity(session, workdir, result.sessionId);
   session.record.model = result.model || session.record.model;
+  if (result.thinkingEffort) session.record.thinkingEffort = result.thinkingEffort;
   if (!session.record.title) session.record.title = summarizePromptTitle(prompt);
   session.record.lastQuestion = shortValue(prompt, 500);
   session.record.lastAnswer = shortValue(result.message, 500);

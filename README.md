@@ -2,9 +2,9 @@
 
 # pikiclaw
 
-**Put the world's smartest AI agents in your pocket. Command local Claude, Codex & Gemini via best IM.**
+**Put the world's smartest AI agents in your pocket. Command local Claude, Codex & Gemini via IM.**
 
-*Let the best IM app become a top-tier Agent console on your computer*
+*Turn Telegram, Feishu, or WeChat into a full-featured Agent console on your computer*
 
 ```
 npx pikiclaw@latest
@@ -41,12 +41,13 @@ pikiclaw takes a different approach:
 - **Official Agent CLIs** — Claude Code, Codex, Gemini CLI as-is, not a home-grown wrapper
 - **Your own machine** — local files, local tools, local environment
 - **Your existing IM** — Telegram, Feishu, or WeChat, no new app to learn
+- **Community extensions** — install MCP servers and skills from the ecosystem with one click
 
 ```
   You (Telegram / Feishu / WeChat)
           |
           v
-       pikiclaw
+       pikiclaw  ←──  MCP servers & community skills
           |
           v
   Claude Code / Codex / Gemini CLI
@@ -81,10 +82,11 @@ npx pikiclaw@latest
 
 This opens the **Web Dashboard** at `http://localhost:3939`, where you can:
 
+- Drive agent sessions directly from the browser — full conversation, tool use, streaming
 - Connect IM channels (Telegram / Feishu / WeChat)
-- Configure agents and models
-- Manage macOS system permissions
-- Set up browser & desktop automation extensions
+- Configure agents, models, and reasoning effort
+- Browse and install community MCP servers and skills
+- Manage macOS system permissions and automation extensions
 - Monitor sessions and system resources
 
 <details>
@@ -104,6 +106,10 @@ npx pikiclaw@latest --doctor  # check environment only
 <details>
 <summary>Expand to see all dashboard pages</summary>
 
+**Workspace** — Multi-panel agent console with session list, conversation view, tool-use traces, and input composer
+
+<img src="docs/promo-dashboard-workspace.png" alt="Workspace" width="700">
+
 **IM Access** — Telegram, Feishu, WeChat channel status and configuration
 
 <img src="docs/promo-dashboard-im.png" alt="IM Access" width="700">
@@ -116,13 +122,9 @@ npx pikiclaw@latest --doctor  # check environment only
 
 <img src="docs/promo-dashboard-permissions.png" alt="Permissions" width="700">
 
-**Extensions** — Managed browser & desktop automation (Appium Mac2)
+**Extensions** — Community MCP servers, skill repos, and built-in browser & desktop automation
 
 <img src="docs/promo-dashboard-extensions.png" alt="Extensions" width="700">
-
-**Sessions** — Per-agent session list and runtime status
-
-<img src="docs/promo-dashboard-sessions.png" alt="Sessions" width="700">
 
 **System Info** — Working directory, CPU / memory / disk monitoring
 
@@ -142,12 +144,43 @@ npx pikiclaw@latest --doctor  # check environment only
 
 ### Dashboard as Agent Console
 
-The web dashboard integrates Claude Code's core interactive experience — full conversation history with tool-use activity, thinking traces, plan progress, streaming output, image attachments, and an input composer — so you can drive any agent session directly from the browser, no IM required.
+The web dashboard is a full-featured agent console — not just a settings panel. It provides complete conversation history with tool-use activity, thinking traces, plan progress, streaming output, image attachments, and an input composer. You can drive any agent session directly from the browser with a multi-panel workspace layout (1 / 2 / 3 / 6 panes), no IM required.
+
+### Extensions & Community Plugins
+
+pikiclaw has a two-layer extension system — **global** extensions apply to all projects, **workspace** extensions are project-scoped:
+
+<img src="docs/promo-dashboard-extensions-add.png" alt="Add MCP Server" width="700">
+
+**MCP Servers**
+- Browse recommended servers (GitHub, Filesystem, PostgreSQL, Slack, Brave Search, Memory, Fetch, SQLite, Git, Sentry)
+- Search the [MCP Registry](https://registry.modelcontextprotocol.io) for community servers
+- Add custom servers (stdio or HTTP) with environment variable configuration
+- Health check with MCP protocol handshake and tool discovery
+- Enable / disable individual servers per scope
+
+**Community Skills**
+- Install skills from GitHub repos with one click (`owner/repo`)
+- Browse recommended skill repos (Anthropic Official, Vercel Agent Skills, etc.)
+- Search community skills via npm
+- Skills can declare MCP dependencies via `mcp_requires`
+- Global skills (`~/.pikiclaw/skills/`) and project skills (`.pikiclaw/skills/`)
+
+All extensions are merged with priority (global < workspace < built-in) and injected into agent sessions automatically.
+
+### Skills
+
+- Project-level skills at `.pikiclaw/skills/*/SKILL.md`
+- Compatible with `.claude/commands/*.md`
+- Legacy `.claude/skills` / `.agents/skills` support with migration path
+- Install from GitHub or browse recommended repos via the dashboard
+- Trigger via `/skills` and `/sk_<name>` in chat
 
 ### Runtime
 
 - Streaming preview with continuous message updates
 - Session switching, resume, and multi-turn conversations
+- Session classification (answer, proposal, implementation, blocked, etc.)
 - Task queue with **Steer** — interrupt the running task and let a queued message jump ahead
 - Working directory browsing and switching
 - File attachments automatically enter the session workspace
@@ -155,28 +188,19 @@ The web dashboard integrates Claude Code's core interactive experience — full 
 - Long text auto-splitting; images and files sent back to IM directly
 - Light / dark theme and i18n (Chinese & English)
 
-### Skills
+### MCP Bridge & Automation
 
-- Project-level skills at `.pikiclaw/skills/*/SKILL.md`
-- Compatible with `.claude/commands/*.md`
-- Legacy `.claude/skills` / `.agents/skills` support with migration path
-- Trigger via `/skills` and `/sk_<name>` in chat
+Each agent stream launches a session-scoped MCP bridge that injects tools from three sources:
+
+1. **Built-in tools** — `im_list_files`, `im_send_file` (send files back to IM in real time)
+2. **User extensions** — all enabled MCP servers (global + workspace) are merged and registered
+3. **GUI automation** (optional):
+   - **Browser** — managed Chrome profile via `@playwright/mcp`; log in once, reuse across tasks
+   - **Desktop** — Appium Mac2 with `desktop_open_app`, `desktop_snapshot`, `desktop_click`, `desktop_type`, `desktop_screenshot`
 
 ### Codex Human Loop
 
 When Codex requests additional user input mid-task, pikiclaw surfaces the question as an interactive prompt in your IM. Reply there and the task continues.
-
-### MCP & GUI Automation
-
-Each agent stream launches a session-scoped MCP bridge that injects local tools:
-
-- `im_list_files` — list session workspace files
-- `im_send_file` — send files back to IM in real time
-
-Optional GUI capabilities:
-
-- **Browser automation** — managed Chrome profile via `@playwright/mcp`; log in once, reuse across tasks
-- **macOS desktop automation** — Appium Mac2 with `desktop_open_app`, `desktop_snapshot`, `desktop_click`, `desktop_type`, `desktop_screenshot`
 
 ---
 
@@ -188,10 +212,13 @@ Optional GUI capabilities:
 | `/sessions` | View, switch, or create sessions |
 | `/agents` | Switch agent |
 | `/models` | View and switch model / reasoning effort |
+| `/mode` | Toggle plan mode (reasoning effort) |
 | `/switch` | Browse and switch working directory |
+| `/stop` | Stop current session |
 | `/status` | Runtime status, tokens, usage, session info |
 | `/host` | Host CPU / memory / disk / battery |
 | `/skills` | Browse project skills |
+| `/ext` | Extensions overview |
 | `/restart` | Restart and re-launch bot |
 | `/sk_<name>` | Run a project skill |
 
@@ -203,11 +230,13 @@ Plain text messages are forwarded directly to the current agent.
 
 - Persistent config lives in `~/.pikiclaw/setting.json`
 - The Dashboard is the primary configuration interface
+- Global MCP extensions are stored in `~/.pikiclaw/setting.json` under `extensions.mcp`
+- Workspace MCP extensions use the standard `.mcp.json` format
 
 <details>
 <summary>GUI automation setup</summary>
 
-**Browser automation** is managed by the dashboard and runtime together — a dedicated Chrome profile is created and reused automatically. Just log in to the sites you need once in that browser.
+**Browser automation** is managed by the dashboard — a dedicated Chrome profile is created and reused automatically. Log in to the sites you need once in that browser and every future agent session can reuse those credentials.
 
 **macOS desktop automation** requires Appium Mac2:
 
@@ -230,7 +259,7 @@ Relevant environment variables:
 ## Roadmap
 
 - **ACP (Agent Client Protocol) adoption** — unified driver for any ACP-compatible agent, replacing per-agent CLI output parsing. See [ACP Migration Plan](docs/acp-migration.md)
-- Expand session-scoped MCP bridge into a more complete top-level tool layer
+- Expand extension ecosystem — more recommended MCP servers, skill templates, and community tooling
 - Improve GUI automation, especially browser + desktop tool coordination
 - More IM channels (WhatsApp, etc.)
 
@@ -265,6 +294,15 @@ Contributions are welcome! Whether it's a bug fix, new feature, or documentation
 - Read the **[Contributing Guide](CONTRIBUTING.md)** to get started
 - Check out [`good first issue`](https://github.com/xiaotonng/pikiclaw/labels/good%20first%20issue) and [`help wanted`](https://github.com/xiaotonng/pikiclaw/labels/help%20wanted) labels for contribution ideas
 - Open an issue first for larger changes so we can discuss the approach
+
+Common contribution areas:
+
+| Task | Where to start |
+|------|----------------|
+| Add an agent driver | `src/agent/driver.ts`, `src/agent/drivers/*.ts` |
+| Add an IM channel | `src/channels/base.ts`, any `src/channels/*/` |
+| Add a dashboard route | `src/dashboard/routes/*.ts` |
+| Change MCP tools | `src/agent/mcp/tools/*.ts`, `src/agent/mcp/bridge.ts` |
 
 ---
 

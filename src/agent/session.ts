@@ -206,6 +206,7 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : new Date().toISOString(),
     title: typeof raw?.title === 'string' && raw.title.trim() ? raw.title.trim() : null,
     model: typeof raw?.model === 'string' && raw.model.trim() ? raw.model.trim() : null,
+    thinkingEffort: typeof raw?.thinkingEffort === 'string' && raw.thinkingEffort.trim() ? raw.thinkingEffort.trim() : null,
     stagedFiles: Array.isArray(raw?.stagedFiles) ? dedupeStrings(raw.stagedFiles.filter((v: unknown) => typeof v === 'string')) : [],
     runState: normalizeSessionRunState(raw?.runState),
     runDetail: normalizeSessionRunDetail(raw?.runState, raw?.runDetail),
@@ -250,7 +251,7 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     workspacePath: record.workspacePath,
     threadId: record.threadId,
     createdAt: record.createdAt, updatedAt: record.updatedAt,
-    title: record.title, model: record.model, stagedFiles: record.stagedFiles,
+    title: record.title, model: record.model, thinkingEffort: record.thinkingEffort, stagedFiles: record.stagedFiles,
     runState: record.runState, runDetail: record.runDetail, runUpdatedAt: record.runUpdatedAt,
     classification: record.classification,
     userStatus: record.userStatus,
@@ -485,7 +486,7 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
       workspacePath: sessionWorkspacePath(workdir, opts.agent, sessionId),
       threadId,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      title: summarizePromptTitle(opts.title) || null, model: null, stagedFiles: [],
+      title: summarizePromptTitle(opts.title) || null, model: null, thinkingEffort: null, stagedFiles: [],
       runState: 'completed', runDetail: null, runUpdatedAt: new Date().toISOString(),
       classification: null, userStatus: null, userNote: null,
       lastQuestion: null, lastAnswer: null, lastMessageText: null,
@@ -512,6 +513,7 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     workspacePath: record.workspacePath,
     threadId: record.threadId,
     model: record.model,
+    thinkingEffort: record.thinkingEffort,
     createdAt: record.createdAt,
     title: record.title,
     running: record.runState === 'running',
@@ -545,6 +547,15 @@ export function listPikiclawSessions(workdir: string, agent: Agent, limit?: numb
 
 export function findPikiclawSession(workdir: string, agent: Agent, sessionId: string): ManagedSessionRecord | null {
   return listPikiclawSessions(workdir, agent).find(entry => entry.sessionId === sessionId) || null;
+}
+
+/**
+ * Look up the persisted model and thinkingEffort for an existing session.
+ * Returns null values when the session is not found or fields are not set.
+ */
+export function getSessionStoredConfig(workdir: string, agent: Agent, sessionId: string): { model: string | null; thinkingEffort: string | null } {
+  const record = findPikiclawSession(workdir, agent, sessionId);
+  return { model: record?.model ?? null, thinkingEffort: record?.thinkingEffort ?? null };
 }
 
 export function ensureManagedSession(opts: EnsureManagedSessionOpts): SessionInfo {

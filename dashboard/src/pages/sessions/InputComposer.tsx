@@ -48,7 +48,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [agents, setAgents] = useState<AgentRuntimeStatus[]>(storeAgents || []);
   const [selectedAgent, setSelectedAgent] = useState(session.agent || '');
   const [selectedModel, setSelectedModel] = useState(session.model || '');
-  const [selectedEffort, setSelectedEffort] = useState('');
+  const [selectedEffort, setSelectedEffort] = useState(session.thinkingEffort || '');
   const [imageAttachments, setImageAttachments] = useState<ComposerImageAttachment[]>([]);
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [pendingAgent, setPendingAgent] = useState<string | null>(null);
@@ -110,10 +110,11 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       if (nextModel) setSelectedModel(nextModel);
     }
     if (!selectedEffort && fallbackAgent && fallbackAgent !== 'gemini') {
-      const nextEffort = fallbackStatus?.selectedEffort || '';
+      const nextEffort = (fallbackAgent === session.agent ? session.thinkingEffort : null)
+        || fallbackStatus?.selectedEffort || '';
       if (nextEffort) setSelectedEffort(nextEffort);
     }
-  }, [agents, selectedAgent, selectedEffort, selectedModel, session.agent, session.model]);
+  }, [agents, selectedAgent, selectedEffort, selectedModel, session.agent, session.model, session.thinkingEffort]);
 
   // Consume editDraft — populate the input when user clicks "Edit" on a message
   useEffect(() => {

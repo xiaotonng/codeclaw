@@ -61,6 +61,8 @@ export function buildDefaultMenuCommands(agentCount: number, skills: SkillInfo[]
     commands.push({ command: 'skills', description: 'Browse skills' });
   }
 
+  commands.push({ command: 'ext', description: 'Extensions overview' });
+
   if (agentCount === 1) {
     commands.push({ command: 'agents', description: 'Switch agents' });
   }

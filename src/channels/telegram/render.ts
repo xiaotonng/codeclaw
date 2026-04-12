@@ -176,18 +176,9 @@ export function buildHumanLoopPromptHtml(prompt: HumanLoopPromptState): string {
 }
 
 function mdInline(line: string): string {
-  const parts: string[] = [];
-  let rest = line;
-  while (rest.includes('`')) {
-    const a = rest.indexOf('`');
-    const b = rest.indexOf('`', a + 1);
-    if (b === -1) break;
-    parts.push(formatMarkdownSegment(rest.slice(0, a)));
-    parts.push(`<code>${escapeHtml(rest.slice(a + 1, b))}</code>`);
-    rest = rest.slice(b + 1);
-  }
-  parts.push(formatMarkdownSegment(rest));
-  return parts.join('');
+  // Strip inline backtick code — IM channels render them with heavy styling
+  const stripped = line.replace(/`([^`\n]+)`/g, '$1');
+  return formatMarkdownSegment(stripped);
 }
 
 function formatMarkdownSegment(text: string): string {

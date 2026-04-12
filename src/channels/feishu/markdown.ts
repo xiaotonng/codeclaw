@@ -25,6 +25,8 @@ function adaptLine(line: string): string {
   next = next.replace(/^#{1,6}\s+/, '**');
   if (next.startsWith('**') && !next.endsWith('**')) next = `${next}**`;
   next = next.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 <$2>');
+  // Strip inline backtick code — Feishu renders them with heavy styling
+  next = next.replace(/`([^`\n]+)`/g, '$1');
   return next;
 }
 

@@ -57,7 +57,7 @@ export {
 // ── Re-export: session management ───────────────────────────────────────────
 export {
   updateSessionMeta, promoteSessionId,
-  listPikiclawSessions, findPikiclawSession,
+  listPikiclawSessions, findPikiclawSession, getSessionStoredConfig,
   ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, stageSessionFiles,
   mergeManagedAndNativeSessions,
   getSessions, getSessionTail, getSessionMessages,
@@ -81,9 +81,31 @@ export {
 
 // ── Re-export: skills ───────────────────────────────────────────────────────
 export {
-  getProjectSkillPaths, initializeProjectSkills, listSkills,
-  type ProjectSkillPaths, type SkillInfo, type SkillListResult,
+  getProjectSkillPaths, initializeProjectSkills, listSkills, getGlobalSkillsRoot,
+  type ProjectSkillPaths, type SkillInfo, type SkillListResult, type SkillScope,
 } from './skills.js';
+
+// ── Re-export: MCP extensions ───────────────────────────────────────────────
+export {
+  listAllMcpExtensions,
+  addGlobalMcpExtension, removeGlobalMcpExtension, updateGlobalMcpExtension,
+  addWorkspaceMcpExtension, removeWorkspaceMcpExtension, updateWorkspaceMcpExtension,
+  loadGlobalMcpExtensions, loadWorkspaceMcpExtensions,
+  checkMcpHealth,
+  type McpExtensionEntry, type ExtensionScope, type McpHealthResult,
+} from './mcp/extensions.js';
+
+export {
+  getRecommendedMcpServers, getRecommendedSkillRepos,
+  searchMcpServers, searchSkills as searchSkillRepos,
+  type RecommendedMcpServer, type RecommendedSkillRepo,
+  type McpSearchResult, type SkillSearchResult,
+} from './mcp/registry.js';
+
+export {
+  installSkill, removeSkill, checkSkillUpdates, getGlobalSkillsDir,
+  type SkillInstallOpts, type SkillInstallResult, type SkillRemoveResult,
+} from './skill-installer.js';
 
 // ── Re-export: driver-specific functions ────────────────────────────────────
 export { doClaudeStream } from './drivers/claude.js';

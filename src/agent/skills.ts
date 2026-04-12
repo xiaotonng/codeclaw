@@ -3,13 +3,20 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+
+export type SkillScope = 'global' | 'project';
 
 export interface SkillInfo {
   name: string;
   label: string | null;
   description: string | null;
   source: 'skills';
+  /** Whether this skill is global (all workspaces) or project-scoped. */
+  scope: SkillScope;
+  /** MCP server packages required by this skill. */
+  mcpRequires?: string[];
 }
 
 export interface SkillListResult {
@@ -41,21 +48,30 @@ function resolveSkillFile(root: string, skillName: string): string {
   return path.join(root, skillName, 'SKILL.md');
 }
 
-function parseSkillMeta(content: string): { label: string | null; description: string | null } {
+function parseSkillMeta(content: string): { label: string | null; description: string | null; mcpRequires?: string[] } {
   let label: string | null = null;
   let description: string | null = null;
+  let mcpRequires: string[] | undefined;
   const fm = content.match(/^---\s*\n([\s\S]*?)\n---/);
   if (fm) {
     const lm = fm[1].match(/^label:\s*(.+)/m);
     if (lm) label = lm[1].trim();
     const dm = fm[1].match(/^description:\s*(.+)/m);
     if (dm) description = dm[1].trim();
+    // Parse mcp_requires as YAML list
+    const mr = fm[1].match(/^mcp_requires:\s*\n((?:\s+-\s+.+\n?)+)/m);
+    if (mr) {
+      mcpRequires = mr[1]
+        .split('\n')
+        .map(l => l.replace(/^\s*-\s*/, '').replace(/["']/g, '').trim())
+        .filter(Boolean);
+    }
   }
   if (!label) {
     const hm = content.match(/^#\s+(.+)$/m);
     if (hm) label = hm[1].trim();
   }
-  return { label, description };
+  return { label, description, mcpRequires };
 }
 
 function hasFile(filePath: string): boolean {
@@ -154,22 +170,52 @@ export function getProjectSkillPaths(workdir: string, skillName: string): Projec
   };
 }
 
-export function listSkills(workdir: string): SkillListResult {
+const GLOBAL_SKILLS_ROOT = path.join(os.homedir(), '.pikiclaw', 'skills');
+
+function discoverSkillsFromDir(
+  dir: string,
+  scope: SkillScope,
+  seen: Set<string>,
+): SkillInfo[] {
   const skills: SkillInfo[] = [];
+  for (const entry of readSortedDir(dir)) {
+    if (!entry || seen.has(entry)) continue;
+    const skillDir = path.join(dir, entry);
+    const skillFile = resolveSkillFile(dir, entry);
+    try { if (!fs.statSync(skillDir).isDirectory()) continue; } catch { continue; }
+    if (!hasFile(skillFile)) continue;
+    let meta: ReturnType<typeof parseSkillMeta> = { label: null, description: null };
+    try { meta = parseSkillMeta(fs.readFileSync(skillFile, 'utf-8')); } catch {}
+    skills.push({
+      name: entry,
+      label: meta.label,
+      description: meta.description,
+      source: 'skills',
+      scope,
+      mcpRequires: meta.mcpRequires,
+    });
+    seen.add(entry);
+  }
+  return skills;
+}
+
+/**
+ * List all skills — project-scoped (workdir) first, then global (~/.pikiclaw/skills/).
+ * Project skills with the same name shadow global ones.
+ */
+export function listSkills(workdir: string): SkillListResult {
   const seen = new Set<string>();
   const { canonicalRoot } = resolveProjectSkillRoots(workdir);
 
-  for (const entry of readSortedDir(canonicalRoot)) {
-    if (!entry || seen.has(entry)) continue;
-    const skillDir = path.join(canonicalRoot, entry);
-    const skillFile = resolveSkillFile(canonicalRoot, entry);
-    try { if (!fs.statSync(skillDir).isDirectory()) continue; } catch { continue; }
-    if (!hasFile(skillFile)) continue;
-    let meta = { label: null as string | null, description: null as string | null };
-    try { meta = parseSkillMeta(fs.readFileSync(skillFile, 'utf-8')); } catch {}
-    skills.push({ name: entry, label: meta.label, description: meta.description, source: 'skills' });
-    seen.add(entry);
-  }
+  // Project skills take precedence
+  const projectSkills = discoverSkillsFromDir(canonicalRoot, 'project', seen);
+  // Global skills fill in the rest
+  const globalSkills = discoverSkillsFromDir(GLOBAL_SKILLS_ROOT, 'global', seen);
 
-  return { skills, workdir };
+  return { skills: [...projectSkills, ...globalSkills], workdir };
+}
+
+/** Return the global skills root directory path. */
+export function getGlobalSkillsRoot(): string {
+  return GLOBAL_SKILLS_ROOT;
 }

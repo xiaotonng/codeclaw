@@ -10,6 +10,26 @@ import { USER_CONFIG_SYNC_DEFAULT_INTERVAL_MS } from '../constants.js';
 
 export type ChannelName = 'telegram' | 'feishu' | 'weixin';
 
+/** MCP server configuration — compatible with .mcp.json standard format. */
+export interface McpServerConfig {
+  /** Transport type (default: stdio). */
+  type?: 'stdio' | 'http';
+  /** Command to spawn the server (stdio). */
+  command?: string;
+  /** Arguments for the command (stdio). */
+  args?: string[];
+  /** Environment variables for the server process. */
+  env?: Record<string, string>;
+  /** HTTP endpoint URL (http type). */
+  url?: string;
+  /** HTTP headers (http type). */
+  headers?: Record<string, string>;
+  /** Whether this server is enabled (default: true). */
+  enabled?: boolean;
+  /** When true in workspace .mcp.json, overrides a global extension to disable it. */
+  disabled?: boolean;
+}
+
 export interface WorkspaceEntry {
   /** Absolute path to project directory */
   path: string;
@@ -48,6 +68,10 @@ export interface UserConfig {
   browserHeadless?: boolean;
   desktopGuiEnabled?: boolean;
   desktopAppiumUrl?: string;
+  /** Extension configuration — global MCP servers and skills. */
+  extensions?: {
+    mcp?: Record<string, McpServerConfig>;
+  };
 }
 
 interface ApplyUserConfigOptions {

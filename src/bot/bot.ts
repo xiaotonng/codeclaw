@@ -9,7 +9,7 @@ import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
 import { getActiveUserConfig, onUserConfigChange, resolveUserWorkdir, setUserWorkdir } from '../core/config/user-config.js';
 import {
-  doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
+  doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
   type AgentInteraction, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
@@ -1238,8 +1238,9 @@ export class Bot {
       sessionId: opts.sessionId,
       workdir: opts.workdir,
       workspacePath: null,
-      modelId: opts.modelId ?? null,
-      thinkingEffort: opts.thinkingEffort ?? null,
+      // Only override when explicitly provided — undefined skips the overwrite in upsertSessionRuntime
+      ...(opts.modelId !== undefined ? { modelId: opts.modelId } : {}),
+      ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
     });
     const taskId = `ext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const prompt = opts.prompt.trim();
@@ -1571,11 +1572,16 @@ export class Bot {
     onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void,
     onCodexTurnReady?: (control: CodexTurnControl) => void,
   ): Promise<StreamResult> {
-    const resolvedModel = cs.modelId || this.modelForAgent(cs.agent);
     const agentConfig = this.agentConfigs[cs.agent] || {};
+    // Session-level config stored on disk — used as fallback between explicit override and global defaults
+    const sessionWorkdirForConfig = 'workdir' in cs && typeof cs.workdir === 'string' && cs.workdir ? cs.workdir : this.workdir;
+    const storedConfig = cs.sessionId && !isPendingSessionId(cs.sessionId)
+      ? getSessionStoredConfig(sessionWorkdirForConfig, cs.agent, cs.sessionId)
+      : null;
+    const resolvedModel = cs.modelId || storedConfig?.model || this.modelForAgent(cs.agent);
     const resolvedThinkingEffort = ('thinkingEffort' in cs && typeof cs.thinkingEffort === 'string' && cs.thinkingEffort.trim())
       ? cs.thinkingEffort.trim().toLowerCase()
-      : (agentConfig.reasoningEffort || 'high');
+      : (storedConfig?.thinkingEffort || agentConfig.reasoningEffort || 'high');
     const extraArgs: string[] = agentConfig.extraArgs || [];
     const browserEnabled = resolveGuiIntegrationConfig(getActiveUserConfig()).browserEnabled;
     const sessionWorkdir = 'workdir' in cs && typeof cs.workdir === 'string' && cs.workdir

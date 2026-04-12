@@ -61,8 +61,8 @@ export const mdComponents: Record<string, React.ComponentType<any>> = {
     const text = String(children).replace(/\n$/, '');
     const langMatch = /language-(\w+)/.exec(className || '');
 
-    // Inline code (no language class, short)
-    if (!langMatch && !className) {
+    // Inline code (no language class, no embedded newlines)
+    if (!langMatch && !className && !text.includes('\n')) {
       if (isFilePath(text)) {
         return <code className={cn('px-1.5 py-[1px] rounded text-[12px] font-mono border cursor-pointer hover:brightness-125 transition-all', classifyCode(text))} onClick={() => api.openInEditor(text)}>{text}</code>;
       }

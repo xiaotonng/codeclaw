@@ -293,6 +293,42 @@ export class TelegramBot extends Bot {
     await this.sendCommandView(ctx, buildSkillsCommandView(this, ctx.chatId));
   }
 
+  private async cmdExt(ctx: TgContext) {
+    const { getExtensionSummaryData } = await import('../../bot/commands.js');
+    const data = getExtensionSummaryData(this, ctx.chatId);
+    const lines: string[] = ['<b>Extensions</b>', ''];
+
+    // MCP servers
+    lines.push(`<b>MCP Servers</b> (${data.mcpCount})`);
+    if (data.mcpExtensions.length === 0) {
+      lines.push('  <i>No MCP extensions configured</i>');
+    } else {
+      for (const ext of data.mcpExtensions) {
+        const icon = ext.enabled ? '●' : '○';
+        const scope = ext.scope === 'global' ? '[G]' : ext.scope === 'workspace' ? '[W]' : '[B]';
+        lines.push(`  ${icon} ${scope} <b>${escapeHtml(ext.name)}</b>`);
+        if (ext.command) lines.push(`    <code>${escapeHtml(ext.command.slice(0, 80))}</code>`);
+      }
+    }
+
+    lines.push('');
+
+    // Skills
+    lines.push(`<b>Skills</b> (${data.skillCount})`);
+    if (data.skills.length === 0) {
+      lines.push('  <i>No skills installed</i>');
+    } else {
+      for (const skill of data.skills) {
+        const scope = skill.scope === 'global' ? '[G]' : '[P]';
+        lines.push(`  ${scope} <b>${escapeHtml(skill.label)}</b> <i>(${escapeHtml(skill.name)})</i>`);
+      }
+    }
+
+    lines.push('', '<i>Manage extensions in the Dashboard → Extensions tab.</i>');
+
+    await ctx.reply(lines.join('\n'), { parseMode: 'HTML' });
+  }
+
   private async sendCommandView(ctx: TgContext, view: CommandSelectionView) {
     await ctx.reply(
       renderCommandSelectionHtml(view),
@@ -1008,6 +1044,7 @@ export class TelegramBot extends Bot {
         case 'models':   await this.cmdModels(ctx); return;
         case 'mode':     await this.cmdMode(ctx); return;
         case 'skills':   await this.cmdSkills(ctx); return;
+        case 'ext':      await this.cmdExt(ctx); return;
         case 'stop':     await this.cmdStop(ctx); return;
         case 'status':   await this.cmdStatus(ctx); return;
         case 'host':     await this.cmdHost(ctx); return;

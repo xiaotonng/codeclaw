@@ -188,6 +188,7 @@ export interface SessionInfo {
   running?: boolean;
   isCurrent?: boolean;
   model?: string;
+  thinkingEffort?: string | null;
   workdir?: string;
   runState: 'running' | 'completed' | 'incomplete';
   runDetail?: string | null;
@@ -326,6 +327,64 @@ export interface SkillInfo {
   name: string;
   label: string | null;
   description: string | null;
+  scope?: 'global' | 'project';
+  mcpRequires?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// MCP Extensions
+// ---------------------------------------------------------------------------
+
+export interface McpServerConfig {
+  type?: 'stdio' | 'http';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  enabled?: boolean;
+  disabled?: boolean;
+}
+
+export interface McpExtensionEntry {
+  name: string;
+  config: McpServerConfig;
+  scope: 'global' | 'workspace' | 'builtin';
+  source?: string;
+}
+
+export interface McpHealthResult {
+  ok: boolean;
+  tools?: string[];
+  error?: string;
+  elapsedMs?: number;
+}
+
+export interface RecommendedMcpServer {
+  id: string;
+  name: string;
+  description: string;
+  descriptionZh: string;
+  command: string;
+  args: string[];
+  category: string;
+  envSchema: Record<string, { required?: boolean; secret?: boolean; description: string }>;
+}
+
+export interface RecommendedSkillRepo {
+  id: string;
+  name: string;
+  description: string;
+  descriptionZh: string;
+  source: string;
+  skills?: string[];
+}
+
+export interface McpSearchResult {
+  name: string;
+  description: string;
+  npmPackage?: string;
+  source?: string;
 }
 
 export interface GitChange {

@@ -7,7 +7,13 @@ import type {
   GitChangesResult,
   HostInfo,
   LsDirResult,
+  McpExtensionEntry,
+  McpHealthResult,
+  McpSearchResult,
+  McpServerConfig,
   PermissionRequestResult,
+  RecommendedMcpServer,
+  RecommendedSkillRepo,
   SessionHubResult,
   SessionMessagesResult,
   SkillInfo,
@@ -160,7 +166,44 @@ export const api = {
   desktopToggle: (enabled: boolean, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; enabled?: boolean; error?: string }>('/api/desktop-toggle', { enabled }, { timeoutMs: 60_000, ...opts }),
 
-  // Skills
+  // MCP Extensions
+  getMcpExtensions: (workdir?: string) => {
+    const params = workdir ? `?workdir=${encodeURIComponent(workdir)}` : '';
+    return json<{ ok: boolean; extensions: McpExtensionEntry[] }>(`/api/extensions/mcp${params}`);
+  },
+  addMcpExtension: (name: string, config: McpServerConfig, scope: 'global' | 'workspace', workdir?: string) =>
+    post<{ ok: boolean; error?: string }>('/api/extensions/mcp/add', { name, config, scope, workdir }),
+  removeMcpExtension: (name: string, scope: 'global' | 'workspace', workdir?: string) =>
+    post<{ ok: boolean; removed?: boolean; error?: string }>('/api/extensions/mcp/remove', { name, scope, workdir }),
+  updateMcpExtension: (name: string, patch: Partial<McpServerConfig>, scope: 'global' | 'workspace', workdir?: string) =>
+    post<{ ok: boolean; updated?: boolean; error?: string }>('/api/extensions/mcp/update', { name, patch, scope, workdir }),
+  checkMcpHealth: (config: McpServerConfig, opts?: ApiRequestOptions) =>
+    post<McpHealthResult>('/api/extensions/mcp/health', { config }, { timeoutMs: 15_000, ...opts }),
+  getRecommendedMcp: () =>
+    json<{ ok: boolean; servers: RecommendedMcpServer[] }>('/api/extensions/mcp/recommended'),
+  searchMcp: (query: string) =>
+    json<{ ok: boolean; results: McpSearchResult[] }>(`/api/extensions/mcp/search?q=${encodeURIComponent(query)}`),
+
+  // Skills (extensions)
+  getExtensionSkills: (workdir: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; skills: SkillInfo[] }>(
+      `/api/extensions/skills?workdir=${encodeURIComponent(workdir)}`,
+      { timeoutMs: 5_000, ...opts },
+    ),
+  installSkill: (source: string, global?: boolean, skill?: string, workdir?: string) =>
+    post<{ ok: boolean; error?: string; output?: string }>(
+      '/api/extensions/skills/install',
+      { source, global, skill, workdir },
+      { timeoutMs: 90_000 },
+    ),
+  removeExtensionSkill: (name: string, global?: boolean, workdir?: string) =>
+    post<{ ok: boolean; error?: string }>('/api/extensions/skills/remove', { name, global, workdir }),
+  getRecommendedSkills: () =>
+    json<{ ok: boolean; repos: RecommendedSkillRepo[] }>('/api/extensions/skills/recommended'),
+  searchExtensionSkills: (query: string) =>
+    json<{ ok: boolean; results: any[] }>(`/api/extensions/skills/search?q=${encodeURIComponent(query)}`),
+
+  // Skills (legacy)
   getSkills: (workdir: string, opts?: ApiRequestOptions) =>
     json<{ ok: boolean; skills: SkillInfo[]; error?: string }>(
       `/api/session-hub/skills?workdir=${encodeURIComponent(workdir)}`,

@@ -24,6 +24,7 @@ import type { SessionInfo, WorkspaceEntry, DirEntry, OpenTarget } from '../../ty
 import { InputComposer } from './InputComposer';
 import { UserBubble } from './TurnView';
 import { ThinkingDots } from './LivePreview';
+import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
 
 let sessionPanelModulePromise: Promise<typeof import('./SessionPanel')> | null = null;
 
@@ -464,6 +465,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
+  const [extensionsWorkdir, setExtensionsWorkdir] = useState<string | null>(null);
 
   const handleRemoveWorkspace = useCallback((wsPath: string) => {
     setConfirmRemove(wsPath);
@@ -678,6 +680,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 onNewSession={setShowNewSession}
                 onRefresh={handleRefreshWorkspace}
                 onRemove={handleRemoveWorkspace}
+                onExtensions={setExtensionsWorkdir}
                 onWarmSession={scheduleSessionWarmup}
                 onCancelWarmSession={cancelScheduledWarmup}
                 t={t}
@@ -913,6 +916,13 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           </Button>
         </div>
       </Modal>
+
+      {/* Workspace extensions modal */}
+      <WorkspaceExtensionsModal
+        open={!!extensionsWorkdir}
+        onClose={() => setExtensionsWorkdir(null)}
+        workdir={extensionsWorkdir || ''}
+      />
     </div>
   );
 });
@@ -1080,6 +1090,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   onNewSession,
   onRefresh,
   onRemove,
+  onExtensions,
   onWarmSession,
   onCancelWarmSession,
   t,
@@ -1094,6 +1105,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   onNewSession: (wsPath: string) => void;
   onRefresh: (wsPath: string) => void;
   onRemove: (wsPath: string) => void;
+  onExtensions: (wsPath: string) => void;
   onWarmSession: (s: SessionInfo, wsPath: string) => void;
   onCancelWarmSession: (s: SessionInfo, wsPath: string) => void;
   t: (key: string) => string;
@@ -1126,30 +1138,39 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
           {workspace.name}
         </span>
         {isActive && <Dot variant="ok" />}
-        <div className="flex items-center gap-0.5 shrink-0">
+        <div className="flex items-center gap-1 shrink-0">
           <button
             onClick={e => { e.stopPropagation(); onNewSession(wsPath); }}
-            className="p-0.5 rounded text-fg-5 hover:text-primary transition-colors"
+            className="p-1 rounded text-fg-5 hover:text-primary hover:bg-panel-h/60 transition-colors"
             title={t('hub.newSession')}
           >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
               <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
             </svg>
           </button>
           <button
-            onClick={e => { e.stopPropagation(); onRefresh(wsPath); }}
-            className="p-0.5 rounded text-fg-5 hover:text-fg-2 transition-colors"
+            onClick={e => { e.stopPropagation(); onExtensions(wsPath); }}
+            className="p-1 rounded text-fg-5 hover:text-primary hover:bg-panel-h/60 transition-colors"
+            title={t('hub.extensions')}
           >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 22v-5" /><path d="M9 8V2" /><path d="M15 8V2" /><path d="M18 8v5a6 6 0 0 1-12 0V8z" />
+            </svg>
+          </button>
+          <button
+            onClick={e => { e.stopPropagation(); onRefresh(wsPath); }}
+            className="p-1 rounded text-fg-5 hover:text-fg-2 hover:bg-panel-h/60 transition-colors"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
             </svg>
           </button>
           {!isActive && (
             <button
               onClick={e => { e.stopPropagation(); onRemove(wsPath); }}
-              className="p-0.5 rounded text-fg-5 hover:text-red-400 transition-colors"
+              className="p-1 rounded text-fg-5 hover:text-red-400 hover:bg-panel-h/60 transition-colors"
             >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
               </svg>
             </button>

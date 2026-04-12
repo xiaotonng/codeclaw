@@ -40,7 +40,7 @@ describe('project skills', () => {
 
       // .claude/commands/deploy.md is ignored — only .pikiclaw/skills/ is scanned
       expect(result.skills).toEqual([
-        { name: 'ship', label: 'Shared Ship', description: 'shared', source: 'skills' },
+        { name: 'ship', label: 'Shared Ship', description: 'shared', source: 'skills', scope: 'project', mcpRequires: undefined },
       ]);
     }
 

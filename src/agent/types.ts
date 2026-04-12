@@ -209,6 +209,7 @@ export interface ManagedSessionRecord {
   updatedAt: string;
   title: string | null;
   model: string | null;
+  thinkingEffort: string | null;
   stagedFiles: string[];
   runState: SessionRunState;
   runDetail: string | null;
@@ -250,6 +251,7 @@ export interface SessionInfo {
   workspacePath: string | null;
   threadId?: string | null;
   model: string | null;
+  thinkingEffort?: string | null;
   createdAt: string | null;
   title: string | null;
   running: boolean;

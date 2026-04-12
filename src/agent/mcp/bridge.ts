@@ -23,6 +23,7 @@ import {
 } from '../../browser-profile.js';
 import { loadUserConfig } from '../../core/config/user-config.js';
 import { MCP_TIMEOUTS, MCP_ARTIFACT_MAX_BYTES } from '../../core/constants.js';
+import { mergeExtensionsForSession, getGlobalExtensionsAsServers } from './extensions.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -526,7 +527,10 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
 
   if (opts.agent === 'codex') {
     // Codex: register MCP servers via `codex mcp add/remove`
-    for (const server of servers) {
+    // Include global + workspace extensions alongside built-in servers
+    const extServers = getGlobalExtensionsAsServers(opts.workdir);
+    const allServers = [...extServers, ...servers];
+    for (const server of allServers) {
       const codexArgs = ['mcp', 'add', server.name];
       for (const [k, v] of Object.entries(server.env || {})) codexArgs.push('--env', `${k}=${v}`);
       codexArgs.push('--', server.command, ...server.args);
@@ -541,32 +545,19 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     }
   } else if (opts.agent === 'gemini') {
     // Gemini CLI 0.32+ loads MCP servers from settings.json rather than --mcp-config.
+    // Include global + workspace extensions alongside built-in servers
+    const extServers = getGlobalExtensionsAsServers(opts.workdir);
+    const allServers = [...extServers, ...servers];
     configPath = path.join(sessionDir, 'gemini-system-settings.json');
-    const config = buildGeminiMcpConfig(servers);
+    const config = buildGeminiMcpConfig(allServers);
     fs.mkdirSync(sessionDir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
     extraEnv = { GEMINI_CLI_SYSTEM_SETTINGS_PATH: configPath };
   } else {
     // Claude: write MCP config JSON for --mcp-config
+    // Uses centralized merge: global extensions → .mcp.json files → built-in servers
     configPath = path.join(sessionDir, 'mcp-config.json');
-    const bridgeConfig = buildClaudeMcpConfig(servers);
-    const mergedServers: Record<string, any> = {};
-
-    // Discover and merge existing MCP configs (project-local, then user-global)
-    for (const candidate of [
-      path.join(opts.workdir || '', '.mcp.json'),
-      path.join(opts.workdir || '', '.claude', '.mcp.json'),
-      path.join(os.homedir(), '.claude', '.mcp.json'),
-    ]) {
-      try {
-        const raw = fs.readFileSync(candidate, 'utf-8');
-        const parsed = JSON.parse(raw);
-        if (parsed.mcpServers) Object.assign(mergedServers, parsed.mcpServers);
-      } catch { /* not found or invalid — skip */ }
-    }
-
-    // Bridge servers take precedence (overwrite duplicates)
-    Object.assign(mergedServers, bridgeConfig.mcpServers);
+    const mergedServers = mergeExtensionsForSession(servers, opts.workdir);
 
     fs.mkdirSync(sessionDir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify({ mcpServers: mergedServers }, null, 2));
