@@ -33,12 +33,21 @@ trap 'rm -f "${DEV_DIR}/dev.pid"' EXIT
 
 : > "${LOG_FILE}"
 
-export PIKICLAW_CONFIG="${DEV_DIR}/setting.json"
-export PIKICLAW_LOG_LEVEL="${PIKICLAW_LOG_LEVEL:-debug}"
 # Dev isolates setting.json only. The managed browser profile intentionally
 # stays at ~/.pikiclaw/browser/chrome-profile so dev and the main runtime reuse
 # the same browser login state.
-unset CLAUDECODE
+#
+# Clean inherited env vars that leak when launched from inside a running pikiclaw
+# or Claude Code session. Without this, the dev process inherits agent permissions,
+# channel credentials, daemon flags, workdir overrides, etc. from the parent.
+# Use pattern-based unset to catch everything rather than maintaining an explicit list.
+while IFS= read -r _var; do
+  unset "$_var"
+done < <(env | grep -oE '^(PIKICLAW_|CLAUDECODE|CLAUDE_CODE_|CLAUDE_MODEL|CLAUDE_PERMISSION_|CODEX_|GEMINI_|DEFAULT_AGENT|FEISHU_|TELEGRAM_|WEIXIN_)[^=]*' || true)
+
+# Set dev-specific env AFTER the cleanup so they are not wiped.
+export PIKICLAW_CONFIG="${DEV_DIR}/setting.json"
+export PIKICLAW_LOG_LEVEL="${PIKICLAW_LOG_LEVEL:-debug}"
 
 {
   npm run build:dashboard

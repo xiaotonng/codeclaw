@@ -84,7 +84,7 @@ export function adaptMarkdownForFeishu(markdown: string): string {
       continue;
     }
 
-    // Pass GFM tables through — Feishu card markdown supports tables natively
+    // Pass GFM tables through — rendered natively with card schema 2.0
     if (i + 1 < lines.length && isGfmTableRow(lines[i]) && isGfmTableSeparator(lines[i + 1])) {
       while (i < lines.length && isGfmTableRow(lines[i])) {
         out.push(lines[i]);

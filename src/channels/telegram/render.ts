@@ -28,6 +28,7 @@ import {
   buildProviderUsageLines,
   extractFinalReplyData,
   extractStreamPreviewData,
+  parseGfmTable,
 } from '../../bot/render-shared.js';
 export type { FooterStatus, ProviderUsageSnapshot, StreamPreviewRenderInput } from '../../bot/render-shared.js';
 
@@ -238,14 +239,25 @@ export function mdToTgHtml(text: string): string {
       while (i < lines.length) {
         const tableLine = lines[i].trim();
         if (!tableLine.startsWith('|')) break;
-        if (/^\|[\s\-:|]+\|$/.test(tableLine)) {
-          i++;
-          continue;
-        }
         tableLines.push(tableLine);
         i++;
       }
-      if (tableLines.length) result.push(`<pre>${escapeHtml(tableLines.join('\n'))}</pre>`);
+      const parsed = parseGfmTable(tableLines);
+      if (parsed && parsed.headers.length >= 2) {
+        const parts: string[] = [];
+        for (let r = 0; r < parsed.rows.length; r++) {
+          if (r > 0) parts.push('');
+          const cells = parsed.rows[r];
+          parts.push(`<b>${escapeHtml(cells[0] || '')}</b>`);
+          for (let c = 1; c < parsed.headers.length; c++) {
+            parts.push(`${escapeHtml(parsed.headers[c])}: ${escapeHtml(cells[c] || '')}`);
+          }
+        }
+        result.push(parts.join('\n'));
+      } else {
+        const plain = tableLines.filter(l => !/^\|[\s\-:|]+\|$/.test(l.trim()));
+        if (plain.length) result.push(`<pre>${escapeHtml(plain.join('\n'))}</pre>`);
+      }
       continue;
     }
 

@@ -215,31 +215,48 @@ function keyboardToRows(keyboard: any): FeishuCardActionRow[] {
   return chunkActionRows(actions);
 }
 
-function buildCardFromView(view: FeishuCardView): lark.InteractiveCard {
+function buildCardFromView(view: FeishuCardView): Record<string, unknown> {
   const adapted = adaptMarkdownForFeishu(view.markdown);
   const content = adapted.length > FEISHU_CARD_MAX
     ? adapted.slice(0, FEISHU_CARD_MAX) + '\n\n...(truncated)'
     : adapted;
-  const card: lark.InteractiveCard = {
-    config: { wide_screen_mode: true, update_multi: true },
-    elements: [{ tag: 'markdown', content }],
+
+  const actionElements: unknown[] = [];
+  for (const row of view.rows || []) {
+    const actions = row.actions.filter(Boolean);
+    if (!actions.length) continue;
+    const element: Record<string, unknown> = { tag: 'action', actions };
+    const layout = row.layout || inferActionLayout(actions);
+    if (layout) element.layout = layout;
+    actionElements.push(element);
+  }
+
+  // Card JSON 2.0 supports tables in markdown but dropped `tag: action`.
+  // Use v2 for content-only cards; fall back to v1 when buttons are needed.
+  if (actionElements.length) {
+    const card: Record<string, unknown> = {
+      config: { wide_screen_mode: true, update_multi: true },
+      elements: [{ tag: 'markdown', content }, ...actionElements],
+    };
+    if (view.title) {
+      card.header = {
+        template: view.template || 'blue',
+        title: { content: view.title, tag: 'plain_text' },
+      };
+    }
+    return card;
+  }
+
+  const card: Record<string, unknown> = {
+    schema: '2.0',
+    config: { update_multi: true },
+    body: { elements: [{ tag: 'markdown', content }] },
   };
   if (view.title) {
     card.header = {
       template: view.template || 'blue',
       title: { content: view.title, tag: 'plain_text' },
     };
-  }
-  for (const row of view.rows || []) {
-    const actions = row.actions.filter(Boolean);
-    if (!actions.length) continue;
-    const element: lark.InterfaceCardActionElement = {
-      tag: 'action',
-      actions,
-    };
-    const layout = row.layout || inferActionLayout(actions);
-    if (layout) element.layout = layout;
-    card.elements!.push(element);
   }
   return card;
 }

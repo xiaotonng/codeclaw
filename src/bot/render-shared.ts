@@ -40,6 +40,34 @@ export interface StreamPreviewRenderInput {
 }
 
 // ---------------------------------------------------------------------------
+// GFM table parsing
+// ---------------------------------------------------------------------------
+
+/** Parse GFM table lines into structured headers + rows. */
+export function parseGfmTable(tableLines: string[]): { headers: string[]; rows: string[][] } | null {
+  if (tableLines.length < 3) return null;
+  const parseRow = (line: string) => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+  const isSep = (line: string) => {
+    const cells = parseRow(line);
+    return cells.length > 0 && cells.every(c => /^:?-{2,}:?$/.test(c));
+  };
+
+  let headerIdx = -1;
+  for (let i = 0; i < tableLines.length - 1; i++) {
+    if (isSep(tableLines[i + 1])) { headerIdx = i; break; }
+  }
+  if (headerIdx < 0) return null;
+
+  const headers = parseRow(tableLines[headerIdx]);
+  const rows: string[][] = [];
+  for (let i = headerIdx + 2; i < tableLines.length; i++) {
+    if (isSep(tableLines[i])) continue;
+    rows.push(parseRow(tableLines[i]));
+  }
+  return rows.length ? { headers, rows } : null;
+}
+
+// ---------------------------------------------------------------------------
 // Footer helpers
 // ---------------------------------------------------------------------------
 

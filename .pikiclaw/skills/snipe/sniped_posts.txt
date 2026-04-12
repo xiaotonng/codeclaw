@@ -1,0 +1,2 @@
+# 已推荐过的推文 URL（每行一条，避免重复推荐）
+# 格式: https://x.com/{handle}/status/{id}
