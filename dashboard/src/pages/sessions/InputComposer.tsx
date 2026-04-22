@@ -46,9 +46,11 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const lastSentRef = useRef<{ prompt: string; files: File[] }>({ prompt: '', files: [] });
   const storeAgents = useStore(s => s.agentStatus?.agents ?? null);
   const [agents, setAgents] = useState<AgentRuntimeStatus[]>(storeAgents || []);
-  const [selectedAgent, setSelectedAgent] = useState(session.agent || '');
-  const [selectedModel, setSelectedModel] = useState(session.model || '');
-  const [selectedEffort, setSelectedEffort] = useState(session.thinkingEffort || '');
+  // User's applied cascade choice for this session. Empty = use runtime default.
+  // Reset on session change (see session-key effect below).
+  const [selectedAgent, setSelectedAgent] = useState('');
+  const [selectedModel, setSelectedModel] = useState('');
+  const [selectedEffort, setSelectedEffort] = useState('');
   const [imageAttachments, setImageAttachments] = useState<ComposerImageAttachment[]>([]);
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [pendingAgent, setPendingAgent] = useState<string | null>(null);
@@ -93,28 +95,16 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     };
   }, [dk]);
 
+  // Reset applied cascade choice + transient pending state when session changes.
   useEffect(() => {
-    if (!agents.length) return;
-    const fallbackAgent = selectedAgent
-      || session.agent
-      || agents.find(agent => agent.isDefault)?.agent
-      || agents.find(agent => agent.installed)?.agent
-      || agents[0]?.agent
-      || '';
-    const fallbackStatus = agents.find(agent => agent.agent === fallbackAgent) || null;
-    if (fallbackAgent && !selectedAgent) setSelectedAgent(fallbackAgent);
-    if (!selectedModel) {
-      const nextModel = fallbackAgent === session.agent
-        ? (session.model || fallbackStatus?.selectedModel || '')
-        : (fallbackStatus?.selectedModel || '');
-      if (nextModel) setSelectedModel(nextModel);
-    }
-    if (!selectedEffort && fallbackAgent && fallbackAgent !== 'gemini') {
-      const nextEffort = (fallbackAgent === session.agent ? session.thinkingEffort : null)
-        || fallbackStatus?.selectedEffort || '';
-      if (nextEffort) setSelectedEffort(nextEffort);
-    }
-  }, [agents, selectedAgent, selectedEffort, selectedModel, session.agent, session.model, session.thinkingEffort]);
+    setSelectedAgent('');
+    setSelectedModel('');
+    setSelectedEffort('');
+    setPendingAgent(null);
+    setPendingModel(null);
+    setPendingEffort(null);
+    setCascadeStep('closed');
+  }, [session.agent, session.sessionId]);
 
   // Consume editDraft — populate the input when user clicks "Edit" on a message
   useEffect(() => {
@@ -235,12 +225,16 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     const prompt = input.trim();
     const attachments = imageAttachments.map(item => item.file);
     if ((!prompt && attachments.length === 0) || sending) return;
-    const targetAgent = selectedAgent || session.agent || '';
+    const targetAgent = selectedAgent
+      || session.agent
+      || agents.find(a => a.isDefault)?.agent
+      || '';
     if (!targetAgent) return;
-    const targetModel = selectedModel.trim() || null;
+    const targetStatus = agents.find(a => a.agent === targetAgent) || null;
+    const targetModel = (targetStatus?.selectedModel || selectedModel || '').trim() || null;
     const targetEffort = targetAgent === 'gemini'
       ? null
-      : (selectedEffort.trim() || null);
+      : ((targetStatus?.selectedEffort || selectedEffort || '').trim() || null);
     const targetSessionId = targetAgent === session.agent ? session.sessionId : '';
     setSending(true);
     // Stash content for potential recall restoration
@@ -270,6 +264,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       .catch(() => {})
       .finally(() => setSending(false));
   }, [
+    agents,
     clearImageAttachments,
     imageAttachments,
     input,
@@ -379,13 +374,22 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     addImageAttachments(files);
   }, [addImageAttachments]);
 
-  const effectiveAgent = selectedAgent || session.agent || agents.find(a => a.isDefault)?.agent || '';
+  const effectiveAgent = selectedAgent
+    || session.agent
+    || agents.find(a => a.isDefault)?.agent
+    || agents.find(a => a.installed)?.agent
+    || agents[0]?.agent
+    || '';
   const currentAgent = agents.find(a => a.agent === effectiveAgent) || null;
   const cascadeAgentId = pendingAgent || effectiveAgent;
   const cascadeAgent = agents.find(a => a.agent === cascadeAgentId) || currentAgent;
   const models = cascadeAgent?.models || [];
-  const currentModel = selectedModel || (effectiveAgent === session.agent ? (session.model || '') : '') || currentAgent?.selectedModel || '';
-  const currentEffort = effectiveAgent === 'gemini' ? '' : (selectedEffort || currentAgent?.selectedEffort || '');
+  // Runtime agent status is the source of truth; applied cascade choice is a fallback
+  // only for the brief window before agents loads.
+  const currentModel = currentAgent?.selectedModel || selectedModel || '';
+  const currentEffort = effectiveAgent === 'gemini'
+    ? ''
+    : (currentAgent?.selectedEffort || selectedEffort || '');
   const effortLevels = EFFORT_OPTIONS[cascadeAgentId as keyof typeof EFFORT_OPTIONS] || [];
   const activePreview = previewImageId ? imageAttachments.find(item => item.id === previewImageId) || null : null;
   const canSend = (!!input.trim() || imageAttachments.length > 0) && !sending && !!effectiveAgent;
@@ -410,9 +414,16 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   }, [reloadAppState]);
 
   const applyCascade = useCallback((agent: string, model: string, effort: string | null) => {
+    const nextEffort = agent === 'gemini' ? '' : (effort || '');
     setSelectedAgent(agent);
     setSelectedModel(model);
-    setSelectedEffort(agent === 'gemini' ? '' : (effort || ''));
+    setSelectedEffort(nextEffort);
+    // Optimistically reflect the choice in runtime state so the button/dropdown update
+    // instantly without waiting for persistComposerDefaults to round-trip.
+    setAgents(prev => prev.map(a => a.agent === agent
+      ? { ...a, isDefault: true, selectedModel: model, selectedEffort: nextEffort }
+      : { ...a, isDefault: false }
+    ));
     resetCascade();
     setCascadeStep('closed');
     void persistComposerDefaults(agent, model, effort);

@@ -262,6 +262,14 @@ export const AGENT_DETECT_TIMEOUTS = {
 /** Grace period added to the user-configured timeout before hard-killing the agent. */
 export const AGENT_STREAM_HARD_KILL_GRACE_MS = 10_000;
 
+/**
+ * On user abort, wait this long for the agent CLI to flush its session JSONL
+ * (including any `[Request interrupted]` marker) before falling back to
+ * SIGTERM. Keeps the partial assistant response persisted so the next task,
+ * resumed via --resume, can see it in the transcript.
+ */
+export const AGENT_GRACEFUL_ABORT_GRACE_MS = 2_000;
+
 /** Codex-specific grace period added to the user-configured timeout. */
 export const CODEX_STREAM_HARD_KILL_GRACE_MS = 5_000;
 

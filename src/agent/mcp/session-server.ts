@@ -19,6 +19,7 @@
 import path from 'node:path';
 import { createRetainedLogSink, writeScopedLog, type LogLevel } from '../../core/logging.js';
 import type { McpToolModule, ToolContext } from './tools/types.js';
+import { askUserTools } from './tools/ask-user.js';
 import { desktopTools } from './tools/desktop.js';
 import { workspaceTools } from './tools/workspace.js';
 
@@ -78,6 +79,7 @@ function desktopToolsEnabled(): boolean {
 
 const TOOL_MODULES: McpToolModule[] = [
   workspaceTools,
+  askUserTools,
   ...(desktopToolsEnabled() ? [desktopTools] : []),
 ];
 

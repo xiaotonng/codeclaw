@@ -27,6 +27,7 @@ import {
 } from '../../agent/index.js';
 import type { McpSendFileCallback } from '../../agent/mcp/bridge.js';
 import { shutdownAllDrivers } from '../../agent/driver.js';
+import { expandTilde } from '../../core/platform.js';
 import {
   SKILL_CMD_PREFIX,
 } from '../../bot/menu.js';
@@ -474,7 +475,7 @@ export class FeishuBot extends Bot {
   private async cmdSwitch(ctx: FeishuContext, args: string) {
     const arg = args.trim();
     if (arg) {
-      const resolvedPath = path.resolve(arg.replace(/^~/, process.env.HOME || ''));
+      const resolvedPath = path.resolve(expandTilde(arg));
       if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isDirectory()) {
         await ctx.reply(`Not a valid directory: \`${resolvedPath}\``);
         return;

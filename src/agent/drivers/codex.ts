@@ -35,6 +35,7 @@ import {
   CODEX_STREAM_HARD_KILL_GRACE_MS,
   SESSION_RUNNING_THRESHOLD_MS,
 } from '../../core/constants.js';
+import { getHome } from '../../core/platform.js';
 
 // ---------------------------------------------------------------------------
 // App-server JSON-RPC client
@@ -1150,7 +1151,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
 
 /** Load title index from ~/.codex/session_index.jsonl (deduped, last entry wins). */
 function loadCodexSessionIndex(): Map<string, { threadName: string; updatedAt: string }> {
-  const home = process.env.HOME || '';
+  const home = getHome();
   if (!home) return new Map();
   const indexPath = path.join(home, '.codex', 'session_index.jsonl');
   if (!fs.existsSync(indexPath)) return new Map();
@@ -1223,7 +1224,7 @@ function readCodexSessionHead(filePath: string): { sessionId: string; cwd: strin
 }
 
 function getNativeCodexSessions(workdir: string): SessionInfo[] {
-  const home = process.env.HOME || '';
+  const home = getHome();
   if (!home) return [];
   const sessionsDir = path.join(home, '.codex', 'sessions');
   if (!fs.existsSync(sessionsDir)) return [];
@@ -1298,7 +1299,7 @@ function readCodexSessionMeta(filePath: string): { sessionId: string; cwd: strin
 }
 
 function findCodexRolloutPath(sessionId: string, workdir: string): string | null {
-  const home = process.env.HOME || '';
+  const home = getHome();
   if (!home) return null;
   const sessionsRoot = path.join(home, '.codex', 'sessions');
   if (!fs.existsSync(sessionsRoot)) return null;
@@ -1368,6 +1369,7 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
     runState: record.runState,
     runDetail: record.runDetail,
     runUpdatedAt: record.runUpdatedAt,
+    runPid: record.runPid,
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
@@ -1382,7 +1384,7 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);
   const merged = mergeManagedAndNativeSessions(pikiclawSessions, nativeSessions);
   const sessions = typeof limit === 'number' ? merged.slice(0, limit) : merged;
-  const sessionsDir = path.join(process.env.HOME || '', '.codex', 'sessions');
+  const sessionsDir = path.join(getHome(), '.codex', 'sessions');
   agentLog(
     `[sessions:codex] workdir=${resolvedWorkdir} sessionsDir=${sessionsDir} sessionsDirExists=${fs.existsSync(sessionsDir)} ` +
     `pikiclaw=${pikiclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
@@ -1798,7 +1800,7 @@ function parseRateLimitWindow(label: string, rl: any): UsageWindowInfo | null {
 }
 
 export async function getCodexUsageLive(): Promise<UsageResult> {
-  const home = process.env.HOME || '';
+  const home = getHome();
   const srv = getSharedServer();
   if (!(await srv.ensureRunning())) {
     return getCodexUsageFromStateDb(home) || emptyUsage('codex', 'Failed to start codex app-server.');
@@ -1849,7 +1851,7 @@ class CodexDriver implements AgentDriver {
   async listModels(opts: ModelListOpts): Promise<ModelListResult> { return discoverCodexModels(opts); }
 
   getUsage(opts: UsageOpts): UsageResult {
-    const home = process.env.HOME || '';
+    const home = getHome();
     if (!home) return emptyUsage('codex', 'HOME is not set.');
     return getCodexUsageFromStateDb(home)
       || getCodexUsageFromSessions(home)

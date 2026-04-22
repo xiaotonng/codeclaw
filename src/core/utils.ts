@@ -2,9 +2,9 @@
  * Pure utility functions shared across all layers. No filesystem side effects, no state dependencies.
  */
 
-import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { whichSync as platformWhichSync } from './platform.js';
 
 export type ChatId = number | string;
 
@@ -71,9 +71,7 @@ export function shellSplit(str: string): string[] {
   return args;
 }
 
-export function whichSync(cmd: string): string | null {
-  try { return execSync(`which ${cmd} 2>/dev/null`, { encoding: 'utf-8' }).trim() || null; } catch { return null; }
-}
+export const whichSync = platformWhichSync;
 
 export function fmtTokens(n: number | null): string {
   if (n == null) return '-';

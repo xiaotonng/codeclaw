@@ -12,12 +12,14 @@ import { AGENT_DETECT_TIMEOUTS, AGENT_STREAM_HARD_KILL_GRACE_MS } from '../core/
 import { getDriver, allDrivers } from './driver.js';
 import type {
   Agent, AgentDetectOptions, AgentInfo, AgentListResult,
+  AgentInteraction, AgentInteractionQuestion,
   StreamOpts, StreamResult, CodexCumulativeUsage,
   ModelListOpts, ModelListResult, UsageOpts, UsageResult,
   SessionListOpts, SessionListResult, SessionTailOpts, SessionTailResult,
   SessionMessagesOpts, SessionMessagesResult,
   StreamPreviewMeta,
 } from './types.js';
+import type { McpAskUserCallback } from './mcp/bridge.js';
 import {
   Q, agentLog, agentWarn, agentError, joinErrorMessages, normalizeErrorMessage,
   buildStreamPreviewMeta, computeContext, shortValue, isPendingSessionId, dedupeStrings,
@@ -38,6 +40,51 @@ function trimSessionText(value: unknown, max = 24_000): string | null {
   if (!text) return null;
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+}
+
+/**
+ * Adapt a driver-agnostic `onInteraction` callback into the shape the MCP
+ * bridge needs for the `im_ask_user` tool.  Converts the raw question/options
+ * payload into an AgentInteraction and unwraps the structured answer back into
+ * a plain string for the calling agent.
+ */
+function buildAskUserCallback(
+  onInteraction: NonNullable<StreamOpts['onInteraction']>,
+): McpAskUserCallback {
+  return async (askOpts) => {
+    const interactionId = `ask-user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const questionId = 'answer';
+    const optionEntries = (askOpts.options || [])
+      .map(o => ({ label: o.label, description: o.description || '', value: o.label }))
+      .filter(o => o.label);
+    const question: AgentInteractionQuestion = {
+      id: questionId,
+      header: (askOpts.header || '').trim() || 'Question',
+      prompt: askOpts.question,
+      options: optionEntries.length ? optionEntries : null,
+      allowFreeform: askOpts.allowFreeform !== false,
+      secret: false,
+      allowEmpty: false,
+    };
+    const interaction: AgentInteraction = {
+      kind: 'user-input',
+      id: interactionId,
+      title: (askOpts.header || '').trim() || 'User Input',
+      hint: (askOpts.hint || '').trim() || null,
+      questions: [question],
+      resolveWith: (answers) => {
+        const first = answers[questionId]?.[0];
+        return { answer: typeof first === 'string' ? first : '' };
+      },
+    };
+    try {
+      const response = await onInteraction(interaction);
+      const answer = response?.answer;
+      return { ok: true, answer: typeof answer === 'string' ? answer : '' };
+    } catch (error: any) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -377,12 +424,19 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
   try {
     const { startMcpBridge } = await import('./mcp/bridge.js');
     const sessionDir = path.dirname(session.workspacePath);
+    // When onInteraction is wired (dashboard and/or IM channel), expose the
+    // im_ask_user MCP tool so agents can surface user-input questions through
+    // the same pathway used by Codex's native requestUserInput.
+    const askUser: import('./mcp/bridge.js').McpAskUserCallback | undefined = opts.onInteraction
+      ? buildAskUserCallback(opts.onInteraction)
+      : undefined;
     bridge = await startMcpBridge({
       sessionDir,
       workspacePath: session.workspacePath,
       workdir: opts.workdir,
       stagedFiles,
       sendFile: opts.mcpSendFile,
+      askUser,
       agent: opts.agent,
       onLog: (message: string) => agentLog(`[mcp] ${message}`),
     });

@@ -39,13 +39,16 @@ function saveHistorySnapshot(key: string, h: TurnHistoryWindow) {
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, onSessionChange, initialPendingPrompt, onPendingPromptConsumed,
+  session, workdir, active = true, onSessionChange, initialPendingPrompt, initialPendingImageUrls, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
   active?: boolean;
   onSessionChange?: (next: { agent: string; sessionId: string; workdir: string }) => void;
   initialPendingPrompt?: string | null;
+  /** Blob-URL previews for images attached to the first message of a new session.
+   *  Ownership transfers to this panel: we revoke them once the turn completes. */
+  initialPendingImageUrls?: string[];
   onPendingPromptConsumed?: () => void;
 }) {
   const locale = useStore(s => s.locale);
@@ -55,10 +58,12 @@ export const SessionPanel = memo(function SessionPanel({
   const meta = getAgentMeta(session.agent || '');
   const displayState = sessionDisplayState(session);
 
+  const hasInitialPending = !!initialPendingPrompt || !!(initialPendingImageUrls && initialPendingImageUrls.length);
   const [history, setHistory] = useState<TurnHistoryWindow | null>(null);
-  const [loading, setLoading] = useState(!initialPendingPrompt);
+  const [loading, setLoading] = useState(!hasInitialPending);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [liveStream, setLiveStream] = useState<{
+    taskId: string | null;
     phase: 'streaming' | 'done';
     text: string;
     thinking: string;
@@ -71,10 +76,10 @@ export const SessionPanel = memo(function SessionPanel({
   const [streamTaskId, setStreamTaskId] = useState<string | null>(null);
   const [queuedTaskId, setQueuedTaskId] = useState<string | null>(null);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(initialPendingPrompt || null);
-  const [pendingImageUrls, setPendingImageUrls] = useState<string[]>([]);
+  const [pendingImageUrls, setPendingImageUrls] = useState<string[]>(initialPendingImageUrls || []);
   const [pendingQueued, setPendingQueued] = useState(false);
   const [editDraft, setEditDraft] = useState<string | null>(null);
-  const pendingImageUrlsRef = useRef<string[]>([]);
+  const pendingImageUrlsRef = useRef<string[]>(initialPendingImageUrls || []);
   const liveStreamRef = useRef(liveStream);
   const streamingRef = useRef(streaming);
   liveStreamRef.current = liveStream;
@@ -85,22 +90,27 @@ export const SessionPanel = memo(function SessionPanel({
   const scrollToBottomRef = useRef(false);
   const loadingLatestRef = useRef(false);
   const loadingOlderRef = useRef(false);
-  const localStreamPendingRef = useRef(!!initialPendingPrompt);
+  const localStreamPendingRef = useRef(hasInitialPending);
   const clearPendingOnLoadRef = useRef(false);
-  const clearLiveStreamOnLoadRef = useRef(false);
+  // When a task ends, we wait for loadLatestTurns to commit its final text to
+  // history before clearing liveStream. We remember which task triggered the
+  // clear so that if a new task has already started streaming into liveStream
+  // by the time history arrives, we don't accidentally wipe the new task's
+  // preview. `true` = no specific task (used for non-handoff shutdown paths).
+  const clearLiveStreamOnLoadRef = useRef<{ taskId: string | null } | true | false>(false);
   const initialPendingConsumedRef = useRef(false);
   const promotingRef = useRef(false);
 
-  // Consume initialPendingPrompt from new-session flow.
-  // State (pendingPrompt, loading, localStreamPendingRef) is already initialized
-  // from the prop so the very first render shows the user message — no spinner flash.
+  // Consume initialPendingPrompt/initialPendingImageUrls from new-session flow.
+  // State (pendingPrompt, pendingImageUrls, loading, localStreamPendingRef) is already initialized
+  // from the props so the very first render shows the user message — no spinner flash.
   // This effect only triggers the remaining side effects (polling + parent notify).
   useEffect(() => {
-    if (initialPendingConsumedRef.current || !initialPendingPrompt) return;
+    if (initialPendingConsumedRef.current || !hasInitialPending) return;
     initialPendingConsumedRef.current = true;
     setStreamPollNonce(n => n + 1);
     onPendingPromptConsumed?.();
-  }, [initialPendingPrompt, onPendingPromptConsumed]);
+  }, [hasInitialPending, onPendingPromptConsumed]);
 
   const clearPending = useCallback(() => {
     setPendingPrompt(null);
@@ -161,8 +171,16 @@ export const SessionPanel = memo(function SessionPanel({
         clearPending();
       }
       if (clearLiveStreamOnLoadRef.current) {
+        const pending = clearLiveStreamOnLoadRef.current;
         clearLiveStreamOnLoadRef.current = false;
-        setLiveStream(null);
+        // If the pending clear was scoped to a specific (finished) task, only
+        // drop liveStream when it still belongs to that task. A new task that
+        // started streaming during the fetch has already replaced liveStream,
+        // and its content must be preserved.
+        const scopedTaskId = pending !== true ? pending.taskId : null;
+        const owned = !!liveStreamRef.current
+          && (pending === true || liveStreamRef.current.taskId === scopedTaskId);
+        if (owned) setLiveStream(null);
       }
       return true;
     } finally {
@@ -234,13 +252,27 @@ export const SessionPanel = memo(function SessionPanel({
     setStreamTaskId(state.taskId || null);
     setQueuedTaskId(state.queuedTaskId || null);
     if (state.phase === 'streaming') {
-      setLiveStream({
-        phase: 'streaming',
-        text: state.text || '',
-        thinking: state.thinking || '',
-        activity: state.activity,
-        plan: state.plan ?? null,
-      });
+      // Steer handoff: a previous task just ended ('done' triggered loadLatestTurns
+      // and armed clearLiveStreamOnLoadRef). The new task's initial snapshot carries
+      // an empty text — overwriting liveStream here would flash the previous task's
+      // partial response away before loadLatestTurns has a chance to commit it to
+      // history. Skip the empty overwrite; the new task's subsequent text events
+      // (or the loadLatestTurns completion) will replace liveStream naturally.
+      const handingOffPrevTask = clearLiveStreamOnLoadRef.current
+        && !!liveStreamRef.current
+        && liveStreamRef.current.taskId !== null
+        && liveStreamRef.current.taskId !== (state.taskId || null)
+        && !(state.text || '').trim();
+      if (!handingOffPrevTask) {
+        setLiveStream({
+          taskId: state.taskId || null,
+          phase: 'streaming',
+          text: state.text || '',
+          thinking: state.thinking || '',
+          activity: state.activity,
+          plan: state.plan ?? null,
+        });
+      }
       setStreaming(true);
       // Queued task is now active — show its bubble in conversation
       if (!state.queuedTaskId) setPendingQueued(false);
@@ -256,7 +288,10 @@ export const SessionPanel = memo(function SessionPanel({
       setStreaming(false);
       if (prevPhaseRef.current !== 'done') {
         if (!state.queuedTaskId) clearPendingOnLoadRef.current = true;
-        clearLiveStreamOnLoadRef.current = true;
+        // Scope the pending clear to the finishing task so a steer handoff can
+        // start a new task's stream without losing its preview when the history
+        // fetch resolves.
+        clearLiveStreamOnLoadRef.current = { taskId: state.taskId || null };
         void loadLatestTurns({ keepOlder: true, force: true, scrollToBottom: stickToBottomRef.current });
       }
       if (!state.queuedTaskId) localStreamPendingRef.current = false;
@@ -302,7 +337,7 @@ export const SessionPanel = memo(function SessionPanel({
       turnOffset: 0,
       turnLimit: SESSION_PAGE_TURNS,
     }, { allowStale: true });
-    const isNewSession = !!initialPendingPrompt && !initialPendingConsumedRef.current;
+    const isNewSession = hasInitialPending && !initialPendingConsumedRef.current;
     // Stale-while-revalidate: API cache → history snapshot → loading spinner
     const initialHistory = cachedLatest?.ok
       ? normalizeTurnHistory(cachedLatest)

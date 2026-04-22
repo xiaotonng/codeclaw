@@ -103,7 +103,7 @@ export function parseTodoWriteAsPlan(input: any): StreamPreviewPlan | null {
 
 export function normalizeActivityLine(text: string): string { return text.replace(/\s+/g, ' ').trim(); }
 
-export function pushRecentActivity(lines: string[], line: string, maxLines = 50) {
+export function pushRecentActivity(lines: string[], line: string, maxLines = 500) {
   const cleaned = normalizeActivityLine(line);
   if (!cleaned) return;
   if (lines[lines.length - 1] === cleaned) return;
@@ -216,6 +216,18 @@ export function summarizeClaudeToolUse(name: string, input: any): string {
       return c ? `Run shell: ${c}` : 'Run shell command';
     }
     default: {
+      // MCP tools come through as `mcp__<server>__<tool>` — unwrap common pikiclaw tools
+      const mcpMatch = tool.match(/^mcp__[^_]+__(.+)$/);
+      const bare = mcpMatch ? mcpMatch[1] : tool;
+      if (bare === 'im_ask_user') {
+        const q = shortValue(input?.question, 120);
+        return q ? `Ask user: ${q}` : 'Ask user';
+      }
+      if (bare === 'im_send_file') {
+        const p = shortValue(input?.path, 120);
+        return p ? `Send file: ${p}` : 'Send file';
+      }
+      if (bare === 'im_list_files') return 'List workspace files';
       if (description) return `${tool}: ${description}`;
       const d = shortValue(input?.file_path || input?.path || input?.command || input?.query || input?.pattern || input?.url, 120);
       return d ? `${tool}: ${d}` : tool;

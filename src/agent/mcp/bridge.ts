@@ -44,6 +44,27 @@ export type McpSendFileCallback = (
   opts: McpSendFileOpts,
 ) => Promise<McpSendFileResult>;
 
+export interface McpAskUserOption {
+  label: string;
+  description?: string;
+}
+
+export interface McpAskUserOpts {
+  question: string;
+  header?: string;
+  hint?: string;
+  options?: McpAskUserOption[];
+  allowFreeform?: boolean;
+}
+
+export interface McpAskUserResult {
+  ok: boolean;
+  answer?: string;
+  error?: string;
+}
+
+export type McpAskUserCallback = (opts: McpAskUserOpts) => Promise<McpAskUserResult>;
+
 export interface McpBridgeHandle {
   /** Path to the generated MCP config JSON — pass to agent CLI via --mcp-config. */
   configPath: string;
@@ -66,6 +87,8 @@ export interface McpBridgeOpts {
   stagedFiles: string[];
   /** Callback invoked when the agent calls the send_file MCP tool. Optional for dashboard sessions. */
   sendFile?: McpSendFileCallback;
+  /** Callback invoked when the agent calls the ask_user MCP tool.  Routes the question to the IM channel and/or dashboard. */
+  askUser?: McpAskUserCallback;
   /** Agent type — determines how MCP server is registered. */
   agent?: string;
   /** Optional log sink for MCP tool activity. */
@@ -364,7 +387,7 @@ export function resolveSendFilePath(
 }
 
 export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHandle | null> {
-  const { sessionDir, workspacePath, stagedFiles, sendFile } = opts;
+  const { sessionDir, workspacePath, stagedFiles, sendFile, askUser } = opts;
   let hadActivity = false;
   const gui = resolveGuiIntegrationConfig();
   const browserRuntime: BrowserRegistrationRuntime = {};
@@ -390,16 +413,25 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   if (opts.workdir) allowedRoots.push(opts.workdir);
   allowedRoots.push('/tmp', os.tmpdir());
 
-  // ── HTTP callback server (only when sendFile callback is provided) ──
+  // ── HTTP callback server (only when at least one callback is provided) ──
   let callbackServer: http.Server | null = null;
   let port = 0;
 
-  if (sendFile) {
+  if (sendFile || askUser) {
     callbackServer = http.createServer((req, res) => {
-      if (req.method !== 'POST' || (req.url !== '/send-file' && req.url !== '/log')) {
+      const endpoint = req.url || '';
+      const known = endpoint === '/send-file' || endpoint === '/log' || endpoint === '/ask-user';
+      if (req.method !== 'POST' || !known) {
         res.writeHead(404);
         res.end();
         return;
+      }
+
+      // User-input responses may take minutes — disable per-request/socket timeouts
+      // for the ask-user endpoint so the connection stays open until the user replies.
+      if (endpoint === '/ask-user') {
+        req.setTimeout(0);
+        res.setTimeout(0);
       }
 
       let body = '';
@@ -413,7 +445,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       req.on('end', async () => {
         clearTimeout(bodyTimer);
         try {
-          if (req.url === '/log') {
+          if (endpoint === '/log') {
             const data = JSON.parse(body || '{}');
             const message = typeof data.message === 'string' ? data.message.trim() : '';
             if (message) {
@@ -422,6 +454,46 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+
+          if (endpoint === '/ask-user') {
+            if (!askUser) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'ask-user is not available for this session' }));
+              return;
+            }
+            const data = JSON.parse(body || '{}');
+            const question = typeof data.question === 'string' ? data.question.trim() : '';
+            if (!question) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'question is required' }));
+              return;
+            }
+            const rawOptions = Array.isArray(data.options) ? data.options : [];
+            const options: McpAskUserOption[] = rawOptions
+              .map((o: any) => ({
+                label: typeof o?.label === 'string' ? o.label.trim() : '',
+                description: typeof o?.description === 'string' ? o.description.trim() : '',
+              }))
+              .filter((o: McpAskUserOption) => o.label);
+            hadActivity = true;
+            const result = await askUser({
+              question,
+              header: typeof data.header === 'string' ? data.header.trim() : undefined,
+              hint: typeof data.hint === 'string' ? data.hint.trim() : undefined,
+              options: options.length ? options : undefined,
+              allowFreeform: data.allowFreeform == null ? true : !!data.allowFreeform,
+            });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+            return;
+          }
+
+          // endpoint === '/send-file'
+          if (!sendFile) {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'send-file is not available for this session' }));
             return;
           }
 
@@ -485,8 +557,10 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       });
     });
 
-    // Set server-level timeouts to prevent hanging connections
-    callbackServer.requestTimeout = MCP_TIMEOUTS.serverRequest;
+    // User input has no bound — disable the server-level request timeout so the
+    // /ask-user endpoint can wait indefinitely.  Per-request body timers above
+    // still guard against partial uploads.
+    callbackServer.requestTimeout = 0;
     callbackServer.headersTimeout = MCP_TIMEOUTS.serverHeaders;
 
     await new Promise<void>((resolve, reject) => {

@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { pathContainsSegment } from './platform.js';
 
 export const PROCESS_RESTART_EXIT_CODE = 75;
 export const PROCESS_RESTART_STATE_FILE_ENV = 'PIKICLAW_RESTART_STATE_FILE';
@@ -78,8 +79,8 @@ export function ensureNonInteractiveRestartArgs(bin: string, args: string[]): st
 export function getDefaultRestartCmd(): string {
   const argv0 = process.argv[0] ?? '';
   const argv1 = process.argv[1] ?? '';
-  if (argv1.endsWith('.ts') || argv1.includes('/tsx') || argv1.includes('/ts-node')) {
-    const isTsxLoader = !argv0.includes('/tsx')
+  if (argv1.endsWith('.ts') || pathContainsSegment(argv1, 'tsx') || pathContainsSegment(argv1, 'ts-node')) {
+    const isTsxLoader = !pathContainsSegment(argv0, 'tsx')
       && process.execArgv?.some(arg => arg.includes('tsx'));
     const parts = isTsxLoader ? ['tsx', argv1] : process.argv.slice(0, 2);
     return parts.map(arg => arg.includes(' ') ? `"${arg}"` : arg).join(' ');

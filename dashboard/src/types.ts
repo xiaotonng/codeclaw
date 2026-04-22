@@ -344,6 +344,7 @@ export interface McpServerConfig {
   headers?: Record<string, string>;
   enabled?: boolean;
   disabled?: boolean;
+  catalogId?: string;
 }
 
 export interface McpExtensionEntry {
@@ -358,17 +359,53 @@ export interface McpHealthResult {
   tools?: string[];
   error?: string;
   elapsedMs?: number;
+  cached?: boolean;
 }
 
-export interface RecommendedMcpServer {
+export type McpCatalogState = 'recommended' | 'needs_auth' | 'disabled' | 'ready' | 'unhealthy';
+
+export interface McpCredentialField {
+  key: string;
+  label: string;
+  labelZh: string;
+  secret?: boolean;
+  required?: boolean;
+  placeholder?: string;
+  helpUrl?: string;
+}
+
+export type McpAuthSpec =
+  | { type: 'none' }
+  | { type: 'credentials'; fields: McpCredentialField[] }
+  | {
+      type: 'mcp-oauth';
+      authorizationEndpoint?: string;
+      tokenEndpoint?: string;
+      registrationEndpoint?: string;
+      clientId?: string;
+      scopes?: string[];
+    };
+
+export type RecommendedScope = 'global' | 'workspace' | 'both';
+
+export interface McpCatalogItem {
   id: string;
   name: string;
   description: string;
   descriptionZh: string;
-  command: string;
-  args: string[];
-  category: string;
-  envSchema: Record<string, { required?: boolean; secret?: boolean; description: string }>;
+  category: 'dev' | 'productivity' | 'communication' | 'data' | 'search' | 'utility' | 'custom';
+  iconSlug?: string;
+  iconUrl?: string;
+  homepage?: string;
+  transport: { type: 'stdio' | 'http'; summary: string };
+  auth: McpAuthSpec;
+  state: McpCatalogState;
+  isRecommended: boolean;
+  installed: boolean;
+  scope?: 'global' | 'workspace' | 'builtin';
+  config?: McpServerConfig;
+  installedKey?: string;
+  recommendedScope?: RecommendedScope;
 }
 
 export interface RecommendedSkillRepo {
@@ -378,6 +415,22 @@ export interface RecommendedSkillRepo {
   descriptionZh: string;
   source: string;
   skills?: string[];
+  category?: string;
+  homepage?: string;
+}
+
+export interface SkillCatalogItem {
+  id: string;
+  name: string;
+  description: string;
+  descriptionZh: string;
+  source: string;
+  category: string;
+  recommendedScope?: RecommendedScope;
+  homepage?: string;
+  installed: boolean;
+  scope?: 'global' | 'project';
+  installedNames: string[];
 }
 
 export interface McpSearchResult {
@@ -414,3 +467,69 @@ export interface LsDirResult {
   isGit: boolean;
   error?: string;
 }
+
+// ---------------------------------------------------------------------------
+// CLI Extensions
+// ---------------------------------------------------------------------------
+
+export type CliCategory = 'dev' | 'cloud' | 'productivity' | 'data';
+export type CliState = 'not_installed' | 'installed_not_auth' | 'ready' | 'unknown';
+export type CliAuthType = 'oauth-web' | 'token' | 'none';
+
+export interface CliInstallCommand {
+  cmd: string;
+  label?: string;
+}
+
+export interface CliInstallSpec {
+  darwin?: CliInstallCommand[];
+  linux?: CliInstallCommand[];
+  win?: CliInstallCommand[];
+  docs?: string;
+}
+
+export interface CliAuthSpec {
+  type: CliAuthType;
+  statusArgv?: string[];
+  loginArgv?: string[];
+  logoutArgv?: string[];
+  tokenFields?: McpCredentialField[];
+  applyTokenArgv?: string[];
+  envKey?: string;
+  loginHint?: string;
+  loginHintZh?: string;
+}
+
+export interface CliCatalogItem {
+  id: string;
+  binary: string;
+  name: string;
+  description: string;
+  descriptionZh: string;
+  category: CliCategory;
+  iconSlug?: string;
+  iconUrl?: string;
+  homepage?: string;
+  install: CliInstallSpec;
+  auth: CliAuthSpec;
+  state: CliState;
+  version?: string;
+  authDetail?: string;
+  platform: 'darwin' | 'linux' | 'win';
+}
+
+export interface CliStatus {
+  id: string;
+  binary: string;
+  state: CliState;
+  version?: string;
+  authDetail?: string;
+  error?: string;
+  checkedAt: number;
+}
+
+export type CliAuthStreamEvent =
+  | { type: 'output'; chunk: string }
+  | { type: 'status'; status: CliStatus }
+  | { type: 'error'; message: string }
+  | { type: 'done'; ok: boolean; exitCode: number | null };
