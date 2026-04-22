@@ -70,19 +70,10 @@ function paginateSessionResult<T>(items: T[], page: number, limit: number) {
   };
 }
 
-const STALE_RUNNING_THRESHOLD_MS = 120_000; // 2 minutes — if a managed record claims 'running' but the bot has no runtime for it, treat as stale after this threshold
-
 function enrichWithRuntimeStatus(sessions: SessionInfo[], bot: Bot | null): DashboardSessionInfo[] {
   return sessions.map(session => {
     const status = bot ? getSessionStatusForBot(bot, session) : null;
-    let isRunning = status ? status.isRunning : !!session.running;
-    // Stale 'running' detection: after a crash/restart the managed record may
-    // still say runState='running' while no bot runtime is tracking the session.
-    // Downgrade to incomplete if the last update is old enough.
-    if (isRunning && status && !status.runtime && session.runState === 'running') {
-      const age = session.runUpdatedAt ? Date.now() - Date.parse(session.runUpdatedAt) : Infinity;
-      if (age > STALE_RUNNING_THRESHOLD_MS) isRunning = false;
-    }
+    const isRunning = status ? status.isRunning : !!session.running;
     return {
       ...session,
       running: isRunning,

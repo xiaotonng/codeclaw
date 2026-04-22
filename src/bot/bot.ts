@@ -7,9 +7,10 @@
 import os from 'node:os';
 import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
-import { getActiveUserConfig, onUserConfigChange, resolveUserWorkdir, setUserWorkdir, updateUserConfig } from '../core/config/user-config.js';
+import { getActiveUserConfig, loadWorkspaces, onUserConfigChange, resolveUserWorkdir, setUserWorkdir, updateUserConfig } from '../core/config/user-config.js';
 import {
   doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
+  reconcileOrphanedRunningSessions,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
   type AgentInteraction, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
@@ -23,6 +24,7 @@ import {
 import { getDriver, hasDriver, allDriverIds } from '../agent/driver.js';
 import { resolveGuiIntegrationConfig } from '../agent/mcp/bridge.js';
 import { terminateProcessTree } from '../core/process-control.js';
+import { expandTilde } from '../core/platform.js';
 import { VERSION } from '../core/version.js';
 import {
   type HumanLoopPromptState, type HumanLoopQuestion,
@@ -115,6 +117,7 @@ function buildMcpDeliveryPrompt(): string {
   return [
     '[Artifact Return]',
     'This is an IM conversation, so pay attention to the IM tools.',
+    'When you need clarification, a decision, or approval from the user before continuing, call im_ask_user. It blocks until the user replies and returns their answer as text. Prefer it over printing a question and stopping — printed questions are never answered because the turn ends.',
   ].join('\n');
 }
 
@@ -1528,7 +1531,7 @@ export class Bot {
 
   switchWorkdir(newPath: string, opts: { persist?: boolean } = {}) {
     const old = this.workdir;
-    const resolvedPath = path.resolve(newPath.replace(/^~/, process.env.HOME || ''));
+    const resolvedPath = path.resolve(expandTilde(newPath));
     if (opts.persist !== false) {
       setUserWorkdir(resolvedPath, { notify: false });
     } else {
@@ -1552,12 +1555,33 @@ export class Bot {
 
   protected onManagedConfigChange(_config: Record<string, any>, _opts: { initial?: boolean } = {}) {}
 
+  /**
+   * Scan registered workspaces + the active workdir for sessions stuck in
+   * 'running' state after a crash/restart and downgrade them to 'incomplete'.
+   * Safe to call at any time — only touches records whose owning process is
+   * no longer alive (or that have gone stale past the age threshold).
+   */
+  private reconcileStaleRunningSessions() {
+    const seen = new Set<string>();
+    const candidates: string[] = [this.workdir];
+    try {
+      for (const ws of loadWorkspaces()) candidates.push(ws.path);
+    } catch {}
+    for (const candidate of candidates) {
+      const resolved = path.resolve(candidate);
+      if (seen.has(resolved)) continue;
+      seen.add(resolved);
+      try { reconcileOrphanedRunningSessions(resolved); } catch {}
+    }
+  }
+
   private refreshManagedConfig(config: Record<string, any>, opts: { initial?: boolean } = {}) {
     const nextWorkdir = resolveUserWorkdir({ config });
     if (opts.initial) {
       this.workdir = nextWorkdir;
       ensureGitignore(this.workdir);
       initializeProjectSkills(this.workdir);
+      this.reconcileStaleRunningSessions();
     } else if (nextWorkdir !== this.workdir) {
       this.switchWorkdir(nextWorkdir, { persist: false });
     }

@@ -492,8 +492,9 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
   /* ── New session — transition after InputComposer creates it ── */
   const [newSessionPendingPrompt, setNewSessionPendingPrompt] = useState<string | null>(null);
+  const [newSessionPendingImageUrls, setNewSessionPendingImageUrls] = useState<string[]>([]);
 
-  const handleNewSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string) => {
+  const handleNewSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string, pendingImageUrls?: string[]) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
     setSessionsMap(prev => {
       const existing = prev[next.workdir] || [];
@@ -511,11 +512,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     });
     const targetSlot = newSessionSlotRef.current;
     const slot: SessionSlot = { ...next, mountKey: nextMountKey() };
-    // CRITICAL: setNewSessionPendingPrompt MUST be inside startTransition so it commits
+    // CRITICAL: setNewSessionPending* MUST be inside startTransition so they commit
     // atomically with the slot/active changes. If set outside, the "pending" render still
     // shows the OLD active panel which would consume the prompt before the new panel mounts.
     startTransition(() => {
       setNewSessionPendingPrompt(pendingPrompt || null);
+      setNewSessionPendingImageUrls(pendingImageUrls && pendingImageUrls.length ? pendingImageUrls : []);
       setShowNewSession(null);
       setOpenSessions(prev => {
         if (targetSlot >= prev.length) return [...prev, slot];
@@ -864,7 +866,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                         active={active && isActive}
                         onSessionChange={(next) => handlePanelSessionChange(next, slotIdx)}
                         initialPendingPrompt={isActive ? newSessionPendingPrompt : null}
-                        onPendingPromptConsumed={isActive ? () => setNewSessionPendingPrompt(null) : undefined}
+                        initialPendingImageUrls={isActive ? newSessionPendingImageUrls : undefined}
+                        onPendingPromptConsumed={isActive ? () => { setNewSessionPendingPrompt(null); setNewSessionPendingImageUrls([]); } : undefined}
                       />
                     </Suspense>
                   </div>
@@ -990,13 +993,14 @@ function NewSessionView({
 }: {
   workdir: string;
   workspaceName: string;
-  onSessionCreated: (next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string) => void;
+  onSessionCreated: (next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string, pendingImageUrls?: string[]) => void;
   onClose: () => void;
   t: (key: string) => string;
 }) {
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>([]);
   const pendingRef = useRef<string | null>(null);
+  const pendingImageUrlsRef = useRef<string[]>([]);
 
   const stubSession = useMemo((): SessionInfo => ({
     sessionId: '',
@@ -1009,11 +1013,17 @@ function NewSessionView({
   const handleSendStart = useCallback((prompt: string, imageUrls?: string[]) => {
     setPendingPrompt(prompt || null);
     pendingRef.current = prompt || null;
-    setPendingImageUrls(imageUrls || []);
+    const urls = imageUrls || [];
+    setPendingImageUrls(urls);
+    pendingImageUrlsRef.current = urls;
   }, []);
 
   const handleSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }) => {
-    onSessionCreated(next, pendingRef.current || undefined);
+    const urls = pendingImageUrlsRef.current;
+    // Hand ownership of the blob URLs to the parent; SessionPanel will revoke them
+    // after the first turn completes. Clear our local refs so our unmount doesn't touch them.
+    pendingImageUrlsRef.current = [];
+    onSessionCreated(next, pendingRef.current || undefined, urls.length ? urls : undefined);
   }, [onSessionCreated]);
 
   const hasPending = !!pendingPrompt || pendingImageUrls.length > 0;

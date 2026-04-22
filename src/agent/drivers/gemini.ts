@@ -24,6 +24,7 @@ import {
   mergeManagedAndNativeSessions, applyTurnWindow,
   roundPercent, emptyUsage, Q,
 } from '../index.js';
+import { getHome } from '../../core/platform.js';
 
 // ---------------------------------------------------------------------------
 // Command & parser
@@ -254,7 +255,7 @@ export async function doGeminiStream(opts: StreamOpts): Promise<StreamResult> {
 
 /** Resolve Gemini project name for a workdir from ~/.gemini/projects.json */
 function geminiProjectName(workdir: string): string | null {
-  const home = process.env.HOME || '';
+  const home = getHome();
   if (!home) return null;
   const projectsPath = path.join(home, '.gemini', 'projects.json');
   try {
@@ -272,7 +273,7 @@ function geminiProjectName(workdir: string): string | null {
 }
 
 function geminiChatsDir(workdir: string): string | null {
-  const home = process.env.HOME || '';
+  const home = getHome();
   if (!home) return null;
   const projectName = geminiProjectName(workdir);
   if (!projectName) return null;
@@ -403,6 +404,7 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     runState: record.runState,
     runDetail: record.runDetail,
     runUpdatedAt: record.runUpdatedAt,
+    runPid: record.runPid,
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
@@ -502,7 +504,7 @@ function cachedGeminiUsage(error: string): UsageResult {
 }
 
 function getGeminiOAuthToken(): string | null {
-  const home = process.env.HOME || '';
+  const home = getHome();
   if (!home) return null;
   const credsPath = path.join(home, '.gemini', 'oauth_creds.json');
   try {

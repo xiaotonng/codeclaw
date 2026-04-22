@@ -1,26 +1,82 @@
 /**
- * MCP extension registry — recommended servers, recommended skills, community search.
+ * MCP extension registry — curated recommended servers, recommended skills, community search.
  *
- * Does NOT maintain its own registry. Delegates to:
- * - Static curated list for recommended servers/skills
- * - Official MCP Registry API for community search
- * - npm search as fallback
+ * Schema supports three transport × auth combinations:
+ *   - stdio  + none         (local, zero-config)
+ *   - stdio  + credentials  (local, needs API key/token)
+ *   - http   + none         (rare)
+ *   - http   + credentials  (remote with API key)
+ *   - http   + mcp-oauth    (remote SaaS via MCP OAuth spec)
+ *
+ * For MCP-OAuth servers, `authorizationEndpoint` / `tokenEndpoint` can be
+ * pre-declared (fast path) or omitted (discovered via MCP Protected Resource
+ * Metadata at `<url>/.well-known/oauth-protected-resource`).
  */
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
+export type McpTransportSpec =
+  | { type: 'stdio'; command: string; args: string[] }
+  | { type: 'http'; url: string };
+
+export interface CredentialField {
+  key: string;
+  label: string;
+  labelZh: string;
+  secret?: boolean;
+  required?: boolean;
+  placeholder?: string;
+  helpUrl?: string;
+}
+
+export type McpAuthSpec =
+  | { type: 'none' }
+  | { type: 'credentials'; fields: CredentialField[] }
+  | {
+      type: 'mcp-oauth';
+      /** Optional pre-declared authorization endpoint (skips discovery). */
+      authorizationEndpoint?: string;
+      /** Optional pre-declared token endpoint. */
+      tokenEndpoint?: string;
+      /** Optional pre-declared dynamic client registration endpoint. */
+      registrationEndpoint?: string;
+      /** Optional pre-registered public client id (skips DCR). */
+      clientId?: string;
+      /** Requested OAuth scopes. */
+      scopes?: string[];
+    };
+
+export type McpCategory = 'dev' | 'productivity' | 'communication' | 'data' | 'search' | 'utility';
+
+/**
+ * Where a recommended server belongs in the UI:
+ *   - `global`    — SaaS/remote services with account-level auth; install once,
+ *                   use everywhere (GitHub, Atlassian, Notion, Slack, …).
+ *   - `workspace` — tools that depend on project context (`${WORKDIR}`, local
+ *                   data, project connection string).
+ *   - `both`      — zero-config local utilities that make sense either place
+ *                   (Fetch, Memory, Time).
+ */
+export type RecommendedScope = 'global' | 'workspace' | 'both';
+
 export interface RecommendedMcpServer {
   id: string;
   name: string;
   description: string;
   descriptionZh: string;
-  command: string;
-  args: string[];
-  category: 'development' | 'data' | 'communication' | 'search' | 'utility';
-  envSchema: Record<string, { required?: boolean; secret?: boolean; description: string }>;
+  category: McpCategory;
+  recommendedScope: RecommendedScope;
+  transport: McpTransportSpec;
+  auth: McpAuthSpec;
+  iconSlug?: string;
+  /** Optional override URL for the brand logo (SVG/PNG). Falls back to simpleicons CDN via iconSlug. */
+  iconUrl?: string;
+  homepage?: string;
 }
+
+export type SkillCategory = 'general' | 'dev' | 'productivity' | 'pikiclaw';
 
 export interface RecommendedSkillRepo {
   id: string;
@@ -29,6 +85,9 @@ export interface RecommendedSkillRepo {
   descriptionZh: string;
   source: string;
   skills?: string[];
+  category: SkillCategory;
+  recommendedScope: RecommendedScope;
+  homepage?: string;
 }
 
 export interface McpSearchResult {
@@ -48,143 +107,18 @@ export interface SkillSearchResult {
 }
 
 // ---------------------------------------------------------------------------
-// Recommended MCP servers
+// Recommended MCP servers + skill repos — data lives in src/catalog/
+//
+// This module owns the *types* and helper functions. Edit
+// `src/catalog/mcp-servers.ts` and `src/catalog/skill-repos.ts` to add or hide
+// entries; the arrays below are just pointers back at that catalog.
 // ---------------------------------------------------------------------------
 
-const RECOMMENDED_MCP_SERVERS: RecommendedMcpServer[] = [
-  {
-    id: 'github',
-    name: 'GitHub',
-    description: 'Repository management, pull requests, issues, code search',
-    descriptionZh: '仓库管理、PR、Issues、代码搜索',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-github'],
-    category: 'development',
-    envSchema: {
-      GITHUB_PERSONAL_ACCESS_TOKEN: { required: true, secret: true, description: 'GitHub personal access token' },
-    },
-  },
-  {
-    id: 'filesystem',
-    name: 'Filesystem',
-    description: 'Read, write, and search files on the local machine',
-    descriptionZh: '读写和搜索本机文件',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-filesystem'],
-    category: 'utility',
-    envSchema: {},
-  },
-  {
-    id: 'postgres',
-    name: 'PostgreSQL',
-    description: 'Query and manage PostgreSQL databases',
-    descriptionZh: '查询和管理 PostgreSQL 数据库',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-postgres'],
-    category: 'data',
-    envSchema: {
-      POSTGRES_CONNECTION_STRING: { required: true, description: 'PostgreSQL connection string' },
-    },
-  },
-  {
-    id: 'slack',
-    name: 'Slack',
-    description: 'Read channels, summarize threads, post messages',
-    descriptionZh: '读取频道、总结对话、发送消息',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-slack'],
-    category: 'communication',
-    envSchema: {
-      SLACK_BOT_TOKEN: { required: true, secret: true, description: 'Slack bot OAuth token' },
-      SLACK_TEAM_ID: { required: true, description: 'Slack team/workspace ID' },
-    },
-  },
-  {
-    id: 'brave-search',
-    name: 'Brave Search',
-    description: 'Web and local search via Brave Search API',
-    descriptionZh: '通过 Brave Search API 进行网页和本地搜索',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-brave-search'],
-    category: 'search',
-    envSchema: {
-      BRAVE_API_KEY: { required: true, secret: true, description: 'Brave Search API key' },
-    },
-  },
-  {
-    id: 'memory',
-    name: 'Memory',
-    description: 'Persistent key-value memory for agents across sessions',
-    descriptionZh: '跨会话的持久化键值存储',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-memory'],
-    category: 'utility',
-    envSchema: {},
-  },
-  {
-    id: 'fetch',
-    name: 'Fetch',
-    description: 'Make HTTP requests and retrieve web content',
-    descriptionZh: '发起 HTTP 请求并获取网页内容',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-fetch'],
-    category: 'utility',
-    envSchema: {},
-  },
-  {
-    id: 'sqlite',
-    name: 'SQLite',
-    description: 'Query and manage local SQLite databases',
-    descriptionZh: '查询和管理本地 SQLite 数据库',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-sqlite'],
-    category: 'data',
-    envSchema: {},
-  },
-  {
-    id: 'git',
-    name: 'Git',
-    description: 'Git repository operations — log, diff, blame, branch',
-    descriptionZh: 'Git 仓库操作 — log, diff, blame, branch',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-git'],
-    category: 'development',
-    envSchema: {},
-  },
-  {
-    id: 'sentry',
-    name: 'Sentry',
-    description: 'Error tracking — search issues, view stack traces',
-    descriptionZh: '错误追踪 — 搜索问题、查看堆栈',
-    command: 'npx',
-    args: ['-y', '@sentry/mcp-server-sentry'],
-    category: 'development',
-    envSchema: {
-      SENTRY_AUTH_TOKEN: { required: true, secret: true, description: 'Sentry auth token' },
-    },
-  },
-];
+import { MCP_SERVERS, SKILL_REPOS } from '../../catalog/index.js';
 
-// ---------------------------------------------------------------------------
-// Recommended skill repos
-// ---------------------------------------------------------------------------
+const RECOMMENDED_MCP_SERVERS: RecommendedMcpServer[] = MCP_SERVERS;
+const RECOMMENDED_SKILL_REPOS: RecommendedSkillRepo[] = SKILL_REPOS;
 
-const RECOMMENDED_SKILL_REPOS: RecommendedSkillRepo[] = [
-  {
-    id: 'anthropics-skills',
-    name: 'Anthropic Official Skills',
-    description: 'Official skill collection from Anthropic — testing, code generation, MCP server creation',
-    descriptionZh: 'Anthropic 官方技能集 — 测试、代码生成、MCP 服务创建',
-    source: 'anthropics/skills',
-  },
-  {
-    id: 'vercel-agent-skills',
-    name: 'Vercel Agent Skills',
-    description: 'Curated skills from Vercel — deployment, Next.js, TypeScript best practices',
-    descriptionZh: 'Vercel 精选技能 — 部署、Next.js、TypeScript 最佳实践',
-    source: 'vercel-labs/agent-skills',
-  },
-];
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -194,13 +128,17 @@ export function getRecommendedMcpServers(): RecommendedMcpServer[] {
   return RECOMMENDED_MCP_SERVERS;
 }
 
+export function getRecommendedMcpServer(id: string): RecommendedMcpServer | undefined {
+  return RECOMMENDED_MCP_SERVERS.find(s => s.id === id);
+}
+
 export function getRecommendedSkillRepos(): RecommendedSkillRepo[] {
   return RECOMMENDED_SKILL_REPOS;
 }
 
 /**
  * Search the official MCP Registry API for servers.
- * Falls back gracefully if the API is unreachable.
+ * Falls back to npm search if the registry is unreachable.
  */
 export async function searchMcpServers(query: string, limit = 20): Promise<McpSearchResult[]> {
   if (!query.trim()) return [];
@@ -209,37 +147,33 @@ export async function searchMcpServers(query: string, limit = 20): Promise<McpSe
   const timer = setTimeout(() => controller.abort(), 8_000);
 
   try {
-    // Try official MCP Registry API
     const url = `https://registry.modelcontextprotocol.io/v0.1/servers?search=${encodeURIComponent(query)}&limit=${limit}`;
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timer);
 
-    if (!res.ok) throw new Error(`registry responded ${res.status}`);
-    const data = await res.json();
-
-    if (Array.isArray(data?.servers)) {
-      return data.servers.map((s: any) => ({
-        name: s.name || s.display_name || '',
-        description: s.description || '',
-        npmPackage: s.npm_package || undefined,
-        source: s.repository || s.url || undefined,
-        stars: typeof s.stars === 'number' ? s.stars : undefined,
-      })).filter((s: McpSearchResult) => s.name);
-    }
-
-    // Try flat array response format
-    if (Array.isArray(data)) {
-      return data.slice(0, limit).map((s: any) => ({
-        name: s.name || '',
-        description: s.description || '',
-        source: s.repository || s.url || undefined,
-      })).filter((s: McpSearchResult) => s.name);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data?.servers)) {
+        return data.servers.map((s: any) => ({
+          name: s.name || s.display_name || '',
+          description: s.description || '',
+          npmPackage: s.npm_package || undefined,
+          source: s.repository || s.url || undefined,
+          stars: typeof s.stars === 'number' ? s.stars : undefined,
+        })).filter((s: McpSearchResult) => s.name);
+      }
+      if (Array.isArray(data)) {
+        return data.slice(0, limit).map((s: any) => ({
+          name: s.name || '',
+          description: s.description || '',
+          source: s.repository || s.url || undefined,
+        })).filter((s: McpSearchResult) => s.name);
+      }
     }
   } catch {
     clearTimeout(timer);
   }
 
-  // Fallback: npm search
   try {
     const npmUrl = `https://registry.npmjs.org/-/v1/search?text=mcp+server+${encodeURIComponent(query)}&size=${limit}`;
     const controller2 = new AbortController();
@@ -263,7 +197,7 @@ export async function searchMcpServers(query: string, limit = 20): Promise<McpSe
 }
 
 /**
- * Search for skills. Currently delegates to npm search with skill-related keywords.
+ * Search for skills via npm search (`agent skill` keywords).
  */
 export async function searchSkills(query: string, limit = 20): Promise<SkillSearchResult[]> {
   if (!query.trim()) return [];

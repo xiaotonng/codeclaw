@@ -214,6 +214,8 @@ export interface ManagedSessionRecord {
   runState: SessionRunState;
   runDetail: string | null;
   runUpdatedAt: string | null;
+  /** PID of the process that marked this session 'running'. Used for orphan detection across bot restarts. */
+  runPid: number | null;
   classification: SessionClassification | null;
   userStatus: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
   userNote: string | null;
@@ -258,6 +260,7 @@ export interface SessionInfo {
   runState: SessionRunState;
   runDetail: string | null;
   runUpdatedAt: string | null;
+  runPid?: number | null;
   classification: SessionClassification | null;
   userStatus: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
   userNote: string | null;

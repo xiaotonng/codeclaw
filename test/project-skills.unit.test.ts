@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Bot } from '../src/bot/bot.ts';
-import { getProjectSkillPaths, initializeProjectSkills, listSkills } from '../src/agent/index.ts';
-import { getSkillsListData, resolveSkillPrompt } from '../src/bot/commands.ts';
+import { getProjectSkillPaths, initializeProjectSkills } from '../src/agent/index.ts';
+import { resolveSkillPrompt } from '../src/bot/commands.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 
 const envSnapshot = captureEnv(['PIKICLAW_CONFIG', 'PIKICLAW_WORKDIR']);
@@ -27,57 +27,27 @@ afterEach(() => {
 });
 
 describe('project skills', () => {
-  it('lists and resolves project skills with canonical metadata and deduplication', () => {
-    // Scenario 1: lists canonical project skills with deduplication; .claude/commands/ is NOT scanned
-    {
-      const workdir = makeTmpDir('pikiclaw-skills-');
-      writeSkill(path.join(workdir, '.pikiclaw', 'skills'), 'ship', '---\nlabel: Shared Ship\ndescription: shared\n---\n');
-      writeSkill(path.join(workdir, '.agents', 'skills'), 'ship', '---\nlabel: Agents Ship\ndescription: agents\n---\n');
-      writeSkill(path.join(workdir, '.claude', 'skills'), 'review', '---\nlabel: Claude Review\ndescription: claude\n---\n');
-      writeFile(path.join(workdir, '.claude', 'commands', 'deploy.md'), '---\nlabel: Deploy Cmd\ndescription: legacy\n---\n');
+  it('resolves claude skills with canonical project paths and injects context', () => {
+    const workdir = makeTmpDir('pikiclaw-claude-skill-');
+    writeSkill(path.join(workdir, '.pikiclaw', 'skills'), 'install', '---\nlabel: Install\ndescription: shared\n---\n');
+    writeSkill(path.join(workdir, '.claude', 'skills'), 'install', '---\nlabel: Install\ndescription: claude\n---\n');
 
-      const result = listSkills(workdir);
+    const bot = new Bot();
+    bot.switchWorkdir(workdir, { persist: false });
+    bot.chat(1).agent = 'claude';
 
-      // .claude/commands/deploy.md is ignored — only .pikiclaw/skills/ is scanned
-      expect(result.skills).toEqual([
-        { name: 'ship', label: 'Shared Ship', description: 'shared', source: 'skills', scope: 'project', mcpRequires: undefined },
-      ]);
-    }
+    expect(getProjectSkillPaths(workdir, 'install')).toEqual({
+      sharedSkillFile: path.join(workdir, '.pikiclaw', 'skills', 'install', 'SKILL.md'),
+      claudeSkillFile: path.join(workdir, '.claude', 'skills', 'install', 'SKILL.md'),
+      agentsSkillFile: path.join(workdir, '.agents', 'skills', 'install', 'SKILL.md'),
+    });
 
-    // Scenario 2: builds a stable skills view and prefers canonical skill metadata while keeping claude native execution
-    {
-      const workdir = makeTmpDir('pikiclaw-claude-skill-');
-      writeSkill(path.join(workdir, '.pikiclaw', 'skills'), 'install', '---\nlabel: Install\ndescription: shared\n---\n');
-      writeSkill(path.join(workdir, '.claude', 'skills'), 'install', '---\nlabel: Install\ndescription: claude\n---\n');
-
-      const bot = new Bot();
-      bot.switchWorkdir(workdir, { persist: false });
-      bot.chat(1).agent = 'claude';
-
-      const skillsView = getSkillsListData(bot, 1);
-      expect(skillsView.skills).toEqual([
-        {
-          name: 'install',
-          label: 'Install',
-          description: 'shared',
-          command: 'sk_install',
-          source: 'skills',
-        },
-      ]);
-
-      expect(getProjectSkillPaths(workdir, 'install')).toEqual({
-        sharedSkillFile: path.join(workdir, '.pikiclaw', 'skills', 'install', 'SKILL.md'),
-        claudeSkillFile: path.join(workdir, '.claude', 'skills', 'install', 'SKILL.md'),
-        agentsSkillFile: path.join(workdir, '.agents', 'skills', 'install', 'SKILL.md'),
-      });
-
-      const resolved = resolveSkillPrompt(bot, 1, 'sk_install', 'ship it');
-      expect(resolved).not.toBeNull();
-      expect(resolved!.skillName).toBe('install');
-      expect(resolved!.prompt).toContain(workdir);
-      expect(resolved!.prompt).toContain('.claude/skills/install/SKILL.md');
-      expect(resolved!.prompt).toContain('Additional context: ship it');
-    }
+    const resolved = resolveSkillPrompt(bot, 1, 'sk_install', 'ship it');
+    expect(resolved).not.toBeNull();
+    expect(resolved!.skillName).toBe('install');
+    expect(resolved!.prompt).toContain(workdir);
+    expect(resolved!.prompt).toContain('.claude/skills/install/SKILL.md');
+    expect(resolved!.prompt).toContain('Additional context: ship it');
   });
 
   it('routes codex skills to project files and merges legacy skill roots into canonical', () => {

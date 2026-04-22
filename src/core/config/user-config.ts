@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Agent } from '../../agent/index.js';
 import { USER_CONFIG_SYNC_DEFAULT_INTERVAL_MS } from '../constants.js';
+import { expandTilde } from '../platform.js';
 
 export type ChannelName = 'telegram' | 'feishu' | 'weixin';
 
@@ -28,6 +29,28 @@ export interface McpServerConfig {
   enabled?: boolean;
   /** When true in workspace .mcp.json, overrides a global extension to disable it. */
   disabled?: boolean;
+  /** Catalog id this server was installed from (for state lookup). Undefined for custom servers. */
+  catalogId?: string;
+}
+
+/** OAuth token record stored for a remote MCP server. */
+export interface McpOAuthTokenRecord {
+  accessToken: string;
+  tokenType: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  scope?: string;
+  /** Dynamic client registration result or pre-configured. */
+  clientId: string;
+  clientSecret?: string;
+  /** Discovered or pre-declared endpoints. */
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  registrationEndpoint?: string;
+  /** Resource URL this token is bound to (the MCP server URL). */
+  resource: string;
+  /** Issuer (authorization server). */
+  issuer?: string;
 }
 
 export interface WorkspaceEntry {
@@ -68,9 +91,11 @@ export interface UserConfig {
   browserHeadless?: boolean;
   desktopGuiEnabled?: boolean;
   desktopAppiumUrl?: string;
-  /** Extension configuration — global MCP servers and skills. */
+  /** Extension configuration — global MCP servers, OAuth tokens, and skills. */
   extensions?: {
     mcp?: Record<string, McpServerConfig>;
+    /** OAuth tokens keyed by MCP server id (same key as extensions.mcp). */
+    mcpTokens?: Record<string, McpOAuthTokenRecord>;
   };
 }
 
@@ -110,9 +135,7 @@ let userConfigSyncRefCount = 0;
 let userConfigSyncRaw = '';
 let userConfigSyncOverrides: Partial<UserConfig> = {};
 
-function expandHomeDir(value: string): string {
-  return value.replace(/^~/, process.env.HOME || '');
-}
+const expandHomeDir = expandTilde;
 
 /** Normalize workspace entries — resolve paths, deduplicate, sort by order. */
 function normalizeWorkspaces(raw: unknown): WorkspaceEntry[] {
@@ -123,7 +146,7 @@ function normalizeWorkspaces(raw: unknown): WorkspaceEntry[] {
     if (!item || typeof item !== 'object') continue;
     const rawPath = typeof (item as any).path === 'string' ? (item as any).path.trim() : '';
     if (!rawPath) continue;
-    const resolved = path.resolve(rawPath.replace(/^~/, process.env.HOME || ''));
+    const resolved = path.resolve(expandHomeDir(rawPath));
     if (seen.has(resolved)) continue;
     seen.add(resolved);
     entries.push({
@@ -377,7 +400,7 @@ export function loadWorkspaces(): WorkspaceEntry[] {
 
 /** Add a workspace. Returns the new entry. Deduplicates by resolved path. */
 export function addWorkspace(workspacePath: string, name?: string): WorkspaceEntry {
-  const resolved = path.resolve(workspacePath.replace(/^~/, process.env.HOME || ''));
+  const resolved = path.resolve(expandHomeDir(workspacePath));
   const config = loadUserConfig();
   const workspaces = normalizeWorkspaces(config.workspaces);
 
@@ -401,7 +424,7 @@ export function addWorkspace(workspacePath: string, name?: string): WorkspaceEnt
 
 /** Remove a workspace by path. Returns true if removed. */
 export function removeWorkspace(workspacePath: string): boolean {
-  const resolved = path.resolve(workspacePath.replace(/^~/, process.env.HOME || ''));
+  const resolved = path.resolve(expandHomeDir(workspacePath));
   const config = loadUserConfig();
   const workspaces = normalizeWorkspaces(config.workspaces);
   const before = workspaces.length;
@@ -413,7 +436,7 @@ export function removeWorkspace(workspacePath: string): boolean {
 
 /** Rename a workspace. Returns the updated entry or null if not found. */
 export function renameWorkspace(workspacePath: string, newName: string): WorkspaceEntry | null {
-  const resolved = path.resolve(workspacePath.replace(/^~/, process.env.HOME || ''));
+  const resolved = path.resolve(expandHomeDir(workspacePath));
   const config = loadUserConfig();
   const workspaces = normalizeWorkspaces(config.workspaces);
   const entry = workspaces.find(w => w.path === resolved);
@@ -432,7 +455,7 @@ export function reorderWorkspaces(orderedPaths: string[]): WorkspaceEntry[] {
   const seen = new Set<string>();
 
   for (let i = 0; i < orderedPaths.length; i++) {
-    const resolved = path.resolve(orderedPaths[i].replace(/^~/, process.env.HOME || ''));
+    const resolved = path.resolve(expandHomeDir(orderedPaths[i]));
     const entry = byPath.get(resolved);
     if (entry && !seen.has(resolved)) {
       entry.order = i;
@@ -455,7 +478,7 @@ export function reorderWorkspaces(orderedPaths: string[]): WorkspaceEntry[] {
 
 /** Update workspace preferences (preferredAgent, etc.) */
 export function updateWorkspace(workspacePath: string, patch: Partial<Pick<WorkspaceEntry, 'name' | 'preferredAgent' | 'order'>>): WorkspaceEntry | null {
-  const resolved = path.resolve(workspacePath.replace(/^~/, process.env.HOME || ''));
+  const resolved = path.resolve(expandHomeDir(workspacePath));
   const config = loadUserConfig();
   const workspaces = normalizeWorkspaces(config.workspaces);
   const entry = workspaces.find(w => w.path === resolved);
@@ -469,6 +492,6 @@ export function updateWorkspace(workspacePath: string, patch: Partial<Pick<Works
 
 /** Find a workspace entry by path. */
 export function findWorkspace(workspacePath: string): WorkspaceEntry | null {
-  const resolved = path.resolve(workspacePath.replace(/^~/, process.env.HOME || ''));
+  const resolved = path.resolve(expandHomeDir(workspacePath));
   return loadWorkspaces().find(w => w.path === resolved) || null;
 }

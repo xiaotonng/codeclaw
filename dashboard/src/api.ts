@@ -3,17 +3,18 @@ import type {
   AppState,
   BrowserSetupResponse,
   BrowserStatusResponse,
+  CliCatalogItem,
+  CliStatus,
   OpenTarget,
   GitChangesResult,
   HostInfo,
   LsDirResult,
-  McpExtensionEntry,
+  McpCatalogItem,
   McpHealthResult,
   McpSearchResult,
   McpServerConfig,
   PermissionRequestResult,
-  RecommendedMcpServer,
-  RecommendedSkillRepo,
+  SkillCatalogItem,
   SessionHubResult,
   SessionMessagesResult,
   SkillInfo,
@@ -166,30 +167,61 @@ export const api = {
   desktopToggle: (enabled: boolean, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; enabled?: boolean; error?: string }>('/api/desktop-toggle', { enabled }, { timeoutMs: 60_000, ...opts }),
 
-  // MCP Extensions
-  getMcpExtensions: (workdir?: string) => {
-    const params = workdir ? `?workdir=${encodeURIComponent(workdir)}` : '';
-    return json<{ ok: boolean; extensions: McpExtensionEntry[] }>(`/api/extensions/mcp${params}`);
+  // MCP Extensions — catalog-first surface
+  getMcpCatalog: (workdir?: string, scope?: 'global' | 'workspace' | 'both') => {
+    const params = new URLSearchParams();
+    if (workdir) params.set('workdir', workdir);
+    if (scope) params.set('scope', scope);
+    const qs = params.toString();
+    return json<{ ok: boolean; items: McpCatalogItem[] }>(`/api/extensions/mcp/catalog${qs ? '?' + qs : ''}`);
   },
-  addMcpExtension: (name: string, config: McpServerConfig, scope: 'global' | 'workspace', workdir?: string) =>
-    post<{ ok: boolean; error?: string }>('/api/extensions/mcp/add', { name, config, scope, workdir }),
-  removeMcpExtension: (name: string, scope: 'global' | 'workspace', workdir?: string) =>
-    post<{ ok: boolean; removed?: boolean; error?: string }>('/api/extensions/mcp/remove', { name, scope, workdir }),
+  installMcp: (catalogId: string, scope: 'global' | 'workspace', credentials?: Record<string, string>, workdir?: string, enable = true) =>
+    post<{ ok: boolean; enabled?: boolean; error?: string }>(
+      '/api/extensions/mcp/install',
+      { catalogId, scope, credentials, workdir, enable },
+    ),
+  toggleMcp: (name: string, enabled: boolean, scope: 'global' | 'workspace', workdir?: string) =>
+    post<{ ok: boolean; updated?: boolean; error?: string }>(
+      '/api/extensions/mcp/toggle',
+      { name, enabled, scope, workdir },
+    ),
   updateMcpExtension: (name: string, patch: Partial<McpServerConfig>, scope: 'global' | 'workspace', workdir?: string) =>
     post<{ ok: boolean; updated?: boolean; error?: string }>('/api/extensions/mcp/update', { name, patch, scope, workdir }),
-  checkMcpHealth: (config: McpServerConfig, opts?: ApiRequestOptions) =>
-    post<McpHealthResult>('/api/extensions/mcp/health', { config }, { timeoutMs: 15_000, ...opts }),
-  getRecommendedMcp: () =>
-    json<{ ok: boolean; servers: RecommendedMcpServer[] }>('/api/extensions/mcp/recommended'),
+  removeMcp: (name: string, scope: 'global' | 'workspace', catalogId?: string, workdir?: string) =>
+    post<{ ok: boolean; removed?: boolean; error?: string }>(
+      '/api/extensions/mcp/remove',
+      { name, scope, catalogId, workdir },
+    ),
+  addCustomMcp: (name: string, config: McpServerConfig, scope: 'global' | 'workspace', workdir?: string) =>
+    post<{ ok: boolean; error?: string }>('/api/extensions/mcp/custom', { name, config, scope, workdir }),
+  checkMcpHealth: (id: string, config: McpServerConfig, noCache = false, opts?: ApiRequestOptions) =>
+    post<McpHealthResult>('/api/extensions/mcp/health', { id, config, noCache }, { timeoutMs: 15_000, ...opts }),
   searchMcp: (query: string) =>
     json<{ ok: boolean; results: McpSearchResult[] }>(`/api/extensions/mcp/search?q=${encodeURIComponent(query)}`),
 
-  // Skills (extensions)
-  getExtensionSkills: (workdir: string, opts?: ApiRequestOptions) =>
-    json<{ ok: boolean; skills: SkillInfo[] }>(
-      `/api/extensions/skills?workdir=${encodeURIComponent(workdir)}`,
-      { timeoutMs: 5_000, ...opts },
+  // MCP OAuth
+  startMcpOAuth: (catalogId: string) =>
+    post<{ ok: boolean; authUrl?: string; state?: string; error?: string }>(
+      '/api/extensions/mcp/oauth/start',
+      { catalogId },
+      { timeoutMs: 30_000 },
     ),
+  revokeMcpOAuth: (catalogId: string) =>
+    post<{ ok: boolean; removed?: boolean; error?: string }>(
+      '/api/extensions/mcp/oauth/revoke',
+      { catalogId },
+    ),
+
+  // Skills — catalog-first surface
+  getSkillsCatalog: (workdir: string | undefined, scope?: 'global' | 'workspace' | 'both', opts?: ApiRequestOptions) => {
+    const params = new URLSearchParams();
+    if (workdir) params.set('workdir', workdir);
+    if (scope) params.set('scope', scope);
+    return json<{ ok: boolean; items: SkillCatalogItem[]; installed: SkillInfo[] }>(
+      `/api/extensions/skills/catalog?${params.toString()}`,
+      { timeoutMs: 5_000, ...opts },
+    );
+  },
   installSkill: (source: string, global?: boolean, skill?: string, workdir?: string) =>
     post<{ ok: boolean; error?: string; output?: string }>(
       '/api/extensions/skills/install',
@@ -198,8 +230,6 @@ export const api = {
     ),
   removeExtensionSkill: (name: string, global?: boolean, workdir?: string) =>
     post<{ ok: boolean; error?: string }>('/api/extensions/skills/remove', { name, global, workdir }),
-  getRecommendedSkills: () =>
-    json<{ ok: boolean; repos: RecommendedSkillRepo[] }>('/api/extensions/skills/recommended'),
   searchExtensionSkills: (query: string) =>
     json<{ ok: boolean; results: any[] }>(`/api/extensions/skills/search?q=${encodeURIComponent(query)}`),
 
@@ -208,6 +238,41 @@ export const api = {
     json<{ ok: boolean; skills: SkillInfo[]; error?: string }>(
       `/api/session-hub/skills?workdir=${encodeURIComponent(workdir)}`,
       { timeoutMs: 5_000, ...opts },
+    ),
+
+  // CLI tools — catalog + auth lifecycle
+  getCliCatalog: (opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; items: CliCatalogItem[]; error?: string }>(
+      '/api/extensions/cli/catalog',
+      { timeoutMs: 10_000, ...opts },
+    ),
+  refreshCli: (id: string) =>
+    post<{ ok: boolean; status?: CliStatus; error?: string }>(
+      '/api/extensions/cli/refresh',
+      { id },
+      { timeoutMs: 15_000 },
+    ),
+  startCliAuth: (id: string) =>
+    post<{ ok: boolean; sessionId?: string; error?: string }>(
+      '/api/extensions/cli/auth/start',
+      { id },
+    ),
+  cancelCliAuth: (sessionId: string) =>
+    post<{ ok: boolean; cancelled?: boolean; error?: string }>(
+      '/api/extensions/cli/auth/cancel',
+      { sessionId },
+    ),
+  applyCliToken: (id: string, values: Record<string, string>) =>
+    post<{ ok: boolean; status?: CliStatus; error?: string }>(
+      '/api/extensions/cli/auth/token',
+      { id, values },
+      { timeoutMs: 15_000 },
+    ),
+  logoutCli: (id: string) =>
+    post<{ ok: boolean; status?: CliStatus; error?: string }>(
+      '/api/extensions/cli/logout',
+      { id },
+      { timeoutMs: 15_000 },
     ),
 
   // Session hub

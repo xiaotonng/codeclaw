@@ -25,8 +25,9 @@ import {
   readTailLines, stripInjectedPrompts, sanitizeSessionUserPreviewText, SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE, applyTurnWindow, shortValue,
   roundPercent, toIsoFromEpochSeconds, modelFamily, normalizeClaudeModelId, emptyUsage, normalizeUsageStatus,
 } from '../index.js';
-import { AGENT_STREAM_HARD_KILL_GRACE_MS, SESSION_RUNNING_THRESHOLD_MS } from '../../core/constants.js';
+import { AGENT_STREAM_HARD_KILL_GRACE_MS, AGENT_GRACEFUL_ABORT_GRACE_MS, SESSION_RUNNING_THRESHOLD_MS } from '../../core/constants.js';
 import { terminateProcessTree } from '../../core/process-control.js';
+import { getHome, IS_MAC, encodePathAsDirName } from '../../core/platform.js';
 
 // ---------------------------------------------------------------------------
 // Multimodal stdin
@@ -113,6 +114,18 @@ function claudeParse(ev: any, s: any) {
       const callCtx = (u?.input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0);
       if (callCtx > 0) s.contextUsedTokens = callCtx;
     }
+    // When a new text/thinking block starts after an earlier one (e.g. between
+    // a text block and a tool_use and back to text), insert a paragraph break
+    // so deltas from distinct blocks don't collapse into a single markdown
+    // paragraph.
+    if (inner.type === 'content_block_start') {
+      const blockType = inner.content_block?.type;
+      if (blockType === 'text' && s.text && !s.text.endsWith('\n\n')) {
+        s.text += s.text.endsWith('\n') ? '\n' : '\n\n';
+      } else if (blockType === 'thinking' && s.thinking && !s.thinking.endsWith('\n\n')) {
+        s.thinking += s.thinking.endsWith('\n') ? '\n' : '\n\n';
+      }
+    }
     if (inner.type === 'content_block_delta') {
       const d = inner.delta || {};
       if (d.type === 'thinking_delta') s.thinking += d.thinking || '';
@@ -137,8 +150,8 @@ function claudeParse(ev: any, s: any) {
   if (t === 'assistant') {
     const msg = ev.message || {};
     const contents = msg.content || [];
-    const th = contents.filter((b: any) => b?.type === 'thinking').map((b: any) => b.thinking || '').join('');
-    const tx = contents.filter((b: any) => b?.type === 'text').map((b: any) => b.text || '').join('');
+    const th = contents.filter((b: any) => b?.type === 'thinking').map((b: any) => b.thinking || '').join('\n\n');
+    const tx = contents.filter((b: any) => b?.type === 'text').map((b: any) => b.text || '').join('\n\n');
     const toolUses = contents.filter((b: any) => b?.type === 'tool_use');
     if (th && !s.thinking.trim()) s.thinking = th;
     if (tx && !s.text.trim()) s.text = tx;
@@ -298,8 +311,17 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
     interrupted = true;
     s.stopReason = 'interrupted';
     closeInput();
-    agentWarn(`[abort] user interrupt, killing process tree pid=${proc.pid}`);
-    terminateProcessTree(proc, { signal: 'SIGTERM', forceSignal: 'SIGKILL', forceAfterMs: 5000 });
+    agentWarn(`[abort] user interrupt, closing stdin for graceful shutdown pid=${proc.pid}`);
+    // Claude CLI writes each stream_event to the session JSONL incrementally
+    // and records a `[Request interrupted by user]` marker on shutdown. Give
+    // it a short grace window to finish the in-flight event before SIGTERM.
+    // proc.on('close', …) below resolves the run naturally if the CLI exits
+    // on its own; this fallback only fires when it doesn't.
+    setTimeout(() => {
+      if (proc.exitCode != null || proc.killed) return;
+      agentWarn(`[abort] graceful window elapsed (${AGENT_GRACEFUL_ABORT_GRACE_MS}ms), killing process tree pid=${proc.pid}`);
+      terminateProcessTree(proc, { signal: 'SIGTERM', forceSignal: 'SIGKILL', forceAfterMs: 5000 });
+    }, AGENT_GRACEFUL_ABORT_GRACE_MS);
   };
   if (opts.abortSignal?.aborted) abortStream();
   opts.abortSignal?.addEventListener('abort', abortStream, { once: true });
@@ -511,9 +533,7 @@ export async function doClaudeStream(opts: StreamOpts): Promise<StreamResult> {
 // Sessions
 // ---------------------------------------------------------------------------
 
-function claudeProjectDirName(workdir: string): string {
-  return workdir.replace(/\//g, '-');
-}
+const claudeProjectDirName = encodePathAsDirName;
 
 /** Read native Claude Code sessions from ~/.claude/projects/{dirName}/*.jsonl */
 function extractClaudeTailQA(filePath: string): { lastQuestion: string | null; lastAnswer: string | null; lastMessageText: string | null } {
@@ -547,7 +567,7 @@ function extractClaudeTailQA(filePath: string): { lastQuestion: string | null; l
 }
 
 function getNativeClaudeSessions(workdir: string): SessionInfo[] {
-  const home = process.env.HOME || '';
+  const home = getHome();
   if (!home) return [];
   const projectDir = path.join(home, '.claude', 'projects', claudeProjectDirName(workdir));
   if (!fs.existsSync(projectDir)) return [];
@@ -671,6 +691,7 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
     runState: record.runState,
     runDetail: record.runDetail,
     runUpdatedAt: record.runUpdatedAt,
+    runPid: record.runPid,
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
@@ -685,7 +706,7 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
   const nativeSessions = getNativeClaudeSessions(resolvedWorkdir);
   const merged = mergeManagedAndNativeSessions(pikiclawSessions, nativeSessions);
   const sessions = typeof limit === 'number' ? merged.slice(0, limit) : merged;
-  const projectDir = path.join(process.env.HOME || '', '.claude', 'projects', claudeProjectDirName(resolvedWorkdir));
+  const projectDir = path.join(getHome(), '.claude', 'projects', claudeProjectDirName(resolvedWorkdir));
   agentLog(
     `[sessions:claude] workdir=${resolvedWorkdir} projectDir=${projectDir} projectDirExists=${fs.existsSync(projectDir)} ` +
     `pikiclaw=${pikiclawSessions.length} native=${nativeSessions.length} merged=${sessions.length}`
@@ -707,13 +728,13 @@ function extractClaudeText(content: any, skipSystemBlocks = false): string {
       parts.push(block.text);
     }
   }
-  return parts.join('\n');
+  // Join with blank line so consecutive text blocks render as separate markdown paragraphs.
+  return parts.join('\n\n');
 }
 
 function getClaudeSessionTail(opts: SessionTailOpts): SessionTailResult {
   const limit = opts.limit ?? 4;
-  const home = process.env.HOME || '';
-  const projectDir = path.join(home, '.claude', 'projects', claudeProjectDirName(opts.workdir));
+  const projectDir = path.join(getHome(), '.claude', 'projects', claudeProjectDirName(opts.workdir));
   const filePath = path.join(projectDir, `${opts.sessionId}.jsonl`);
 
   if (!fs.existsSync(filePath)) {
@@ -806,8 +827,7 @@ function isSystemInjectedUserEvent(text: string): boolean {
 }
 
 function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesResult {
-  const home = process.env.HOME || '';
-  const projectDir = path.join(home, '.claude', 'projects', claudeProjectDirName(opts.workdir));
+  const projectDir = path.join(getHome(), '.claude', 'projects', claudeProjectDirName(opts.workdir));
   const filePath = path.join(projectDir, `${opts.sessionId}.jsonl`);
 
   if (!fs.existsSync(filePath)) {
@@ -833,7 +853,9 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
 
     const flush = () => {
       if (!pendingRole) return;
-      const text = pendingTextParts.join('\n');
+      // Join with blank line so paragraphs from separate assistant events remain
+      // distinct when rendered as markdown.
+      const text = pendingTextParts.join('\n\n');
       if (text || pendingBlocks.length) {
         allMsgs.push({ role: pendingRole, text });
         richMsgs.push({ role: pendingRole, text, blocks: [...pendingBlocks] });
@@ -928,6 +950,9 @@ const CLAUDE_MODELS: ModelInfo[] = [
 // ---------------------------------------------------------------------------
 
 function getClaudeOAuthToken(): string | null {
+  // `security` is macOS-only; other platforms store Claude creds differently
+  // (DPAPI on Windows, libsecret on Linux) and Claude Code manages those itself.
+  if (!IS_MAC) return null;
   try {
     const raw = execSync('security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null', {
       encoding: 'utf-8', timeout: 3000,
@@ -1080,7 +1105,7 @@ class ClaudeDriver implements AgentDriver {
   }
 
   getUsage(opts: UsageOpts): UsageResult {
-    const home = process.env.HOME || '';
+    const home = getHome();
     if (!home) return emptyUsage('claude', 'HOME is not set.');
     return getClaudeUsageFromOAuth()
       || getClaudeUsageFromTelemetry(home, opts.model)

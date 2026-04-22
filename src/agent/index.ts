@@ -64,6 +64,7 @@ export {
   applyTurnWindow, applyTurnFilter,
   classifySession, deriveUserStatus,
   exportSession, importSession,
+  isProcessAlive, isRunningSessionStale, reconcileOrphanedRunningSessions,
 } from './session.js';
 
 // ── Re-export: stream & detection ───────────────────────────────────────────
@@ -91,21 +92,45 @@ export {
   addGlobalMcpExtension, removeGlobalMcpExtension, updateGlobalMcpExtension,
   addWorkspaceMcpExtension, removeWorkspaceMcpExtension, updateWorkspaceMcpExtension,
   loadGlobalMcpExtensions, loadWorkspaceMcpExtensions,
-  checkMcpHealth,
+  getCatalogItems, getCatalogItem, buildInstalledConfigFromRecommended,
+  checkMcpHealth, getCachedHealth, cacheHealth,
   type McpExtensionEntry, type ExtensionScope, type McpHealthResult,
+  type McpCatalogItem, type McpCatalogState,
 } from './mcp/extensions.js';
 
 export {
-  getRecommendedMcpServers, getRecommendedSkillRepos,
+  getRecommendedMcpServers, getRecommendedMcpServer, getRecommendedSkillRepos,
   searchMcpServers, searchSkills as searchSkillRepos,
   type RecommendedMcpServer, type RecommendedSkillRepo,
   type McpSearchResult, type SkillSearchResult,
+  type McpAuthSpec, type McpTransportSpec, type McpCategory,
+  type CredentialField, type SkillCategory,
 } from './mcp/registry.js';
+
+export {
+  getMcpToken, saveMcpToken, deleteMcpToken, hasValidMcpToken,
+  startAuthorization, completeAuthorization, refreshMcpToken, injectOAuthHeaders,
+  type StartOAuthResult, type CompleteOAuthResult,
+} from './mcp/oauth.js';
 
 export {
   installSkill, removeSkill, checkSkillUpdates, getGlobalSkillsDir,
   type SkillInstallOpts, type SkillInstallResult, type SkillRemoveResult,
 } from './skill-installer.js';
+
+// ── Re-export: CLI extensions ───────────────────────────────────────────────
+export {
+  getRecommendedClis, getRecommendedCli,
+  detectCli, getCachedCliStatus, invalidateCliStatus, currentPlatform,
+  getCliCatalog, refreshCliStatus,
+  startCliAuthSession, getAuthSession, cancelAuthSession,
+  applyCliToken, logoutCli,
+  type RecommendedCli, type CliCategory, type CliAuthType,
+  type CliInstallSpec, type CliInstallCommand, type CliAuthSpec,
+  type CliState, type CliStatus, type CliCatalogItem,
+  type AuthSession, type AuthSessionEvent,
+  type ApplyTokenResult, type LogoutResult, type StartAuthSessionResult,
+} from './cli/index.js';
 
 // ── Re-export: driver-specific functions ────────────────────────────────────
 export { doClaudeStream } from './drivers/claude.js';

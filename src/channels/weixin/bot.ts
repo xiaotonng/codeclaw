@@ -17,6 +17,7 @@ import {
 } from '../../bot/bot.js';
 import { BOT_SHUTDOWN_FORCE_EXIT_MS, buildSessionTaskId } from '../../bot/orchestration.js';
 import { shutdownAllDrivers } from '../../agent/driver.js';
+import { expandTilde } from '../../core/platform.js';
 import type { McpSendFileCallback } from '../../agent/mcp/bridge.js';
 import {
   registerProcessRuntime,
@@ -331,7 +332,7 @@ export class WeixinBot extends Bot {
   private async cmdSwitch(ctx: WeixinContext, args: string) {
     const wd = this.chatWorkdir(ctx.chatId);
     if (args) {
-      const resolvedPath = path.resolve(args.replace(/^~/, process.env.HOME || os.homedir()));
+      const resolvedPath = path.resolve(expandTilde(args));
       if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isDirectory()) {
         await ctx.reply(`Not a valid directory: ${resolvedPath}`);
         return;
@@ -482,6 +483,7 @@ export class WeixinBot extends Bot {
           undefined,
           this.createMcpSendFile(ctx.chatId),
           abortController.signal,
+          this.createInteractionHandler(ctx.chatId, taskId, session.key),
         );
         await this.sendResult(ctx.chatId, result);
       } catch (error) {

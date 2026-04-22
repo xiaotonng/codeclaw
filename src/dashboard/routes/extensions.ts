@@ -1,17 +1,27 @@
 /**
  * Dashboard API routes for extension management — MCP servers and skills.
+ *
+ * Catalog-first design: GET /catalog returns a unified list of recommended
+ * registry entries merged with the user's installed servers, each tagged with
+ * a single `state` field. The frontend uses that state to render the right CTA
+ * (Install / Authorize / Enable / Disable / Remove).
+ *
+ * OAuth endpoints:
+ *   POST /oauth/start    — kicks off auth-code flow, returns auth URL + state
+ *   GET  /oauth/callback — provider redirects here; exchanges code for tokens
+ *   POST /oauth/revoke   — clears stored tokens for a server
  */
 
 import { Hono } from 'hono';
 import {
-  listAllMcpExtensions,
   addGlobalMcpExtension, removeGlobalMcpExtension, updateGlobalMcpExtension,
   addWorkspaceMcpExtension, removeWorkspaceMcpExtension, updateWorkspaceMcpExtension,
-  checkMcpHealth,
-  listSkills,
-  getRecommendedMcpServers, getRecommendedSkillRepos,
-  searchMcpServers, searchSkillRepos,
-  installSkill, removeSkill,
+  getCatalogItems, buildInstalledConfigFromRecommended,
+  checkMcpHealth, getCachedHealth, cacheHealth,
+  getRecommendedMcpServer,
+  listSkills, installSkill, removeSkill,
+  getRecommendedSkillRepos, searchSkillRepos, searchMcpServers,
+  startAuthorization, completeAuthorization, deleteMcpToken, getMcpToken,
 } from '../../agent/index.js';
 import type { McpServerConfig } from '../../core/config/user-config.js';
 import { runtime } from '../runtime.js';
@@ -20,83 +30,126 @@ import fs from 'node:fs';
 
 const app = new Hono();
 
-/** Validate that a workdir is an existing absolute directory path. */
 function isValidWorkdir(dir: string | undefined | null): dir is string {
   if (!dir || typeof dir !== 'string') return false;
   if (!path.isAbsolute(dir)) return false;
   try { return fs.statSync(dir).isDirectory(); } catch { return false; }
 }
 
+function getCallbackRedirectUri(c: { req: { url: string } }): string {
+  // Build from the current request so the URL matches whatever port/origin
+  // the dashboard is actually served on (dev, prod, custom port, etc.).
+  const origin = new URL(c.req.url).origin;
+  return `${origin}/api/extensions/mcp/oauth/callback`;
+}
+
 // ---------------------------------------------------------------------------
-// MCP Extensions
+// MCP — unified catalog
 // ---------------------------------------------------------------------------
 
-/** GET /api/extensions/mcp — List all MCP extensions (global + workspace). */
-app.get('/api/extensions/mcp', (c) => {
+/** GET /api/extensions/mcp/catalog — Unified recommended + installed list with state. */
+app.get('/api/extensions/mcp/catalog', (c) => {
   const workdir = c.req.query('workdir') || runtime.getRequestWorkdir();
-  const extensions = listAllMcpExtensions(workdir);
-  return c.json({ ok: true, extensions });
+  const scopeParam = c.req.query('scope');
+  const scope = scopeParam === 'global' || scopeParam === 'workspace' || scopeParam === 'both'
+    ? scopeParam
+    : undefined;
+  const items = getCatalogItems({ workdir, scope });
+  return c.json({ ok: true, items });
 });
 
-/** POST /api/extensions/mcp/add — Add an MCP extension. */
-app.post('/api/extensions/mcp/add', async (c) => {
+/**
+ * POST /api/extensions/mcp/install
+ * Install a recommended registry entry. Body:
+ *   { catalogId, scope, workdir?, credentials?, enable? }
+ * Missing credentials for mcp-oauth servers is fine — they'll surface as
+ * `needs_auth` in the catalog, and the UI should call /oauth/start next.
+ */
+app.post('/api/extensions/mcp/install', async (c) => {
   try {
     const body = await c.req.json();
-    const { name, config, scope, workdir: reqWorkdir } = body as {
-      name: string;
-      config: McpServerConfig;
-      scope: 'global' | 'workspace';
+    const {
+      catalogId,
+      scope = 'global',
+      workdir: reqWorkdir,
+      credentials,
+      enable = true,
+    } = body as {
+      catalogId: string;
+      scope?: 'global' | 'workspace';
       workdir?: string;
+      credentials?: Record<string, string>;
+      enable?: boolean;
     };
-    if (!name?.trim()) return c.json({ ok: false, error: 'name is required' }, 400);
-    if (!config) return c.json({ ok: false, error: 'config is required' }, 400);
+    if (!catalogId?.trim()) return c.json({ ok: false, error: 'catalogId is required' }, 400);
+    const rec = getRecommendedMcpServer(catalogId.trim());
+    if (!rec) return c.json({ ok: false, error: `unknown catalogId: ${catalogId}` }, 404);
+
+    // Don't enable yet for mcp-oauth if no token exists — user still needs to authorize.
+    let shouldEnable = enable;
+    if (rec.auth.type === 'mcp-oauth' && !getMcpToken(rec.id)) shouldEnable = false;
+    if (rec.auth.type === 'credentials') {
+      for (const f of rec.auth.fields) {
+        if (f.required && !(credentials || {})[f.key]?.trim()) {
+          shouldEnable = false;
+          break;
+        }
+      }
+    }
+
+    const config = buildInstalledConfigFromRecommended(rec, { enabled: shouldEnable, credentials });
 
     if (scope === 'workspace') {
       const wd = reqWorkdir || runtime.getRequestWorkdir();
       if (!isValidWorkdir(wd)) return c.json({ ok: false, error: 'valid workdir is required for workspace scope' }, 400);
-      addWorkspaceMcpExtension(wd, name.trim(), config);
+      addWorkspaceMcpExtension(wd, rec.id, config);
     } else {
-      addGlobalMcpExtension(name.trim(), config);
+      addGlobalMcpExtension(rec.id, config);
     }
-    return c.json({ ok: true });
+    return c.json({ ok: true, enabled: shouldEnable });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || 'internal error' }, 500);
   }
 });
 
-/** POST /api/extensions/mcp/remove — Remove an MCP extension. */
-app.post('/api/extensions/mcp/remove', async (c) => {
+/**
+ * POST /api/extensions/mcp/toggle
+ * Enable/disable an installed server by its installed key.
+ */
+app.post('/api/extensions/mcp/toggle', async (c) => {
   try {
     const body = await c.req.json();
-    const { name, scope, workdir: reqWorkdir } = body as {
+    const { name, enabled, scope = 'global', workdir: reqWorkdir } = body as {
       name: string;
-      scope: 'global' | 'workspace';
+      enabled: boolean;
+      scope?: 'global' | 'workspace';
       workdir?: string;
     };
     if (!name?.trim()) return c.json({ ok: false, error: 'name is required' }, 400);
 
-    let removed: boolean;
+    const patch: Partial<McpServerConfig> = { enabled: !!enabled };
+    let updated: boolean;
     if (scope === 'workspace') {
       const wd = reqWorkdir || runtime.getRequestWorkdir();
       if (!isValidWorkdir(wd)) return c.json({ ok: false, error: 'valid workdir is required' }, 400);
-      removed = removeWorkspaceMcpExtension(wd, name.trim());
+      updated = updateWorkspaceMcpExtension(wd, name.trim(), patch);
     } else {
-      removed = removeGlobalMcpExtension(name.trim());
+      updated = updateGlobalMcpExtension(name.trim(), patch);
     }
-    return c.json({ ok: true, removed });
+    return c.json({ ok: true, updated });
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || 'internal error' }, 500);
   }
 });
 
-/** POST /api/extensions/mcp/update — Update an MCP extension config. */
+/** POST /api/extensions/mcp/update — patch config fields (credentials, url, etc.). */
 app.post('/api/extensions/mcp/update', async (c) => {
   try {
     const body = await c.req.json();
-    const { name, patch, scope, workdir: reqWorkdir } = body as {
+    const { name, patch, scope = 'global', workdir: reqWorkdir } = body as {
       name: string;
       patch: Partial<McpServerConfig>;
-      scope: 'global' | 'workspace';
+      scope?: 'global' | 'workspace';
       workdir?: string;
     };
     if (!name?.trim()) return c.json({ ok: false, error: 'name is required' }, 400);
@@ -115,25 +168,85 @@ app.post('/api/extensions/mcp/update', async (c) => {
   }
 });
 
-/** POST /api/extensions/mcp/health — Check an MCP server health. */
+/** POST /api/extensions/mcp/remove — uninstall. Also clears any OAuth tokens. */
+app.post('/api/extensions/mcp/remove', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { name, scope = 'global', workdir: reqWorkdir, catalogId } = body as {
+      name: string;
+      scope?: 'global' | 'workspace';
+      workdir?: string;
+      catalogId?: string;
+    };
+    if (!name?.trim()) return c.json({ ok: false, error: 'name is required' }, 400);
+
+    let removed: boolean;
+    if (scope === 'workspace') {
+      const wd = reqWorkdir || runtime.getRequestWorkdir();
+      if (!isValidWorkdir(wd)) return c.json({ ok: false, error: 'valid workdir is required' }, 400);
+      removed = removeWorkspaceMcpExtension(wd, name.trim());
+    } else {
+      removed = removeGlobalMcpExtension(name.trim());
+    }
+    if (catalogId) deleteMcpToken(catalogId);
+    return c.json({ ok: true, removed });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'internal error' }, 500);
+  }
+});
+
+/** POST /api/extensions/mcp/custom — add a user-defined server not in the registry. */
+app.post('/api/extensions/mcp/custom', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { name, config, scope = 'global', workdir: reqWorkdir } = body as {
+      name: string;
+      config: McpServerConfig;
+      scope?: 'global' | 'workspace';
+      workdir?: string;
+    };
+    if (!name?.trim()) return c.json({ ok: false, error: 'name is required' }, 400);
+    if (!config) return c.json({ ok: false, error: 'config is required' }, 400);
+
+    const clean: McpServerConfig = { ...config };
+    delete (clean as any).catalogId;
+    if (clean.enabled === undefined) clean.enabled = true;
+
+    if (scope === 'workspace') {
+      const wd = reqWorkdir || runtime.getRequestWorkdir();
+      if (!isValidWorkdir(wd)) return c.json({ ok: false, error: 'valid workdir is required for workspace scope' }, 400);
+      addWorkspaceMcpExtension(wd, name.trim(), clean);
+    } else {
+      addGlobalMcpExtension(name.trim(), clean);
+    }
+    return c.json({ ok: true });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'internal error' }, 500);
+  }
+});
+
+/** POST /api/extensions/mcp/health — health check with 10-min cache per catalogId. */
 app.post('/api/extensions/mcp/health', async (c) => {
   try {
     const body = await c.req.json();
-    const { config } = body as { config: McpServerConfig };
+    const { id, config, noCache } = body as { id: string; config: McpServerConfig; noCache?: boolean };
+    if (!id?.trim()) return c.json({ ok: false, error: 'id is required' }, 400);
     if (!config) return c.json({ ok: false, error: 'config is required' }, 400);
+
+    if (!noCache) {
+      const cached = getCachedHealth(id, config);
+      if (cached) return c.json({ ...cached, cached: true });
+    }
+
     const result = await checkMcpHealth(config);
+    cacheHealth(id, config, result);
     return c.json(result);
   } catch (e: any) {
     return c.json({ ok: false, error: e?.message || 'internal error' }, 500);
   }
 });
 
-/** GET /api/extensions/mcp/recommended — Get recommended MCP servers. */
-app.get('/api/extensions/mcp/recommended', (c) => {
-  return c.json({ ok: true, servers: getRecommendedMcpServers() });
-});
-
-/** GET /api/extensions/mcp/search — Search community MCP servers. */
+/** GET /api/extensions/mcp/search — search community MCP servers (fallback path). */
 app.get('/api/extensions/mcp/search', async (c) => {
   const query = c.req.query('q') || '';
   const parsed = parseInt(c.req.query('limit') || '20', 10);
@@ -147,18 +260,190 @@ app.get('/api/extensions/mcp/search', async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// MCP — OAuth
+// ---------------------------------------------------------------------------
+
+/** POST /api/extensions/mcp/oauth/start — returns authUrl the client should open. */
+app.post('/api/extensions/mcp/oauth/start', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { catalogId } = body as { catalogId: string };
+    if (!catalogId?.trim()) return c.json({ ok: false, error: 'catalogId is required' }, 400);
+    const rec = getRecommendedMcpServer(catalogId.trim());
+    if (!rec) return c.json({ ok: false, error: `unknown catalogId: ${catalogId}` }, 404);
+    if (rec.auth.type !== 'mcp-oauth') {
+      return c.json({ ok: false, error: 'this server does not use OAuth' }, 400);
+    }
+    if (rec.transport.type !== 'http') {
+      return c.json({ ok: false, error: 'OAuth is only supported for http transport' }, 400);
+    }
+
+    const redirectUri = getCallbackRedirectUri(c);
+    const { authUrl, state } = await startAuthorization({
+      serverId: rec.id,
+      auth: rec.auth,
+      resourceUrl: rec.transport.url,
+      redirectUri,
+      clientName: 'Pikiclaw',
+    });
+    return c.json({ ok: true, authUrl, state });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'oauth start failed' }, 500);
+  }
+});
+
+/** GET /api/extensions/mcp/oauth/callback — browser landing page for the provider redirect. */
+app.get('/api/extensions/mcp/oauth/callback', async (c) => {
+  const code = c.req.query('code') || '';
+  const state = c.req.query('state') || '';
+  const providerError = c.req.query('error') || '';
+  const providerDesc = c.req.query('error_description') || '';
+
+  const render = (opts: { ok: boolean; title: string; detail: string }) => c.html(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>${opts.ok ? 'Authorized' : 'Authorization failed'}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f1115; color: #d4d4d8; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 24px; }
+    .card { max-width: 420px; padding: 28px; border: 1px solid #262a33; border-radius: 14px; background: #161922; text-align: center; }
+    .icon { font-size: 40px; margin-bottom: 12px; }
+    h1 { font-size: 17px; margin: 0 0 6px; font-weight: 600; color: #f4f4f5; }
+    p { font-size: 13px; line-height: 1.55; color: #a1a1aa; margin: 0; }
+    .close { display: inline-block; margin-top: 16px; font-size: 12px; color: #6366f1; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">${opts.ok ? '✅' : '⚠️'}</div>
+    <h1>${opts.title}</h1>
+    <p>${opts.detail}</p>
+    <a class="close" href="javascript:window.close()">Close window</a>
+  </div>
+  <script>
+    try {
+      if (window.opener) {
+        window.opener.postMessage({ type: 'mcp-oauth', ok: ${opts.ok}, state: ${JSON.stringify(state)} }, '*');
+      }
+    } catch (e) {}
+    setTimeout(function () { try { window.close(); } catch (e) {} }, 1500);
+  </script>
+</body>
+</html>`);
+
+  if (providerError) {
+    return render({
+      ok: false,
+      title: 'Authorization was cancelled',
+      detail: providerDesc || providerError,
+    });
+  }
+  if (!code || !state) {
+    return render({
+      ok: false,
+      title: 'Missing code or state',
+      detail: 'The provider did not return the expected parameters.',
+    });
+  }
+  try {
+    const result = await completeAuthorization({ state, code });
+    return render({
+      ok: true,
+      title: 'Authorized successfully',
+      detail: `Pikiclaw can now connect to ${result.serverId}. You can close this window and return to the dashboard.`,
+    });
+  } catch (e: any) {
+    return render({
+      ok: false,
+      title: 'Token exchange failed',
+      detail: e?.message || 'Unknown error',
+    });
+  }
+});
+
+/** POST /api/extensions/mcp/oauth/revoke — clear stored tokens. */
+app.post('/api/extensions/mcp/oauth/revoke', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { catalogId } = body as { catalogId: string };
+    if (!catalogId?.trim()) return c.json({ ok: false, error: 'catalogId is required' }, 400);
+    const removed = deleteMcpToken(catalogId.trim());
+    return c.json({ ok: true, removed });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'internal error' }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Skills
 // ---------------------------------------------------------------------------
 
-/** GET /api/extensions/skills — List all installed skills (project + global). */
-app.get('/api/extensions/skills', (c) => {
+interface SkillCatalogItem {
+  id: string;
+  name: string;
+  description: string;
+  descriptionZh: string;
+  source: string;
+  category: string;
+  recommendedScope: 'global' | 'workspace' | 'both';
+  homepage?: string;
+  installed: boolean;
+  scope?: 'global' | 'project';
+  installedNames: string[];
+}
+
+/** GET /api/extensions/skills/catalog — unified recommended + installed skills view. */
+app.get('/api/extensions/skills/catalog', (c) => {
   const workdir = c.req.query('workdir') || runtime.getRequestWorkdir();
-  if (!workdir) return c.json({ ok: false, error: 'workdir is required', skills: [] }, 400);
-  const result = listSkills(workdir);
-  return c.json({ ok: true, skills: result.skills });
+  const scopeParam = c.req.query('scope');
+  const scope = scopeParam === 'global' || scopeParam === 'workspace' || scopeParam === 'both'
+    ? scopeParam
+    : undefined;
+
+  // Workspace view requires a workdir; global view can use the global skills dir without one.
+  if (scope === 'workspace' && !workdir) {
+    return c.json({ ok: false, error: 'workdir is required', items: [], installed: [] }, 400);
+  }
+
+  const installedResult = listSkills(workdir);
+  const installed = installedResult.skills || [];
+  const recommended = getRecommendedSkillRepos();
+
+  const items: SkillCatalogItem[] = recommended
+    .filter(repo => {
+      if (!scope) return true;
+      return repo.recommendedScope === scope || repo.recommendedScope === 'both';
+    })
+    .map(repo => {
+      // Match recommended repo → installed skills. Skill-installer uses the repo's
+      // skill folder names as ids, so we don't have a perfect 1:1 mapping; for now
+      // we flag a repo as "installed" if any of its listed skills appear locally.
+      const hints = (repo.skills || []).map(s => s.toLowerCase());
+      const candidateMatches = installed.filter(s => hints.includes(s.name.toLowerCase()));
+      const matches = scope === 'global'
+        ? candidateMatches.filter(m => m.scope === 'global')
+        : scope === 'workspace'
+          ? candidateMatches.filter(m => m.scope === 'project')
+          : candidateMatches;
+      return {
+        id: repo.id,
+        name: repo.name,
+        description: repo.description,
+        descriptionZh: repo.descriptionZh,
+        source: repo.source,
+        category: repo.category,
+        recommendedScope: repo.recommendedScope,
+        homepage: repo.homepage,
+        installed: matches.length > 0,
+        scope: matches[0]?.scope,
+        installedNames: matches.map(m => m.name),
+      };
+    });
+
+  return c.json({ ok: true, items, installed });
 });
 
-/** POST /api/extensions/skills/install — Install a skill via npx skills add. */
+/** POST /api/extensions/skills/install — install a skill via npx skills add. */
 app.post('/api/extensions/skills/install', async (c) => {
   try {
     const body = await c.req.json();
@@ -182,7 +467,7 @@ app.post('/api/extensions/skills/install', async (c) => {
   }
 });
 
-/** POST /api/extensions/skills/remove — Remove an installed skill. */
+/** POST /api/extensions/skills/remove — remove an installed skill. */
 app.post('/api/extensions/skills/remove', async (c) => {
   try {
     const body = await c.req.json();
@@ -201,12 +486,7 @@ app.post('/api/extensions/skills/remove', async (c) => {
   }
 });
 
-/** GET /api/extensions/skills/recommended — Get recommended skill repos. */
-app.get('/api/extensions/skills/recommended', (c) => {
-  return c.json({ ok: true, repos: getRecommendedSkillRepos() });
-});
-
-/** GET /api/extensions/skills/search — Search community skills. */
+/** GET /api/extensions/skills/search — search community skills. */
 app.get('/api/extensions/skills/search', async (c) => {
   const query = c.req.query('q') || '';
   try {

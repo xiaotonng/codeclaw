@@ -131,6 +131,7 @@ export function setSessionRunState(record: ManagedSessionRecord, runState: Sessi
   record.runState = runState;
   record.runDetail = runDetail ? shortValue(runDetail, 180) : null;
   record.runUpdatedAt = runUpdatedAt || new Date().toISOString();
+  record.runPid = runState === 'running' ? process.pid : null;
 }
 
 function incompleteRunDetail(result: Pick<StreamResult, 'error' | 'stopReason' | 'message'>): string | null {
@@ -143,6 +144,66 @@ function incompleteRunDetail(result: Pick<StreamResult, 'error' | 'stopReason' |
   if (stopReason) return `Stopped before completion: ${shortValue(stopReason, 120)}`;
   const message = firstNonEmptyLine(result.message || '');
   return message ? shortValue(message, 180) : 'Last run did not complete.';
+}
+
+/**
+ * Check whether a process is still alive. Returns true when the PID exists and we can
+ * signal it, false when the process is definitively gone, and null when we cannot tell
+ * (e.g. owned by a different user — permission denied).
+ */
+export function isProcessAlive(pid: number | null | undefined): boolean | null {
+  if (!pid || !Number.isFinite(pid) || pid <= 0) return null;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    if (err?.code === 'ESRCH') return false;
+    if (err?.code === 'EPERM') return true;
+    return null;
+  }
+}
+
+/**
+ * Heuristic staleness check for a session record marked 'running'. Returns true when
+ * the record should be downgraded to 'incomplete' — i.e. the owning process is gone,
+ * or (if PID is missing) the last update is older than `ageThresholdMs`.
+ *
+ * Returns false if the session might still be live and should be left alone.
+ */
+export function isRunningSessionStale(
+  record: Pick<ManagedSessionRecord, 'runState' | 'runPid' | 'runUpdatedAt'>,
+  ageThresholdMs: number,
+): boolean {
+  if (record.runState !== 'running') return false;
+  const alive = isProcessAlive(record.runPid ?? null);
+  if (alive === false) return true;
+  if (alive === true) return false;
+  const age = record.runUpdatedAt ? Date.now() - Date.parse(record.runUpdatedAt) : Infinity;
+  return age > ageThresholdMs;
+}
+
+/**
+ * Scan the session index for a workdir and downgrade any 'running' record whose
+ * owning process is no longer alive (or that has gone stale past `ageThresholdMs`).
+ * Returns the number of records downgraded. Safe to call at startup and periodically.
+ */
+export function reconcileOrphanedRunningSessions(workdir: string, ageThresholdMs = 30 * 60_000): number {
+  const resolvedWorkdir = path.resolve(workdir);
+  const index = loadSessionIndex(resolvedWorkdir);
+  const downgraded: ManagedSessionRecord[] = [];
+  for (const record of index.sessions) {
+    if (!isRunningSessionStale(record, ageThresholdMs)) continue;
+    setSessionRunState(record, 'incomplete', 'Process exited before reporting completion.');
+    downgraded.push(record);
+  }
+  if (downgraded.length > 0) {
+    writeSessionIndex(resolvedWorkdir, index.sessions);
+    for (const record of downgraded) {
+      try { writeSessionMeta(record); } catch {}
+    }
+    agentLog(`[sessions] reconciled ${downgraded.length} orphaned running session(s) in ${resolvedWorkdir}`);
+  }
+  return downgraded.length;
 }
 
 export function applySessionRunResult(
@@ -211,6 +272,7 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     runState: normalizeSessionRunState(raw?.runState),
     runDetail: normalizeSessionRunDetail(raw?.runState, raw?.runDetail),
     runUpdatedAt: normalizeSessionRunUpdatedAt(raw?.runUpdatedAt, typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : new Date().toISOString()),
+    runPid: typeof raw?.runPid === 'number' && Number.isFinite(raw.runPid) ? raw.runPid : null,
     classification: raw?.classification ?? null,
     userStatus: raw?.userStatus ?? null,
     userNote: typeof raw?.userNote === 'string' ? raw.userNote : null,
@@ -253,6 +315,7 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     createdAt: record.createdAt, updatedAt: record.updatedAt,
     title: record.title, model: record.model, thinkingEffort: record.thinkingEffort, stagedFiles: record.stagedFiles,
     runState: record.runState, runDetail: record.runDetail, runUpdatedAt: record.runUpdatedAt,
+    runPid: record.runPid,
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
@@ -488,6 +551,7 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       title: summarizePromptTitle(opts.title) || null, model: null, thinkingEffort: null, stagedFiles: [],
       runState: 'completed', runDetail: null, runUpdatedAt: new Date().toISOString(),
+      runPid: null,
       classification: null, userStatus: null, userNote: null,
       lastQuestion: null, lastAnswer: null, lastMessageText: null,
       lastThinking: null, lastPlan: null,
@@ -520,6 +584,7 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     runState: record.runState,
     runDetail: record.runDetail,
     runUpdatedAt: record.runUpdatedAt,
+    runPid: record.runPid,
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,

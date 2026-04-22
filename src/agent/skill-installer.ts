@@ -3,6 +3,10 @@
  *
  * Skills are installed via the community-standard `npx skills add` command.
  * Global skills go to ~/.pikiclaw/skills/, project skills to <workdir>/.pikiclaw/skills/.
+ *
+ * The upstream CLI doesn't recognize `pikiclaw` as an agent, so we install with
+ * `--agent claude-code` (the driver pikiclaw runs by default) and rely on
+ * ~/.claude/skills → ~/.pikiclaw/skills being symlinked to the same directory.
  */
 
 import { execFile } from 'node:child_process';
@@ -46,8 +50,33 @@ const REMOVE_TIMEOUT_MS = 10_000;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Make sure the global skills directory exists, and that the agent-specific
+ * dirs that the upstream skills CLI writes to (`~/.claude/skills`,
+ * `~/.agents/skills`) resolve back to it. This is what lets us install with
+ * `--agent claude-code` and still read the results from `~/.pikiclaw/skills`.
+ */
 function ensureGlobalSkillsDir(): void {
   fs.mkdirSync(GLOBAL_SKILLS_DIR, { recursive: true });
+  for (const linkDir of [
+    path.join(os.homedir(), '.claude', 'skills'),
+    path.join(os.homedir(), '.agents', 'skills'),
+  ]) {
+    try {
+      const stat = fs.lstatSync(linkDir);
+      if (stat.isSymbolicLink()) {
+        const real = fs.realpathSync(linkDir);
+        if (real === fs.realpathSync(GLOBAL_SKILLS_DIR)) continue;
+      }
+      // Existing dir/link doesn't match — leave it alone rather than destroy user data.
+      continue;
+    } catch {
+      try {
+        fs.mkdirSync(path.dirname(linkDir), { recursive: true });
+        fs.symlinkSync(GLOBAL_SKILLS_DIR, linkDir, 'dir');
+      } catch { /* best effort */ }
+    }
+  }
 }
 
 function runNpx(args: string[], cwd: string, timeoutMs: number): Promise<{ ok: boolean; stdout: string; stderr: string }> {
@@ -86,7 +115,7 @@ export async function installSkill(source: string, opts: SkillInstallOpts = {}):
   }
 
   const cwd = isGlobal ? os.homedir() : workdir!;
-  const args = ['-y', 'skills', 'add', source, '--yes', '--agent', 'pikiclaw'];
+  const args = ['-y', 'skills', 'add', source, '--yes', '--agent', 'claude-code'];
 
   if (isGlobal) {
     args.push('-g');

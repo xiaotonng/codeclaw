@@ -1,4 +1,5 @@
 import { useEffect, type CSSProperties, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { cn } from '../../utils';
 import { Button } from './Button';
 
@@ -25,8 +26,9 @@ export function Modal({
   }, [open, onClose]);
 
   if (!open) return null;
+  if (typeof document === 'undefined') return null;
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-100 flex items-center justify-center p-4">
       <div
         className="absolute inset-0 backdrop-blur-[10px] backdrop-saturate-125"
@@ -49,7 +51,8 @@ export function Modal({
       >
         <div className="max-h-[inherit] overflow-y-auto p-6">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

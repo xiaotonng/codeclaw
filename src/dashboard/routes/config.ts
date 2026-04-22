@@ -8,6 +8,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { loadUserConfig, saveUserConfig, applyUserConfig, hasUserConfigFile } from '../../core/config/user-config.js';
+import { expandTilde } from '../../core/platform.js';
 import { isSetupReady } from '../../cli/onboarding.js';
 import { validateFeishuConfig, validateTelegramConfig, validateWeixinConfig } from '../../core/config/validation.js';
 import { resolveGuiIntegrationConfig } from '../../agent/mcp/bridge.js';
@@ -315,7 +316,7 @@ app.post('/api/switch-workdir', async (c) => {
   const body = await c.req.json();
   const newPath = body.path;
   if (!newPath) return c.json({ ok: false, error: 'Missing path' }, 400);
-  const resolvedPath = path.resolve(String(newPath).replace(/^~/, process.env.HOME || ''));
+  const resolvedPath = path.resolve(expandTilde(String(newPath)));
   const botRef = runtime.getBotRef();
   if (botRef) {
     botRef.switchWorkdir(resolvedPath);
