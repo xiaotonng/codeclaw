@@ -191,7 +191,13 @@ export type StreamEvent =
 export interface StreamSnapshot {
   phase: 'queued' | 'streaming' | 'done';
   taskId: string;
-  queuedTaskId?: string;
+  /**
+   * Task IDs that are queued behind the currently displayed task, in the
+   * order they were enqueued. Multiple tasks can pile up while a long-running
+   * task is in progress, and each must be surfaced individually so the user
+   * can recall/steer them separately.
+   */
+  queuedTaskIds?: string[];
   incomplete?: boolean;
   text?: string;
   thinking?: string;
@@ -371,20 +377,34 @@ export class Bot {
       case 'queued': {
         const existing = this.streamSnapshots.get(sessionKey);
         if (existing && (existing.phase === 'streaming' || existing.phase === 'done')) {
-          // Don't overwrite active stream — annotate with queued task info
-          existing.queuedTaskId = event.taskId;
+          // Don't overwrite active stream — append to the queued list (deduped).
+          const list = existing.queuedTaskIds ? [...existing.queuedTaskIds] : [];
+          if (existing.taskId !== event.taskId && !list.includes(event.taskId)) list.push(event.taskId);
+          existing.queuedTaskIds = list.length ? list : undefined;
+          existing.updatedAt = now;
+        } else if (existing && existing.phase === 'queued') {
+          // Already in queued phase with no active task — append additional queued IDs.
+          const list = existing.queuedTaskIds ? [...existing.queuedTaskIds] : [];
+          if (existing.taskId !== event.taskId && !list.includes(event.taskId)) list.push(event.taskId);
+          existing.queuedTaskIds = list.length ? list : undefined;
           existing.updatedAt = now;
         } else {
           this.streamSnapshots.set(sessionKey, { phase: 'queued', taskId: event.taskId, updatedAt: now });
         }
         break;
       }
-      case 'start':
+      case 'start': {
+        // Preserve any tasks still queued behind the new active one. Drop the
+        // task that's now starting from that list since it has graduated.
+        const prev = this.streamSnapshots.get(sessionKey);
+        const remainingQueued = prev?.queuedTaskIds?.filter(id => id !== event.taskId);
         this.streamSnapshots.set(sessionKey, {
           phase: 'streaming', taskId: event.taskId,
           text: '', thinking: '', activity: '', plan: null, sessionId: event.sessionId, updatedAt: now,
+          queuedTaskIds: remainingQueued && remainingQueued.length ? remainingQueued : undefined,
         });
         break;
+      }
       case 'text': {
         const snap = this.streamSnapshots.get(sessionKey);
         if (snap) {
@@ -408,7 +428,7 @@ export class Bot {
           activity: prev?.activity || '',
           error: event.error,
           plan: prev?.plan ?? null,
-          queuedTaskId: prev?.queuedTaskId,
+          queuedTaskIds: prev?.queuedTaskIds,
           updatedAt: now,
         });
         // Auto-clean 'done' snapshot after 30s so stale state doesn't linger.
@@ -423,10 +443,15 @@ export class Bot {
       }
       case 'cancelled': {
         const snap = this.streamSnapshots.get(sessionKey);
-        if (snap && snap.queuedTaskId === event.taskId) {
-          // Cancelled the queued task — keep the running/done snapshot
-          delete snap.queuedTaskId;
+        if (!snap) break;
+        if (snap.queuedTaskIds?.includes(event.taskId)) {
+          // Cancelled one of the queued-behind tasks — keep the running/done
+          // snapshot, just remove this entry from the list.
+          const next = snap.queuedTaskIds.filter(id => id !== event.taskId);
+          snap.queuedTaskIds = next.length ? next : undefined;
+          snap.updatedAt = now;
         } else {
+          // Cancelled the currently displayed task — drop the whole snapshot.
           this.streamSnapshots.delete(sessionKey);
           this.promotedFromAliases.delete(sessionKey);
         }
@@ -1336,8 +1361,29 @@ export class Bot {
     return { task, interrupted, steered: interrupted || !!task };
   }
 
-  resetConversationForChat(chatId: ChatId) {
-    this.resetChatConversation(this.chat(chatId));
+  /**
+   * Public "start a fresh session" entry point — wired to the "+ New" button
+   * and the `/new` command. If a task is still running on the previously
+   * selected session, abort it. Otherwise the runaway task keeps editing a
+   * scrolled-away preview message in the chat history while the user (who
+   * just asked for a new session) assumes it was abandoned. Returns the
+   * counts so the IM channel can surface them in its confirmation notice.
+   */
+  resetConversationForChat(chatId: ChatId): { interruptedRunning: boolean; cancelledQueued: number } {
+    const cs = this.chat(chatId);
+    let interruptedRunning = false;
+    let cancelledQueued = 0;
+    const previousSessionKey = cs.activeSessionKey ?? null;
+    if (previousSessionKey) {
+      const result = this.stopTasksForSession(previousSessionKey);
+      interruptedRunning = result.interrupted;
+      cancelledQueued = result.cancelledQueued;
+      if (interruptedRunning || cancelledQueued) {
+        this.log(`reset conversation interrupted previous tasks: chat=${chatId} session=${previousSessionKey} interrupted=${interruptedRunning} cancelledQueued=${cancelledQueued}`);
+      }
+    }
+    this.resetChatConversation(cs);
+    return { interruptedRunning, cancelledQueued };
   }
 
   adoptExistingSessionForChat(

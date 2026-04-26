@@ -161,7 +161,7 @@ describe('buildSupplementalMcpServers', () => {
     ]);
   });
 
-  it('passes through the managed browser CDP endpoint when reusing an existing process', () => {
+  it('exposes the supervisor base URL so the proxy can resolve the CDP endpoint on demand', () => {
     const profileDir = path.join('/tmp', 'pikiclaw', 'browser', 'chrome-profile');
     const expected = resolvePlaywrightMcpProxyCommand();
     const servers = buildSupplementalMcpServers({
@@ -171,7 +171,7 @@ describe('buildSupplementalMcpServers', () => {
       desktopEnabled: true,
       desktopAppiumUrl: 'http://127.0.0.1:4723',
     }, {
-      cdpEndpoint: 'http://127.0.0.1:39222',
+      baseUrl: 'http://127.0.0.1:54321',
     });
 
     expect(servers).toEqual([
@@ -182,7 +182,7 @@ describe('buildSupplementalMcpServers', () => {
         env: {
           PIKICLAW_PLAYWRIGHT_PROFILE_DIR: profileDir,
           PIKICLAW_PLAYWRIGHT_HEADLESS: 'true',
-          PIKICLAW_PLAYWRIGHT_CDP_ENDPOINT: 'http://127.0.0.1:39222',
+          PIKICLAW_BROWSER_SUPERVISOR_URL: 'http://127.0.0.1:54321/managed-browser',
         },
       },
     ]);

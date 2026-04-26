@@ -322,6 +322,7 @@ const EFFORT_LEVELS: Record<string, { id: string; label: string }[]> = {
     { id: 'low', label: 'Low' },
     { id: 'medium', label: 'Medium' },
     { id: 'high', label: 'High' },
+    { id: 'xhigh', label: 'Very High' },
     { id: 'max', label: 'Max' },
   ],
   codex: [

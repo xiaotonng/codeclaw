@@ -396,7 +396,8 @@ export const api = {
 export interface StreamSnapshot {
   phase: 'queued' | 'streaming' | 'done';
   taskId: string;
-  queuedTaskId?: string;
+  /** Task IDs queued behind the currently displayed one, in enqueue order. */
+  queuedTaskIds?: string[];
   text?: string;
   thinking?: string;
   activity?: string;

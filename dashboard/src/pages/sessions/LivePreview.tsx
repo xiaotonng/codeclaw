@@ -43,7 +43,7 @@ export function LivePreview({
     <div className="space-y-3 animate-in">
       {/* Plan — prominent card at top */}
       {showPlan && (
-        <PlanProgressCard plan={stream.plan!} phase={stream.phase} t={t} className="mb-1 max-w-[760px]" />
+        <PlanProgressCard plan={stream.plan!} t={t} className="mb-1 max-w-[760px]" />
       )}
 
       {/* Activity — expandable, shows latest line as preview */}

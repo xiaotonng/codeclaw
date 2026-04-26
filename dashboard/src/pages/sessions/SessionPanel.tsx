@@ -74,7 +74,7 @@ export const SessionPanel = memo(function SessionPanel({
   const [streamPhase, setStreamPhase] = useState<string | null>(null);
   const [streamPollNonce, setStreamPollNonce] = useState(0);
   const [streamTaskId, setStreamTaskId] = useState<string | null>(null);
-  const [queuedTaskId, setQueuedTaskId] = useState<string | null>(null);
+  const [queuedTaskIds, setQueuedTaskIds] = useState<string[]>([]);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(initialPendingPrompt || null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>(initialPendingImageUrls || []);
   const [pendingQueued, setPendingQueued] = useState(false);
@@ -244,13 +244,13 @@ export const SessionPanel = memo(function SessionPanel({
       localStreamPendingRef.current = false;
       setStreamTaskId(null);
       setStreamPhase(null);
-      setQueuedTaskId(null);
+      setQueuedTaskIds([]);
       prevPhaseRef.current = null;
       return;
     }
     setStreamPhase(state.phase);
     setStreamTaskId(state.taskId || null);
-    setQueuedTaskId(state.queuedTaskId || null);
+    setQueuedTaskIds(state.queuedTaskIds && state.queuedTaskIds.length ? state.queuedTaskIds : []);
     if (state.phase === 'streaming') {
       // Steer handoff: a previous task just ended ('done' triggered loadLatestTurns
       // and armed clearLiveStreamOnLoadRef). The new task's initial snapshot carries
@@ -275,7 +275,8 @@ export const SessionPanel = memo(function SessionPanel({
       }
       setStreaming(true);
       // Queued task is now active — show its bubble in conversation
-      if (!state.queuedTaskId) setPendingQueued(false);
+      const hasMoreQueued = !!state.queuedTaskIds?.length;
+      if (!hasMoreQueued) setPendingQueued(false);
       if (stickToBottomRef.current) scrollToBottomRef.current = true;
     } else if (state.phase === 'queued') {
       setLiveStream(null);
@@ -286,15 +287,16 @@ export const SessionPanel = memo(function SessionPanel({
       // cleared atomically with the history update inside loadLatestTurns to avoid
       // the intermediate "empty" render that causes a scroll jump.
       setStreaming(false);
+      const hasMoreQueued = !!state.queuedTaskIds?.length;
       if (prevPhaseRef.current !== 'done') {
-        if (!state.queuedTaskId) clearPendingOnLoadRef.current = true;
+        if (!hasMoreQueued) clearPendingOnLoadRef.current = true;
         // Scope the pending clear to the finishing task so a steer handoff can
         // start a new task's stream without losing its preview when the history
         // fetch resolves.
         clearLiveStreamOnLoadRef.current = { taskId: state.taskId || null };
         void loadLatestTurns({ keepOlder: true, force: true, scrollToBottom: stickToBottomRef.current });
       }
-      if (!state.queuedTaskId) localStreamPendingRef.current = false;
+      if (!hasMoreQueued) localStreamPendingRef.current = false;
     }
     prevPhaseRef.current = state.phase;
   }, [clearPending, loadLatestTurns, session.sessionId, session.agent, onSessionChange, workdir]);
@@ -530,7 +532,7 @@ export const SessionPanel = memo(function SessionPanel({
         t={t}
         streamPhase={streamPhase}
         streamTaskId={streamTaskId}
-        queuedTaskId={queuedTaskId}
+        queuedTaskIds={queuedTaskIds}
         pendingPrompt={pendingPrompt}
         onRecall={handleRecallTask}
         onSteer={handleSteerTask}

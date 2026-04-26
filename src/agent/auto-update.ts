@@ -210,7 +210,14 @@ async function getNpmGlobalRoot(): Promise<string | null> {
 }
 
 async function getLatestPackageVersion(pkg: string): Promise<string | null> {
-  const result = await runCommand('npm', ['view', pkg, 'version', '--json'], { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmView });
+  // `--prefer-online` bypasses the local npm metadata cache so we always see
+  // the registry's current `latest` tag. Without it, `npm view` can serve a
+  // stale version for several minutes after a release.
+  const result = await runCommand(
+    'npm',
+    ['view', pkg, 'version', '--json', '--prefer-online'],
+    { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmView },
+  );
   if (!result.ok) return null;
   const raw = result.stdout.trim();
   if (!raw) return null;
@@ -253,14 +260,38 @@ async function updateViaNpm(pkg: string): Promise<{ ok: boolean; detail: string 
 // Homebrew helpers
 // ---------------------------------------------------------------------------
 
-/** Get latest available version for a Homebrew cask. */
+/** Get latest available version for a Homebrew cask.
+ *
+ * Queries Homebrew's public formulae API rather than `brew info`, because the
+ * local cask metadata is only refreshed by `brew update` — without it, a
+ * just-published cask version can stay invisible for hours/days. The HTTPS API
+ * always returns the current cask manifest. Falls back to local `brew info`
+ * if the network call fails. */
 async function getLatestBrewCaskVersion(cask: string): Promise<string | null> {
+  const apiVersion = await fetchBrewCaskVersionFromApi(cask);
+  if (apiVersion) return apiVersion;
+
   const result = await runCommand('brew', ['info', '--json=v2', '--cask', cask], { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmView });
   if (!result.ok) return null;
   try {
     const data = JSON.parse(result.stdout);
     const version = data?.casks?.[0]?.version;
     return typeof version === 'string' ? version.trim() || null : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchBrewCaskVersionFromApi(cask: string): Promise<string | null> {
+  const url = `https://formulae.brew.sh/api/cask/${encodeURIComponent(cask)}.json`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), AGENT_UPDATE_TIMEOUTS.npmView);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json() as { version?: unknown };
+    return typeof data.version === 'string' ? data.version.trim() || null : null;
   } catch {
     return null;
   }
