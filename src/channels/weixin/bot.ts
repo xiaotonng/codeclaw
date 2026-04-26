@@ -158,10 +158,14 @@ export class WeixinBot extends Bot {
           '/restart - Restart pikiclaw',
         ].join('\n'));
         return true;
-      case 'new':
-        this.resetConversationForChat(ctx.chatId);
-        await ctx.reply('Started a new session.');
+      case 'new': {
+        const stop = this.resetConversationForChat(ctx.chatId);
+        const note = stop.interruptedRunning || stop.cancelledQueued
+          ? ` (interrupted previous task${stop.cancelledQueued ? `, ${stop.cancelledQueued} queued cancelled` : ''})`
+          : '';
+        await ctx.reply(`Started a new session.${note}`);
         return true;
+      }
       case 'status':
         await this.cmdStatus(ctx);
         return true;
@@ -347,8 +351,11 @@ export class WeixinBot extends Bot {
   private async cmdSessions(ctx: WeixinContext, args: string) {
     const arg = args.trim().toLowerCase();
     if (arg === 'new') {
-      this.resetConversationForChat(ctx.chatId);
-      await ctx.reply('Started a new session.');
+      const stop = this.resetConversationForChat(ctx.chatId);
+      const note = stop.interruptedRunning || stop.cancelledQueued
+        ? ` (interrupted previous task${stop.cancelledQueued ? `, ${stop.cancelledQueued} queued cancelled` : ''})`
+        : '';
+      await ctx.reply(`Started a new session.${note}`);
       return;
     }
     const idx = parseInt(arg, 10);

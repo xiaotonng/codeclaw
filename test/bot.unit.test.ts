@@ -172,6 +172,120 @@ describe('Bot steering handoff', () => {
   });
 });
 
+describe('Bot emitStream queue tracking', () => {
+  it('accumulates multiple queued task ids while a task is streaming', () => {
+    const bot = new Bot() as any;
+    const sessionKey = 'claude:sess-multi-queue';
+
+    bot.emitStream(sessionKey, { type: 'start', taskId: 'run-1', agent: 'claude', sessionId: 'sess-multi-queue' });
+    bot.emitStream(sessionKey, { type: 'queued', taskId: 'q-1', position: 1 });
+    bot.emitStream(sessionKey, { type: 'queued', taskId: 'q-2', position: 2 });
+    bot.emitStream(sessionKey, { type: 'queued', taskId: 'q-3', position: 3 });
+
+    let snap = bot.getStreamSnapshot(sessionKey);
+    expect(snap?.taskId).toBe('run-1');
+    expect(snap?.queuedTaskIds).toEqual(['q-1', 'q-2', 'q-3']);
+
+    // Cancelling a queued task removes it from the list, keeps the active task.
+    bot.emitStream(sessionKey, { type: 'cancelled', taskId: 'q-2' });
+    snap = bot.getStreamSnapshot(sessionKey);
+    expect(snap?.taskId).toBe('run-1');
+    expect(snap?.queuedTaskIds).toEqual(['q-1', 'q-3']);
+
+    // Active task finishing keeps the remaining queued list.
+    bot.emitStream(sessionKey, { type: 'done', taskId: 'run-1', sessionId: 'sess-multi-queue' });
+    snap = bot.getStreamSnapshot(sessionKey);
+    expect(snap?.phase).toBe('done');
+    expect(snap?.queuedTaskIds).toEqual(['q-1', 'q-3']);
+
+    // Next task starting drops itself from the queued list.
+    bot.emitStream(sessionKey, { type: 'start', taskId: 'q-1', agent: 'claude', sessionId: 'sess-multi-queue' });
+    snap = bot.getStreamSnapshot(sessionKey);
+    expect(snap?.phase).toBe('streaming');
+    expect(snap?.taskId).toBe('q-1');
+    expect(snap?.queuedTaskIds).toEqual(['q-3']);
+
+    // Last queued task starting clears the queued list entirely.
+    bot.emitStream(sessionKey, { type: 'done', taskId: 'q-1', sessionId: 'sess-multi-queue' });
+    bot.emitStream(sessionKey, { type: 'start', taskId: 'q-3', agent: 'claude', sessionId: 'sess-multi-queue' });
+    snap = bot.getStreamSnapshot(sessionKey);
+    expect(snap?.taskId).toBe('q-3');
+    expect(snap?.queuedTaskIds).toBeUndefined();
+  });
+
+  it('cancelling the active task drops the whole snapshot', () => {
+    const bot = new Bot() as any;
+    const sessionKey = 'claude:sess-active-cancel';
+
+    bot.emitStream(sessionKey, { type: 'start', taskId: 'run-1', agent: 'claude', sessionId: 'sess-active-cancel' });
+    bot.emitStream(sessionKey, { type: 'queued', taskId: 'q-1', position: 1 });
+    bot.emitStream(sessionKey, { type: 'cancelled', taskId: 'run-1' });
+
+    expect(bot.getStreamSnapshot(sessionKey)).toBeNull();
+  });
+});
+
+describe('Bot resetConversationForChat', () => {
+  it('aborts running and queued tasks on the previously selected session when starting a new one', () => {
+    const bot = new Bot() as any;
+    const runtime = bot.upsertSessionRuntime({
+      agent: 'claude',
+      sessionId: 'sess-prev',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      workspacePath: null,
+      modelId: null,
+    });
+    bot.applySessionSelection(bot.chat(1), runtime);
+
+    const runningAbort = vi.fn();
+    bot.beginTask({
+      taskId: 'run-prev',
+      chatId: 1,
+      agent: 'claude',
+      sessionKey: runtime.key,
+      prompt: 'long task',
+      startedAt: Date.now() - 1000,
+      sourceMessageId: 100,
+    });
+    bot.markTaskRunning('run-prev', runningAbort);
+
+    bot.beginTask({
+      taskId: 'queued-prev',
+      chatId: 1,
+      agent: 'claude',
+      sessionKey: runtime.key,
+      prompt: 'queued task',
+      startedAt: Date.now(),
+      sourceMessageId: 101,
+    });
+
+    const result = bot.resetConversationForChat(1);
+
+    expect(result).toEqual({ interruptedRunning: true, cancelledQueued: 1 });
+    expect(runningAbort).toHaveBeenCalledTimes(1);
+    expect(bot.activeTasks.get('queued-prev')?.cancelled).toBe(true);
+    expect(bot.chat(1).activeSessionKey).toBeNull();
+    expect(bot.chat(1).sessionId).toBeNull();
+  });
+
+  it('reports zero stopped tasks when the previous session is idle', () => {
+    const bot = new Bot() as any;
+    const runtime = bot.upsertSessionRuntime({
+      agent: 'claude',
+      sessionId: 'sess-idle',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      workspacePath: null,
+      modelId: null,
+    });
+    bot.applySessionSelection(bot.chat(1), runtime);
+
+    const result = bot.resetConversationForChat(1);
+
+    expect(result).toEqual({ interruptedRunning: false, cancelledQueued: 0 });
+    expect(bot.chat(1).activeSessionKey).toBeNull();
+  });
+});
+
 describe('Bot thread-aware agent switching', () => {
   it('resumes the existing session for the target agent inside the same thread', () => {
     const workdir = process.env.PIKICLAW_WORKDIR!;

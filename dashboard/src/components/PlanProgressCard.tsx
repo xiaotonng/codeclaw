@@ -31,12 +31,10 @@ function StepIcon({ status }: { status: StreamPlan['steps'][number]['status'] })
 
 export function PlanProgressCard({
   plan,
-  phase,
   t,
   className,
 }: {
   plan: StreamPlan;
-  phase?: 'queued' | 'streaming' | 'done' | null;
   t: (key: string) => string;
   className?: string;
   compact?: boolean;
@@ -46,7 +44,7 @@ export function PlanProgressCard({
 
   const total = plan.steps.length;
   const completed = plan.steps.filter(step => step.status === 'completed').length;
-  const isDone = phase === 'done' || completed === total;
+  const isDone = total > 0 && completed === total;
   const progressLabel = replaceVars(t('hub.planProgress'), {
     done: String(completed),
     total: String(total),

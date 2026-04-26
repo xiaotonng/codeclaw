@@ -559,8 +559,25 @@ function applyRuntimeConfig(
   }
 
   // Live-reload config file sync.
+  //
+  // Only pass overrides that came from CLI flags / explicit args, NOT the full
+  // runtimeConfig. Otherwise a snapshot of every user-managed field (model,
+  // effort, workdir, etc.) gets re-applied on every sync tick, silently
+  // reverting changes the user just made via the menu or dashboard.
+  const syncOverrides: Partial<UserConfig> = {};
+  if (args.agent) syncOverrides.defaultAgent = args.agent;
+  if (args.token) {
+    if (channel === 'telegram') syncOverrides.telegramBotToken = args.token;
+    else if (channel === 'feishu') {
+      const [appId, ...rest] = args.token.split(':');
+      syncOverrides.feishuAppId = appId;
+      syncOverrides.feishuAppSecret = rest.join(':');
+    }
+  }
+  if (args.allowedIds && channel === 'telegram') syncOverrides.telegramAllowedChatIds = args.allowedIds;
+
   const stopUserConfigSync = startUserConfigSync({
-    overrides: runtimeConfig,
+    overrides: syncOverrides,
     log: message => processLog(message),
   });
   process.once('exit', stopUserConfigSync);

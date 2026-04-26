@@ -21,7 +21,7 @@ type CascadeStep = 'closed' | 'agent' | 'model' | 'effort';
 const draftStore = new Map<string, { text: string; files: File[] }>();
 function draftKey(agent: string, sessionId: string) { return `${agent}:${sessionId}`; }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSessionChange, t, streamPhase, streamTaskId, queuedTaskId, pendingPrompt, onRecall, onSteer, editDraft, onEditDraftConsumed }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, pendingPrompt, onRecall, onSteer, editDraft, onEditDraftConsumed }: {
   session: SessionInfo;
   workdir: string;
   onStreamQueued: () => void;
@@ -30,7 +30,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   t: (k: string) => string;
   streamPhase: string | null;
   streamTaskId?: string | null;
-  queuedTaskId?: string | null;
+  queuedTaskIds?: string[];
   pendingPrompt?: string | null;
   onRecall?: (taskId: string) => void;
   onSteer?: (taskId: string) => void;
@@ -182,13 +182,14 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     setCascadePos({ left: rect.left, bottom: window.innerHeight - rect.top + 8 });
   }, [cascadeStep]);
 
+  const firstQueuedFromSnapshot = queuedTaskIds && queuedTaskIds.length ? queuedTaskIds[0] : null;
   // Clear local taskId once the real snapshot has the info
   useEffect(() => {
     if (localTaskId) {
-      if (queuedTaskId) setLocalTaskId(null);
+      if (firstQueuedFromSnapshot) setLocalTaskId(null);
       else if (streamPhase !== null && streamPhase !== 'queued') setLocalTaskId(null);
     }
-  }, [streamPhase, localTaskId, queuedTaskId]);
+  }, [streamPhase, localTaskId, firstQueuedFromSnapshot]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -280,12 +281,28 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     workdir,
   ]);
 
-  // Task bar state — derived from snapshot + optimistic local state
+  // Task bar state — derived from snapshot + optimistic local state.
+  // `effectiveQueuedIds` aggregates every queued task we know about so each one
+  // gets its own row (instead of collapsing many queued tasks into one banner).
   const isActiveStream = streamPhase === 'streaming';
-  const effectiveQueuedId = queuedTaskId
-    || (streamPhase === 'queued' ? (streamTaskId || localTaskId) : null)
-    || (!streamPhase && localTaskId ? localTaskId : null);
-  const hasQueuedTask = !!effectiveQueuedId;
+  const effectiveQueuedIds: string[] = (() => {
+    const ids: string[] = [];
+    if (queuedTaskIds && queuedTaskIds.length) ids.push(...queuedTaskIds);
+    // When the snapshot itself is in `queued` phase the visible task is the
+    // queued one — surface it as a queued row.
+    if (streamPhase === 'queued' && streamTaskId && !ids.includes(streamTaskId)) {
+      ids.unshift(streamTaskId);
+    }
+    // Optimistic local id for messages we just sent before the backend has
+    // emitted the queued event yet.
+    if (localTaskId && !ids.includes(localTaskId)) {
+      const optimisticAllowed = streamPhase === 'queued' || (!streamPhase);
+      if (optimisticAllowed) ids.push(localTaskId);
+    }
+    return ids;
+  })();
+  const effectiveQueuedId = effectiveQueuedIds[effectiveQueuedIds.length - 1] || null;
+  const hasQueuedTask = effectiveQueuedIds.length > 0;
   const showTaskBar = hasQueuedTask || isActiveStream;
 
   // Clear action-pending flags when the target state resolves
@@ -302,22 +319,21 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     }
   }, [hasQueuedTask]);
 
-  const handleRecall = useCallback(() => {
+  const handleRecallQueued = useCallback((taskId: string) => {
     if (recallPending) return;
-    if (hasQueuedTask && effectiveQueuedId) {
-      setRecallPending(true);
-      // Restore sent text + images back to the input field
+    setRecallPending(true);
+    // Only the most-recent queued task corresponds to the input the user just
+    // sent; restoring stash for an older queued task would dump someone else's
+    // prompt into the composer.
+    if (taskId === effectiveQueuedId) {
       const stash = lastSentRef.current;
       if (stash.prompt) setInput(stash.prompt);
       if (stash.files.length) setImageAttachments(stash.files.map(makeComposerImageAttachment));
       lastSentRef.current = { prompt: '', files: [] };
-      onRecall?.(effectiveQueuedId);
-      setLocalTaskId(null);
-    } else if (isActiveStream && streamTaskId) {
-      setRecallPending(true);
-      onRecall?.(streamTaskId);
     }
-  }, [recallPending, hasQueuedTask, effectiveQueuedId, isActiveStream, streamTaskId, onRecall]);
+    onRecall?.(taskId);
+    if (taskId === localTaskId) setLocalTaskId(null);
+  }, [recallPending, effectiveQueuedId, localTaskId, onRecall]);
 
   const handleStop = useCallback(() => {
     if (recallPending || !streamTaskId) return;
@@ -325,14 +341,12 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     onRecall?.(streamTaskId);
   }, [recallPending, streamTaskId, onRecall]);
 
-  const handleSteer = useCallback(() => {
+  const handleSteerQueued = useCallback((taskId: string) => {
     if (steerPending) return;
-    if (effectiveQueuedId) {
-      setSteerPending(true);
-      onSteer?.(effectiveQueuedId);
-      setLocalTaskId(null);
-    }
-  }, [steerPending, effectiveQueuedId, onSteer]);
+    setSteerPending(true);
+    onSteer?.(taskId);
+    if (taskId === localTaskId) setLocalTaskId(null);
+  }, [steerPending, localTaskId, onSteer]);
 
   const selectSkill = useCallback((skill: SkillInfo) => {
     setInput(`/${skill.name} `);
@@ -470,42 +484,49 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                 </button>
               </div>
             )}
-            {/* Row 2: Queued task — shows message preview + steer/recall */}
-            {hasQueuedTask && (
-              <div className="flex items-center gap-2.5 rounded-lg border border-warn/25 bg-warn/[0.04] px-3.5 py-1.5 transition-colors">
-                <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0" />
-                <div className="flex-1 min-w-0 flex items-baseline gap-2">
-                  <span className="text-[12px] font-medium text-warn shrink-0">{t('hub.queued')}</span>
-                  {pendingPrompt && (
-                    <span className="text-[11px] text-fg-5/60 truncate">{pendingPrompt}</span>
-                  )}
+            {/* Rows 2..N: one row per queued task — each carries its own steer/recall */}
+            {effectiveQueuedIds.map((taskId, idx) => {
+              const isLatest = idx === effectiveQueuedIds.length - 1;
+              const positionLabel = effectiveQueuedIds.length > 1 ? `${t('hub.queued')} #${idx + 1}` : t('hub.queued');
+              return (
+                <div
+                  key={taskId}
+                  className="flex items-center gap-2.5 rounded-lg border border-warn/25 bg-warn/[0.04] px-3.5 py-1.5 transition-colors"
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0" />
+                  <div className="flex-1 min-w-0 flex items-baseline gap-2">
+                    <span className="text-[12px] font-medium text-warn shrink-0">{positionLabel}</span>
+                    {isLatest && pendingPrompt && (
+                      <span className="text-[11px] text-fg-5/60 truncate">{pendingPrompt}</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => handleSteerQueued(taskId)}
+                      disabled={steerPending}
+                      title={t('hub.steerHint')}
+                      className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                    >
+                      {steerPending
+                        ? <Spinner className="h-2.5 w-2.5" />
+                        : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 6 15 12 9 18" /></svg>}
+                      {t('hub.steer')}
+                    </button>
+                    <button
+                      onClick={() => handleRecallQueued(taskId)}
+                      disabled={recallPending}
+                      title={t('hub.recallHint')}
+                      className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                    >
+                      {recallPending
+                        ? <Spinner className="h-2.5 w-2.5" />
+                        : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6 6 18" /><path d="M6 6l12 12" /></svg>}
+                      {t('hub.recall')}
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  <button
-                    onClick={handleSteer}
-                    disabled={!effectiveQueuedId || steerPending}
-                    title={t('hub.steerHint')}
-                    className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
-                  >
-                    {steerPending
-                      ? <Spinner className="h-2.5 w-2.5" />
-                      : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 6 15 12 9 18" /></svg>}
-                    {t('hub.steer')}
-                  </button>
-                  <button
-                    onClick={handleRecall}
-                    disabled={!effectiveQueuedId || recallPending}
-                    title={t('hub.recallHint')}
-                    className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
-                  >
-                    {recallPending
-                      ? <Spinner className="h-2.5 w-2.5" />
-                      : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6 6 18" /><path d="M6 6l12 12" /></svg>}
-                    {t('hub.recall')}
-                  </button>
-                </div>
-              </div>
-            )}
+              );
+            })}
           </div>
         )}
         <div className="relative rounded-xl border border-edge/40 bg-panel shadow-sm transition-[border-color,box-shadow] duration-200 focus-within:border-fg-5/40 focus-within:shadow-md">

@@ -17,7 +17,7 @@ export function AssistantMsg({ message, t }: { message: RichMessage; t: (k: stri
   return (
     <div className="space-y-3">
       {(activityBlocks.length > 0 || processNotes.length > 0) && <ActivitySection blocks={activityBlocks} notes={processNotes} t={t} />}
-      {latestPlan?.plan && <PlanProgressCard plan={latestPlan.plan} phase="done" t={t} className="max-w-[760px]" />}
+      {latestPlan?.plan && <PlanProgressCard plan={latestPlan.plan} t={t} className="max-w-[760px]" />}
       {thinkingBlocks.length > 0 && <ThinkingSection blocks={thinkingBlocks} t={t} />}
       {outputBlocks.length > 0 && <OutputBlock blocks={outputBlocks} />}
     </div>

@@ -369,16 +369,20 @@ export async function executeCommandAction(
         callbackText: '',
       };
 
-    case 'session.new':
-      bot.resetConversationForChat(chatId);
+    case 'session.new': {
+      const { interruptedRunning, cancelledQueued } = bot.resetConversationForChat(chatId);
+      const stoppedNotes: string[] = [];
+      if (interruptedRunning) stoppedNotes.push('previous task interrupted');
+      if (cancelledQueued) stoppedNotes.push(`${cancelledQueued} queued task${cancelledQueued === 1 ? '' : 's'} cancelled`);
+      const detail = stoppedNotes.length
+        ? `${stoppedNotes.join(' · ')}. Send a message to start.`
+        : 'Send a message to start.';
       return {
         kind: 'notice',
-        callbackText: 'New session',
-        notice: {
-          title: 'New Session',
-          detail: 'Send a message to start.',
-        },
+        callbackText: stoppedNotes.length ? 'New session (previous stopped)' : 'New session',
+        notice: { title: 'New Session', detail },
       };
+    }
 
     case 'session.switch': {
       const chat = bot.chat(chatId);
