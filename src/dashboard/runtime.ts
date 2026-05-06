@@ -157,7 +157,7 @@ class Runtime {
       if (this.isAgent(agent) && typeof model === 'string' && model.trim()) bot.setModelForAgent(agent, model);
     }
     for (const [agent, effort] of Object.entries(this.runtimePrefs.efforts)) {
-      if (this.isAgent(agent) && agent !== 'gemini' && typeof effort === 'string' && effort.trim()) bot.setEffortForAgent(agent, effort);
+      if (this.isAgent(agent) && typeof effort === 'string' && effort.trim()) bot.setEffortForAgent(agent, effort);
     }
     // Wire stream snapshots → dashboard WebSocket
     const prevPhases = new Map<string, string | null>();
@@ -213,7 +213,6 @@ class Runtime {
   }
 
   getRuntimeEffort(agent: Agent, config = loadUserConfig()): string | null {
-    if (agent === 'gemini') return null;
     if (this.botRef) return this.botRef.effortForAgent(agent);
     const value = String(this.runtimePrefs.efforts[agent] || resolveAgentEffort(config, agent) || '').trim().toLowerCase();
     return value || null;

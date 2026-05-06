@@ -21,6 +21,7 @@ import {
   deriveUserStatus as _deriveStatusFromOutcome,
   exportSession as _exportSession,
   importSession as _importSession,
+  findPikiclawSession,
   updateSessionMeta,
   type Agent, type SessionInfo, type SessionListResult,
   type SessionTailResult, type SessionTailOpts,
@@ -198,14 +199,55 @@ export async function querySessions(opts: SessionQueryOpts): Promise<SessionQuer
 // Session detail queries
 // ---------------------------------------------------------------------------
 
+/**
+ * Build a 1-2 message fallback transcript from the pikiclaw session record
+ * for runs that crashed before the agent could write its own transcript file
+ * (e.g. gemini auth failure, codex spawn failure). Without this the dashboard
+ * detail panel would render blank for clearly-failed sessions.
+ */
+function tailFallbackFromManagedRecord(opts: SessionTailOpts): SessionTailResult | null {
+  const record = findPikiclawSession(opts.workdir, opts.agent, opts.sessionId);
+  if (!record) return null;
+  const messages: TailMessage[] = [];
+  if (record.lastQuestion) messages.push({ role: 'user', text: record.lastQuestion });
+  const failureText = record.lastAnswer
+    || (record.runState === 'incomplete' ? record.runDetail : null);
+  if (failureText) messages.push({ role: 'assistant', text: failureText });
+  if (!messages.length) return null;
+  const limit = Math.max(1, opts.limit ?? messages.length);
+  return { ok: true, messages: messages.slice(-limit), error: null };
+}
+
 /** Get recent messages from a session (tail). */
-export function querySessionTail(opts: SessionTailOpts): Promise<SessionTailResult> {
-  return _getSessionTail(opts);
+export async function querySessionTail(opts: SessionTailOpts): Promise<SessionTailResult> {
+  const result = await _getSessionTail(opts);
+  if (!result.ok || !result.messages.length) {
+    const fallback = tailFallbackFromManagedRecord(opts);
+    if (fallback) return fallback;
+  }
+  return result;
 }
 
 /** Get full session messages (with optional turn filtering). */
-export function querySessionMessages(opts: SessionMessagesOpts & { agent: Agent }): Promise<SessionMessagesResult> {
-  return _getSessionMessages(opts);
+export async function querySessionMessages(opts: SessionMessagesOpts & { agent: Agent }): Promise<SessionMessagesResult> {
+  const result = await _getSessionMessages(opts);
+  if (!result.ok || !result.messages.length) {
+    const fallback = tailFallbackFromManagedRecord({
+      agent: opts.agent,
+      sessionId: opts.sessionId,
+      workdir: opts.workdir,
+      limit: result.messages.length || undefined,
+    });
+    if (fallback) {
+      return {
+        ok: true,
+        messages: fallback.messages.map(m => ({ role: m.role, text: m.text })),
+        totalTurns: fallback.messages.filter(m => m.role === 'user').length,
+        error: null,
+      };
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

@@ -256,7 +256,7 @@ export const AGENT_DETECT_TIMEOUTS = {
   /** How long a version string is cached. */
   versionTtl: 5 * 60_000,
   /** Timeout for the `--version` command itself. */
-  versionCommand: 900,
+  versionCommand: 3_000,
 };
 
 /** Grace period added to the user-configured timeout before hard-killing the agent. */

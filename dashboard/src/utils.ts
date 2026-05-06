@@ -103,7 +103,7 @@ export function getAgentMeta(agent: string): AgentMeta {
 export const EFFORT_OPTIONS: Record<Agent, string[]> = {
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
   codex: ['low', 'medium', 'high', 'xhigh'],
-  gemini: [],
+  gemini: ['low', 'high'],
 };
 
 /**

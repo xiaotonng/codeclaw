@@ -23,7 +23,7 @@ export type {
   Agent, AgentDetectOptions, AgentInfo, AgentListResult,
   CodexCumulativeUsage, CodexTurnControl,
   AgentInteractionOption, AgentInteractionQuestion, AgentInteraction,
-  StreamPreviewMeta, StreamPreviewPlanStep, StreamPreviewPlan,
+  StreamPreviewMeta, StreamPreviewPlanStep, StreamPreviewPlan, StreamSubAgent,
   StreamOpts, StreamResult,
   ManagedSessionRecord, SessionRunState, SessionClassification,
   SessionInfo, SessionListResult, SessionListOpts,

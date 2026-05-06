@@ -7,7 +7,7 @@ import { useDashboardEvent, useDashboardReconnect, type DashboardEvent } from '.
 import { cn, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils';
 import { Spinner } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
-import type { SessionInfo, StreamPlan } from '../../types';
+import type { SessionInfo, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 import { TurnView, UserBubble, TurnDivider } from './TurnView';
 import { LivePreview, ThinkingDots } from './LivePreview';
 import { InputComposer } from './InputComposer';
@@ -52,8 +52,9 @@ export const SessionPanel = memo(function SessionPanel({
   onPendingPromptConsumed?: () => void;
 }) {
   const locale = useStore(s => s.locale);
-  const globalEffort = useStore(s => s.agentStatus?.agents?.find(a => a.agent === session.agent)?.selectedEffort ?? null);
-  const agentEffort = session.thinkingEffort || globalEffort;
+  const agentRuntime = useStore(s => s.agentStatus?.agents?.find(a => a.agent === session.agent) ?? null);
+  const globalEffort = agentRuntime?.selectedEffort ?? null;
+  const globalModel = agentRuntime?.selectedModel ?? null;
   const t = useMemo(() => createT(locale), [locale]);
   const meta = getAgentMeta(session.agent || '');
   const displayState = sessionDisplayState(session);
@@ -69,6 +70,10 @@ export const SessionPanel = memo(function SessionPanel({
     thinking: string;
     activity?: string;
     plan?: StreamPlan | null;
+    model?: string | null;
+    effort?: string | null;
+    previewMeta?: StreamPreviewMeta | null;
+    subAgents?: StreamSubAgent[] | null;
   } | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [streamPhase, setStreamPhase] = useState<string | null>(null);
@@ -287,6 +292,10 @@ export const SessionPanel = memo(function SessionPanel({
           thinking: state.thinking || '',
           activity: state.activity,
           plan: state.plan ?? null,
+          model: state.model ?? null,
+          effort: state.effort ?? null,
+          previewMeta: state.previewMeta ?? null,
+          subAgents: state.previewMeta?.subAgents ?? null,
         });
       }
       setStreaming(true);
@@ -483,6 +492,14 @@ export const SessionPanel = memo(function SessionPanel({
     if (el.scrollTop <= TOP_LOAD_THRESHOLD_PX) void loadOlderTurns();
   }, [loadOlderTurns]);
 
+  // Effective model + effort to display: live stream wins (it carries the truth
+  // for the in-flight turn), then the session's persisted choice, then the
+  // agent's runtime default. Always resolves to something so the divider never
+  // shows a bare label without context.
+  const displayModel = (liveStream?.model || session.model || globalModel) || null;
+  const displayEffort = (liveStream?.effort || session.thinkingEffort || globalEffort) || null;
+  const displayModelShort = displayModel ? shortenModel(displayModel) : null;
+
   const rawTurns = history?.turns || [];
   // When a live stream is active, the last turn's assistant response may already be
   // present in fetched history (partial or complete).  Suppress it to avoid rendering
@@ -516,7 +533,7 @@ export const SessionPanel = memo(function SessionPanel({
               </div>
             )}
             {turns.map((turn, i) => (
-              <TurnView key={`${history?.startTurn || 0}:${i}`} turn={turn} agent={session.agent || ''} meta={meta} model={session.model ? shortenModel(session.model) : undefined} effort={agentEffort} t={t}
+              <TurnView key={`${history?.startTurn || 0}:${i}`} turn={turn} agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} t={t}
                 onResend={(txt) => {
                   scrollToBottomRef.current = true;
                   handleSendStart(txt);
@@ -543,8 +560,7 @@ export const SessionPanel = memo(function SessionPanel({
             {/* Live stream preview */}
             {liveStream && (
               <div className="mb-6">
-                {!pendingPrompt && !pendingImageUrls.length && <TurnDivider agent={session.agent || ''} meta={meta} model={session.model ? shortenModel(session.model) : undefined} effort={agentEffort} />}
-                {(pendingPrompt || pendingImageUrls.length > 0) && <TurnDivider agent={session.agent || ''} meta={meta} model={session.model ? shortenModel(session.model) : undefined} effort={agentEffort} />}
+                <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} previewMeta={liveStream.previewMeta} />
                 <LivePreview stream={liveStream} t={t} />
               </div>
             )}

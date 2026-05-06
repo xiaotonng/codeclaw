@@ -14,6 +14,7 @@ import {
   ensureManagedSession,
   findManagedThreadSession,
   getSessions,
+  getSessionMessages,
   getSessionTail,
   getUsage,
   labelFromWindowMinutes,
@@ -1163,6 +1164,190 @@ exit 1`;
     const empty = await doClaudeStream(baseOpts('claude'));
     expect(empty.ok).toBe(true);
     expect(empty.message).toBe('(no textual response)');
+  });
+
+  it('hides system-injected user events (task-notification, system-reminder, IDE state) from rendered history', async () => {
+    await withTempHome(async (homeDir) => {
+      const workdir = '/Users/test/sysinj';
+      const projectDir = path.join(homeDir, '.claude', 'projects', workdir.replace(/[/\\:]/g, '-'));
+      const sessionId = 'sess-sys-injection';
+      fs.mkdirSync(projectDir, { recursive: true });
+
+      const events = [
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'real user message' }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'assistant reply A' }] } },
+        // Background task completion injection — would otherwise render as a user bubble.
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<task-notification>\n<task-id>abc</task-id>\n<status>failed</status>\n<summary>Background command failed</summary>\n</task-notification>\nRead the output file at /tmp/foo.' }] } },
+        // IDE state injection.
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<ide_opened_file>src/foo.ts</ide_opened_file>' }] } },
+        // System reminder injection.
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<system-reminder>Be concise.</system-reminder>' }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'assistant reply B' }] } },
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'second real user message' }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'assistant reply C' }] } },
+      ];
+      fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), events.map(e => JSON.stringify(e)).join('\n'));
+
+      const result = await getSessionMessages({ agent: 'claude', sessionId, workdir, rich: true } as any);
+      expect(result.ok).toBe(true);
+      const userMsgs = (result.richMessages || []).filter(m => m.role === 'user').map(m => m.text);
+      // Only the two genuine user messages should remain.
+      expect(userMsgs).toEqual(['real user message', 'second real user message']);
+      // No rendered text should contain a leaked task-notification / system-reminder / IDE wrapper.
+      const allText = (result.richMessages || []).map(m => m.text).join('\n');
+      expect(allText).not.toContain('<task-notification>');
+      expect(allText).not.toContain('<system-reminder>');
+      expect(allText).not.toContain('<ide_opened_file>');
+    });
+  });
+
+  it('hydrates historical sub-agent blocks from sidecar JSONL/meta files and hides the result text from parent activity', async () => {
+    await withTempHome(async (homeDir) => {
+      const workdir = '/Users/test/workspace';
+      const projectDir = path.join(homeDir, '.claude', 'projects', workdir.replace(/[/\\:]/g, '-'));
+      const sessionId = 'sess-with-subagent';
+      const subDir = path.join(projectDir, sessionId, 'subagents');
+      fs.mkdirSync(subDir, { recursive: true });
+
+      const parentEvents = [
+        // Initial user message
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'Look up the auth handler' }] } },
+        // Parent assistant emits an Agent (sub-agent) tool_use — Claude Code v2 stream uses "Agent".
+        { type: 'assistant', message: { content: [
+          { type: 'tool_use', id: 'toolu_sub_1', name: 'Agent', input: { subagent_type: 'Explore', description: 'auth handler search', prompt: 'find it' } },
+        ] } },
+        // Top-level tool_result for the sub-agent — content is the sub-agent's full response. Must NOT leak into parent activity.
+        { type: 'user', message: { content: [
+          { type: 'tool_result', tool_use_id: 'toolu_sub_1', content: [{ type: 'text', text: 'SUB AGENT FINAL ANSWER LEAKED' }], is_error: false },
+        ] } },
+        // Parent's own Read tool — should appear normally in the parent activity.
+        { type: 'assistant', message: { content: [
+          { type: 'tool_use', id: 'toolu_parent_1', name: 'Read', input: { file_path: 'src/auth.ts' } },
+        ] } },
+        { type: 'user', message: { content: [
+          { type: 'tool_result', tool_use_id: 'toolu_parent_1', content: 'auth file body', is_error: false },
+        ] } },
+      ];
+      fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), parentEvents.map(e => JSON.stringify(e)).join('\n'));
+
+      // Sidecar: agent-<id>.meta.json + agent-<id>.jsonl. Claude Code stores the
+      // sub-agent's full transcript here; we match by description.
+      const subId = 'agent-aaa1';
+      fs.writeFileSync(path.join(subDir, `${subId}.meta.json`), JSON.stringify({ agentType: 'Explore', description: 'auth handler search' }));
+      const subEvents = [
+        { type: 'user', message: { content: [{ type: 'text', text: 'find it' }] } },
+        { type: 'assistant', message: { model: 'claude-sonnet-4-6', content: [
+          { type: 'tool_use', id: 'sub-grep-1', name: 'Grep', input: { pattern: 'login' } },
+        ] } },
+        { type: 'assistant', message: { model: 'claude-sonnet-4-6', content: [
+          { type: 'tool_use', id: 'sub-read-1', name: 'Read', input: { file_path: 'src/login.ts' } },
+        ] } },
+      ];
+      fs.writeFileSync(path.join(subDir, `${subId}.jsonl`), subEvents.map(e => JSON.stringify(e)).join('\n'));
+
+      const result = await getSessionMessages({ agent: 'claude', sessionId, workdir, rich: true } as any);
+      expect(result.ok).toBe(true);
+      const assistantTurn = (result.richMessages || []).find(m => m.role === 'assistant');
+      expect(assistantTurn).toBeDefined();
+      const blocks = assistantTurn!.blocks;
+
+      // The sub-agent's final-answer text must live ONLY on the sub_agent
+      // block (rendered inside its dedicated card) — never on a parent-level
+      // tool_result that would leak into the activity feed.
+      const nonSubBlocks = blocks.filter(b => b.type !== 'sub_agent');
+      const leakedText = nonSubBlocks.map(b => b.content || '').join('|');
+      expect(leakedText).not.toContain('SUB AGENT FINAL ANSWER LEAKED');
+
+      // The Agent tool_use is replaced by a sub_agent block carrying the
+      // sub-agent's tools (hydrated from the sidecar) and final answer text.
+      const subAgentBlocks = blocks.filter(b => b.type === 'sub_agent');
+      expect(subAgentBlocks).toHaveLength(1);
+      const sub = subAgentBlocks[0].subAgent!;
+      expect(sub.kind).toBe('Explore');
+      expect(sub.description).toBe('auth handler search');
+      expect(sub.model).toBe('claude-sonnet-4-6');
+      expect(sub.status).toBe('done');
+      expect(sub.tools.map(t => t.name).sort()).toEqual(['Grep', 'Read']);
+      expect(subAgentBlocks[0].content).toBe('SUB AGENT FINAL ANSWER LEAKED');
+
+      // Parent's own activity is preserved.
+      const parentToolUses = blocks.filter(b => b.type === 'tool_use');
+      expect(parentToolUses).toHaveLength(1);
+      expect(parentToolUses[0].toolName).toBe('Read');
+    });
+  });
+
+  it('isolates Task sub-agent tool calls into their own group, leaving parent activity clean', async () => {
+    writeFakeScript('claude', [
+      { type: 'system', session_id: 's-sub', model: 'claude-opus-4-7' },
+      // Parent invokes the sub-agent tool (rebranded "Agent" in v2 stream output, but Task still flows through)
+      // — should NOT appear in parent activity, becomes a sub-agent block.
+      { type: 'assistant', message: { content: [
+        { type: 'tool_use', id: 'task-1', name: 'Agent', input: { subagent_type: 'Explore', description: 'Find login handler', prompt: '...' } },
+      ] } },
+      // Sub-agent emits its own assistant events (parent_tool_use_id set, model differs).
+      {
+        type: 'assistant',
+        parent_tool_use_id: 'task-1',
+        model: 'claude-sonnet-4-6',
+        message: {
+          model: 'claude-sonnet-4-6',
+          content: [
+            { type: 'tool_use', id: 'sub-grep-1', name: 'Grep', input: { pattern: 'login' } },
+          ],
+        },
+      },
+      // Sub-agent's tool_result — parent_tool_use_id is set so it must NOT pollute parent activity.
+      {
+        type: 'user',
+        parent_tool_use_id: 'task-1',
+        message: { content: [
+          { type: 'tool_result', tool_use_id: 'sub-grep-1', content: 'matches found', is_error: false },
+        ] },
+      },
+      // Parent's normal tool call AFTER the Task — should appear in parent activity.
+      { type: 'assistant', message: { content: [
+        { type: 'tool_use', id: 'parent-read-1', name: 'Read', input: { file_path: 'src/auth.ts' } },
+      ] } },
+      {
+        type: 'user',
+        message: { content: [
+          { type: 'tool_result', tool_use_id: 'parent-read-1', content: 'auth code', is_error: false },
+        ] },
+      },
+      // Top-level tool_result for the Task — closes the sub-agent's lifecycle.
+      {
+        type: 'user',
+        message: { content: [
+          { type: 'tool_result', tool_use_id: 'task-1', content: 'Found the login handler at src/auth.ts:42', is_error: false },
+        ] },
+      },
+      { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Done' } } },
+      { type: 'result', session_id: 's-sub', usage: { input_tokens: 10, output_tokens: 5 } },
+    ]);
+
+    const previewSubAgents: Array<any[]> = [];
+    const result = await doClaudeStream(baseOpts('claude', {
+      onText: (_text, _thinking, _activity, meta) => {
+        if (meta?.subAgents) previewSubAgents.push(meta.subAgents);
+      },
+    }));
+
+    expect(result.ok).toBe(true);
+    // Parent activity contains only parent-level tools — no Task entry, no sub-agent's Grep.
+    expect(result.activity || '').toContain('Read src/auth.ts');
+    expect(result.activity || '').not.toContain('Run task');
+    expect(result.activity || '').not.toContain('Search text: login');
+    expect(result.activity || '').not.toContain('matches found');
+    // The sub-agent surfaces in the streaming preview meta with its own model and tool stream.
+    const lastMeta = previewSubAgents[previewSubAgents.length - 1] || [];
+    expect(lastMeta).toHaveLength(1);
+    expect(lastMeta[0].id).toBe('task-1');
+    expect(lastMeta[0].kind).toBe('Explore');
+    expect(lastMeta[0].description).toBe('Find login handler');
+    expect(lastMeta[0].model).toBe('claude-sonnet-4-6');
+    expect(lastMeta[0].status).toBe('done');
+    expect(lastMeta[0].tools.map((t: any) => t.name)).toEqual(['Grep']);
   });
 
   it('exposes in-process Claude steering and keeps only the latest steered response', async () => {

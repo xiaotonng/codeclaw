@@ -580,10 +580,30 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const filteredByWs = useMemo(() => {
     const out: Record<string, SessionInfo[]> = {};
     for (const ws of workspaces) {
-      out[ws.path] = filterFn((sessionsMap[ws.path] || []).map(hydrateSession));
+      const all = (sessionsMap[ws.path] || []).map(hydrateSession);
+      // Collapse pending stubs onto their resolved (native) entry: when a new
+      // session is created, the optimistic stub holds a `pending_xxx` ID while
+      // the API returns the real native ID after promotion. liveSessionStates
+      // links them via resolvedKey; without this dedup, both render until the
+      // next API refresh.
+      const byCanonical = new Map<string, SessionInfo>();
+      for (const s of all) {
+        const key = sKey(s.agent || '', s.sessionId);
+        const live = liveSessionStates[key];
+        const canonical = live?.resolvedKey && live.resolvedKey !== key ? live.resolvedKey : key;
+        const prev = byCanonical.get(canonical);
+        if (!prev) {
+          byCanonical.set(canonical, s);
+          continue;
+        }
+        // Prefer the entry whose own key matches canonical (the real session over a pending stub).
+        const prevKey = sKey(prev.agent || '', prev.sessionId);
+        if (prevKey !== canonical && key === canonical) byCanonical.set(canonical, s);
+      }
+      out[ws.path] = filterFn([...byCanonical.values()]);
     }
     return out;
-  }, [workspaces, sessionsMap, filterFn, hydrateSession]);
+  }, [workspaces, sessionsMap, liveSessionStates, filterFn, hydrateSession]);
 
   /* ── Derived: resolve SessionInfo for each open slot ── */
   const resolveSlotInfo = useCallback((slot: SessionSlot): SessionInfo => {

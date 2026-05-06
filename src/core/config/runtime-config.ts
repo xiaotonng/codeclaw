@@ -15,6 +15,7 @@ export const DEFAULT_AGENT_MODELS: Record<Agent, string> = {
 export const DEFAULT_AGENT_EFFORTS: Partial<Record<Agent, string>> = {
   claude: 'high',
   codex: 'xhigh',
+  gemini: 'high',
 };
 
 function trimmed(value: unknown): string {
@@ -34,7 +35,7 @@ export function agentEffortEnv(agent: Agent, env: Record<string, string | undefi
   switch (agent) {
     case 'claude': return trimmed(env.CLAUDE_REASONING_EFFORT).toLowerCase();
     case 'codex': return trimmed(env.CODEX_REASONING_EFFORT).toLowerCase();
-    case 'gemini': return '';
+    case 'gemini': return trimmed(env.GEMINI_REASONING_EFFORT).toLowerCase();
   }
   return '';
 }
@@ -65,8 +66,10 @@ export function resolveAgentEffort(config: Partial<UserConfig> | Record<string, 
       const value = trimmed((config as Partial<UserConfig>).codexReasoningEffort || agentEffortEnv('codex') || DEFAULT_AGENT_EFFORTS.codex).toLowerCase();
       return value || DEFAULT_AGENT_EFFORTS.codex || null;
     }
-    case 'gemini':
-      return null;
+    case 'gemini': {
+      const value = trimmed((config as Partial<UserConfig>).geminiReasoningEffort || agentEffortEnv('gemini') || DEFAULT_AGENT_EFFORTS.gemini).toLowerCase();
+      return value || DEFAULT_AGENT_EFFORTS.gemini || null;
+    }
   }
   return null;
 }
@@ -83,6 +86,6 @@ export function setAgentEffortEnv(agent: Agent, value: string, env: NodeJS.Proce
   switch (agent) {
     case 'claude': env.CLAUDE_REASONING_EFFORT = value; break;
     case 'codex': env.CODEX_REASONING_EFFORT = value; break;
-    case 'gemini': break;
+    case 'gemini': env.GEMINI_REASONING_EFFORT = value; break;
   }
 }

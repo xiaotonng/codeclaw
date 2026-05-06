@@ -298,22 +298,17 @@ Docs: https://github.com/xiaotonng/pikiclaw
 
 /**
  * For a fresh CLI launch (not a daemon-managed child), persist the working
- * directory into setting.json so restarts start in the right place.
+ * directory into setting.json so the bot defaults to where the user invoked
+ * the command. Without `-w`, fall back to the cwd; this is preserved across
+ * non-daemon self-restarts because process-control inherits cwd when spawning
+ * the replacement process.
  */
 function persistWorkdir(args: Record<string, any>, userConfig: Partial<UserConfig>): Partial<UserConfig> {
-  if (!process.env.PIKICLAW_DAEMON_CHILD) {
-    // Only overwrite persisted workdir when the user explicitly passed -w.
-    // Falling back to cwd when no flag is given can clobber a valid saved
-    // workdir with a temp directory (e.g. after a non-daemon restart).
-    if (args.workdir) {
-      const cliWorkdir = path.resolve(args.workdir);
-      if (userConfig.workdir !== cliWorkdir) {
-        updateUserConfig({ workdir: cliWorkdir });
-        return loadUserConfig();
-      }
-    }
-  }
-  return userConfig;
+  if (process.env.PIKICLAW_DAEMON_CHILD) return userConfig;
+  const nextWorkdir = path.resolve(args.workdir || process.cwd());
+  if (userConfig.workdir === nextWorkdir) return userConfig;
+  updateUserConfig({ workdir: nextWorkdir });
+  return loadUserConfig();
 }
 
 /**

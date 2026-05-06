@@ -7,6 +7,7 @@
 
 import { registerDriver, type AgentDriver } from '../driver.js';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { GEMINI_USAGE_TIMEOUTS, SESSION_RUNNING_THRESHOLD_MS } from '../../core/constants.js';
@@ -240,13 +241,146 @@ function geminiParse(ev: any, s: any) {
 }
 
 // ---------------------------------------------------------------------------
+// Thinking effort overlay
+//
+// Gemini CLI exposes thinking via two knobs depending on model family:
+//   - Gemini 3.x: thinkingLevel: "LOW" | "HIGH"
+//   - Gemini 2.5: thinkingBudget: number (0=off, 8192=default, -1=dynamic)
+// There is no CLI flag — the only place the CLI reads them is settings.json
+// under `agents.<chat-base*>.modelConfig.generateContentConfig.thinkingConfig`.
+//
+// We don't want to mutate the user's ~/.gemini/settings.json, so for streams
+// where an effort is set we materialise a fake $HOME via GEMINI_CLI_HOME and
+// place a synthetic `.gemini/` inside it: symlinks for everything in the
+// real ~/.gemini/ (oauth, projects, history, tmp, …) plus our merged
+// settings.json. Note that gemini-cli reads GEMINI_CLI_HOME as the *parent*
+// of `.gemini/`, not as `.gemini/` itself — getting that wrong makes gemini
+// fail with "Please set an Auth method" because it can't find any creds.
+// ---------------------------------------------------------------------------
+
+function geminiEffortOverlay(effort: string | null | undefined): Record<string, any> | null {
+  const value = String(effort || '').trim().toLowerCase();
+  if (!value) return null;
+
+  let level3: 'LOW' | 'HIGH';
+  let budget25: number;
+  if (value === 'low' || value === 'minimal') {
+    level3 = 'LOW';
+    budget25 = 512;
+  } else if (value === 'medium') {
+    level3 = 'HIGH';
+    budget25 = 8192;
+  } else {
+    level3 = 'HIGH';
+    budget25 = -1;
+  }
+
+  return {
+    'chat-base-3': {
+      modelConfig: { generateContentConfig: { thinkingConfig: { thinkingLevel: level3 } } },
+    },
+    'chat-base-2.5': {
+      modelConfig: { generateContentConfig: { thinkingConfig: { thinkingBudget: budget25 } } },
+    },
+  };
+}
+
+function deepMergeAgents(base: any, overlay: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = base && typeof base === 'object' && !Array.isArray(base) ? { ...base } : {};
+  for (const key of Object.keys(overlay)) {
+    out[key] = mergePlainObjects(out[key], overlay[key]);
+  }
+  return out;
+}
+
+function mergePlainObjects(a: any, b: any): any {
+  if (b === undefined) return a;
+  if (a === undefined || a === null || typeof a !== 'object' || Array.isArray(a)) return b;
+  if (typeof b !== 'object' || Array.isArray(b)) return b;
+  const out: Record<string, any> = { ...a };
+  for (const key of Object.keys(b)) out[key] = mergePlainObjects(a[key], b[key]);
+  return out;
+}
+
+interface GeminiHomeOverlay {
+  homeDir: string;
+  cleanup: () => void;
+}
+
+function prepareGeminiHomeOverlay(effort: string | null | undefined): GeminiHomeOverlay | null {
+  const overrides = geminiEffortOverlay(effort);
+  if (!overrides) return null;
+
+  const home = getHome();
+  if (!home) return null;
+  const userGeminiDir = path.join(home, '.gemini');
+  if (!fs.existsSync(userGeminiDir)) return null;
+
+  let overlayHome: string;
+  try {
+    overlayHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-gemini-'));
+  } catch {
+    return null;
+  }
+  const overlayGeminiDir = path.join(overlayHome, '.gemini');
+  try { fs.mkdirSync(overlayGeminiDir, { recursive: true }); } catch {
+    try { fs.rmSync(overlayHome, { recursive: true, force: true }); } catch {}
+    return null;
+  }
+
+  // Symlink every entry in ~/.gemini except settings.json so OAuth, projects,
+  // history, tmp/, etc. all stay shared with the user's real config.
+  try {
+    for (const entry of fs.readdirSync(userGeminiDir, { withFileTypes: true })) {
+      if (entry.name === 'settings.json') continue;
+      try {
+        fs.symlinkSync(path.join(userGeminiDir, entry.name), path.join(overlayGeminiDir, entry.name));
+      } catch { /* ignore individual symlink failures */ }
+    }
+  } catch { /* readdir failure → fall through with whatever we managed */ }
+
+  let userSettings: any = {};
+  const userSettingsPath = path.join(userGeminiDir, 'settings.json');
+  try {
+    if (fs.existsSync(userSettingsPath)) {
+      userSettings = JSON.parse(fs.readFileSync(userSettingsPath, 'utf-8'));
+    }
+  } catch { /* malformed user settings — start fresh */ }
+
+  const merged = {
+    ...userSettings,
+    agents: deepMergeAgents(userSettings.agents, overrides),
+  };
+
+  try {
+    fs.writeFileSync(path.join(overlayGeminiDir, 'settings.json'), JSON.stringify(merged, null, 2));
+  } catch {
+    try { fs.rmSync(overlayHome, { recursive: true, force: true }); } catch {}
+    return null;
+  }
+
+  return {
+    homeDir: overlayHome,
+    cleanup: () => { try { fs.rmSync(overlayHome, { recursive: true, force: true }); } catch {} },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Stream
 // ---------------------------------------------------------------------------
 
 export async function doGeminiStream(opts: StreamOpts): Promise<StreamResult> {
   // Prompt is passed as -p argument; send empty stdin so run() doesn't duplicate it
-  const streamOpts = { ...opts, _stdinOverride: '' };
-  return run(geminiCmd(opts), streamOpts, geminiParse);
+  const overlay = prepareGeminiHomeOverlay(opts.thinkingEffort);
+  const extraEnv = overlay
+    ? { ...(opts.extraEnv || {}), GEMINI_CLI_HOME: overlay.homeDir }
+    : opts.extraEnv;
+  const streamOpts = { ...opts, _stdinOverride: '', extraEnv };
+  try {
+    return await run(geminiCmd(opts), streamOpts, geminiParse);
+  } finally {
+    overlay?.cleanup();
+  }
 }
 
 // ---------------------------------------------------------------------------

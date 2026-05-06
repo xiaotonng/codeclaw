@@ -7,3 +7,5 @@ dashboard/dist/
 .pikiclaw/*
 !.pikiclaw/skills/
 !.pikiclaw/skills/**
+tmp/
+dashboard-loaded.png

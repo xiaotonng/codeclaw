@@ -17,7 +17,7 @@ import type {
   ModelListOpts, ModelListResult, UsageOpts, UsageResult,
   SessionListOpts, SessionListResult, SessionTailOpts, SessionTailResult,
   SessionMessagesOpts, SessionMessagesResult,
-  StreamPreviewMeta,
+  StreamPreviewMeta, StreamSubAgent,
 } from './types.js';
 import type { McpAskUserCallback } from './mcp/bridge.js';
 import {
@@ -236,6 +236,8 @@ export async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, 
     claudeToolsById: new Map<string, { name: string; summary: string }>(),
     seenClaudeToolIds: new Set<string>(),
     geminiToolsById: new Map<string, { name: string; summary: string }>(),
+    // Claude-only: sub-agent invocations from the Task tool. Other drivers leave it empty.
+    subAgents: new Map<string, StreamSubAgent>(),
   };
 
   const shellCmd = cmd.map(Q).join(' ');

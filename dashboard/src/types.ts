@@ -249,12 +249,13 @@ export interface SessionMessage {
 }
 
 export interface MessageBlock {
-  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | 'plan';
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | 'plan' | 'sub_agent';
   content: string;
   toolName?: string;
   toolId?: string;
   phase?: 'commentary' | 'final_answer';
   plan?: StreamPlan | null;
+  subAgent?: StreamSubAgent | null;
 }
 
 export interface RichMessage {
@@ -271,6 +272,23 @@ export interface StreamPlanStep {
 export interface StreamPlan {
   explanation: string | null;
   steps: StreamPlanStep[];
+}
+
+export interface StreamPreviewMeta {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  contextPercent: number | null;
+  subAgents?: StreamSubAgent[];
+}
+
+export interface StreamSubAgent {
+  id: string;
+  kind: string | null;
+  description: string | null;
+  model: string | null;
+  tools: Array<{ id: string; name: string; summary: string }>;
+  status: 'running' | 'done' | 'failed';
 }
 
 export interface SessionMessagesWindow {

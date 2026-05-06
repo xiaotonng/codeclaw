@@ -6,17 +6,21 @@ import { PlanProgressCard, hasPlan } from '../../components/PlanProgressCard';
 import { mdComponents, mdPlugins } from './markdown';
 import { lastNLines } from './utils';
 import { ImageLightbox } from './TurnView';
+import { SubAgentCard } from './LivePreview';
 import type { RichMessage, MessageBlock } from '../../types';
 
 /* ═══════════════════════════════════════════════════════════════
    Assistant message — separated activity, thinking, output
    ═══════════════════════════════════════════════════════════════ */
 export function AssistantMsg({ message, t }: { message: RichMessage; t: (k: string) => string }) {
-  const { activityBlocks, thinkingBlocks, processNotes, planBlocks, outputBlocks } = categorizeAssistantBlocks(message.blocks);
+  const { activityBlocks, thinkingBlocks, processNotes, planBlocks, subAgentBlocks, outputBlocks } = categorizeAssistantBlocks(message.blocks);
   const latestPlan = [...planBlocks].reverse().find(block => hasPlan(block.plan));
   return (
     <div className="space-y-3">
       {(activityBlocks.length > 0 || processNotes.length > 0) && <ActivitySection blocks={activityBlocks} notes={processNotes} t={t} />}
+      {subAgentBlocks.map(block => block.subAgent ? (
+        <SubAgentCard key={block.toolId || block.subAgent.id} sub={block.subAgent} t={t} />
+      ) : null)}
       {latestPlan?.plan && <PlanProgressCard plan={latestPlan.plan} t={t} className="max-w-[760px]" />}
       {thinkingBlocks.length > 0 && <ThinkingSection blocks={thinkingBlocks} t={t} />}
       {outputBlocks.length > 0 && <OutputBlock blocks={outputBlocks} />}
@@ -29,6 +33,7 @@ export function categorizeAssistantBlocks(blocks: MessageBlock[]): {
   thinkingBlocks: MessageBlock[];
   processNotes: MessageBlock[];
   planBlocks: MessageBlock[];
+  subAgentBlocks: MessageBlock[];
   outputBlocks: MessageBlock[];
 } {
   const normalized = blocks.filter(block =>
@@ -36,12 +41,14 @@ export function categorizeAssistantBlocks(blocks: MessageBlock[]): {
     || block.type === 'tool_use'
     || block.type === 'tool_result'
     || block.type === 'image'
+    || block.type === 'sub_agent'
     || !!block.content.trim(),
   );
   const hasExplicitPhases = normalized.some(block => block.type === 'text' && !!block.phase);
   const hasStructured = normalized.some(block => block.type !== 'text' && block.type !== 'image');
+  const empty = { activityBlocks: [], thinkingBlocks: [], processNotes: [], planBlocks: [], subAgentBlocks: [], outputBlocks: [] };
   if (!hasStructured && !hasExplicitPhases) {
-    return { activityBlocks: [], thinkingBlocks: [], processNotes: [], planBlocks: [], outputBlocks: normalized };
+    return { ...empty, outputBlocks: normalized };
   }
 
   if (hasExplicitPhases) {
@@ -50,6 +57,7 @@ export function categorizeAssistantBlocks(blocks: MessageBlock[]): {
       thinkingBlocks: normalized.filter(block => block.type === 'thinking'),
       processNotes: [],
       planBlocks: normalized.filter(block => block.type === 'plan' && hasPlan(block.plan)),
+      subAgentBlocks: normalized.filter(block => block.type === 'sub_agent'),
       outputBlocks: normalized.filter(block => block.type === 'image' || block.type === 'text'),
     };
   }
@@ -64,6 +72,7 @@ export function categorizeAssistantBlocks(blocks: MessageBlock[]): {
     activityBlocks: processRegion.filter(b => b.type === 'tool_use' || b.type === 'tool_result'),
     thinkingBlocks: processRegion.filter(b => b.type === 'thinking'),
     planBlocks: processRegion.filter(b => b.type === 'plan' && hasPlan(b.plan)),
+    subAgentBlocks: processRegion.filter(b => b.type === 'sub_agent'),
     processNotes: processRegion.filter(b => b.type === 'text'),
     outputBlocks: [...outputBlocks, ...processRegion.filter(b => b.type === 'image')],
   };

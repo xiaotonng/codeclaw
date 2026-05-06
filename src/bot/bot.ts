@@ -11,7 +11,7 @@ import { getActiveUserConfig, loadWorkspaces, onUserConfigChange, resolveUserWor
 import {
   doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
   reconcileOrphanedRunningSessions,
-  type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
+  type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type SessionInfo, type UsageResult,
   type AgentInteraction, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
@@ -49,7 +49,7 @@ import {
   type HostBatteryData, type HostCpuUsageData, type HostMemoryUsageData,
 } from './host.js';
 
-export { updateSession, type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type AgentInteraction, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult, type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult, type SessionQueryResult };
+export { updateSession, type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type SessionInfo, type UsageResult, type AgentInteraction, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult, type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult, type SessionQueryResult };
 export { envBool, envString, envInt, shellSplit, whichSync, fmtTokens, fmtUptime, fmtBytes, parseAllowedChatIds, listSubdirs, extractThinkingTail, formatThinkingForDisplay, buildPrompt, ensureGitignore, type ChatId } from '../core/utils.js';
 export { getHostBatteryData, getHostCpuUsageData, getHostDisplayName, getHostMemoryUsageData, type HostBatteryData, type HostCpuUsageData, type HostMemoryUsageData } from './host.js';
 import { BOT_TIMEOUTS } from '../core/constants.js';
@@ -179,8 +179,8 @@ export interface InteractionSnapshot {
 }
 
 export type StreamEvent =
-  | { type: 'start'; taskId: string; agent: string; sessionId: string | null }
-  | { type: 'text'; text: string; thinking: string; activity?: string; plan?: StreamPreviewPlan | null }
+  | { type: 'start'; taskId: string; agent: string; sessionId: string | null; model: string | null; effort: string | null }
+  | { type: 'text'; text: string; thinking: string; activity?: string; plan?: StreamPreviewPlan | null; previewMeta?: StreamPreviewMeta | null }
   | { type: 'done'; taskId: string; sessionId: string | null; error?: string; incomplete?: boolean }
   | { type: 'queued'; taskId: string; position: number }
   | { type: 'cancelled'; taskId: string }
@@ -210,6 +210,12 @@ export interface StreamSnapshot {
   activity?: string;
   plan?: StreamPreviewPlan | null;
   sessionId?: string | null;
+  /** Resolved model id used for the active turn (sticky across the snapshot's lifetime). */
+  model?: string | null;
+  /** Resolved thinking effort for the active turn. */
+  effort?: string | null;
+  /** Latest token / context-window usage emitted by the driver during the turn. */
+  previewMeta?: StreamPreviewMeta | null;
   error?: string;
   /** Active human-in-the-loop interaction prompts. */
   interactions?: InteractionSnapshot[];
@@ -425,6 +431,7 @@ export class Bot {
         this.streamSnapshots.set(sessionKey, {
           phase: 'streaming', taskId: event.taskId,
           text: '', thinking: '', activity: '', plan: null, sessionId: event.sessionId, updatedAt: now,
+          model: event.model, effort: event.effort, previewMeta: null,
           queuedTaskIds: remainingQueued && remainingQueued.length ? remainingQueued : undefined,
         });
         break;
@@ -436,6 +443,7 @@ export class Bot {
           snap.thinking = event.thinking;
           snap.activity = event.activity;
           snap.plan = event.plan?.steps?.length ? event.plan : null;
+          if (event.previewMeta) snap.previewMeta = event.previewMeta;
           snap.updatedAt = now;
         }
         break;
@@ -452,6 +460,9 @@ export class Bot {
           activity: prev?.activity || '',
           error: event.error,
           plan: prev?.plan ?? null,
+          model: prev?.model ?? null,
+          effort: prev?.effort ?? null,
+          previewMeta: prev?.previewMeta ?? null,
           queuedTaskIds: prev?.queuedTaskIds,
           updatedAt: now,
         });
@@ -1364,7 +1375,8 @@ export class Bot {
         return;
       }
 
-      this.emitStream(currentSessionKey(), { type: 'start', taskId, agent: session.agent, sessionId: session.sessionId });
+      const startConfig = this.resolveSessionStreamConfig(session);
+      this.emitStream(currentSessionKey(), { type: 'start', taskId, agent: session.agent, sessionId: session.sessionId, model: startConfig.model, effort: startConfig.effort });
       try {
         const result = await this.runStream(
           prompt,
@@ -1372,7 +1384,7 @@ export class Bot {
           attachments,
           (text, thinking, activity, meta, plan) => {
             opts.onText?.(text, thinking, activity, meta, plan);
-            this.emitStream(currentSessionKey(), { type: 'text', text, thinking, activity, plan });
+            this.emitStream(currentSessionKey(), { type: 'text', text, thinking, activity, plan, previewMeta: meta ?? null });
           },
           undefined,
           undefined,
@@ -1509,6 +1521,29 @@ export class Bot {
     return this.agentConfigs[agent]?.model || '';
   }
 
+  /**
+   * Resolve the effective model + thinking effort that a stream for `cs` will run with.
+   * Mirrors the fallback chain used inside runStream() so callers (e.g. submitSessionTask
+   * emitting a 'start' event) can label the active turn before runStream resolves it.
+   */
+  resolveSessionStreamConfig(cs: Pick<SessionRuntime, 'agent' | 'sessionId' | 'workdir' | 'modelId' | 'thinkingEffort'>): { model: string | null; effort: string | null } {
+    const agentConfig = this.agentConfigs[cs.agent] || {};
+    const sessionWorkdir = cs.workdir || this.workdir;
+    const storedConfig = cs.sessionId && !isPendingSessionId(cs.sessionId)
+      ? getSessionStoredConfig(sessionWorkdir, cs.agent, cs.sessionId)
+      : null;
+    const model = (cs.modelId && cs.modelId.trim())
+      || (storedConfig?.model || '')
+      || this.modelForAgent(cs.agent)
+      || null;
+    const effortRaw = (cs.thinkingEffort && cs.thinkingEffort.trim().toLowerCase())
+      || (storedConfig?.thinkingEffort || '')
+      || agentConfig.reasoningEffort
+      || 'high';
+    const effort = cs.agent === 'gemini' ? null : (effortRaw || null);
+    return { model: model || null, effort };
+  }
+
   fetchSessions(agent: Agent, workdir?: string): Promise<SessionQueryResult> {
     return querySessions({ agent, workdir: workdir || this.workdir });
   }
@@ -1550,7 +1585,6 @@ export class Bot {
   }
 
   effortForAgent(agent: Agent): string | null {
-    if (agent === 'gemini') return null;
     return this.agentConfigs[agent]?.reasoningEffort || 'high';
   }
 
@@ -1570,6 +1604,7 @@ export class Bot {
       } else {
         if (agent === 'claude') patch.claudeReasoningEffort = value;
         else if (agent === 'codex') patch.codexReasoningEffort = value;
+        else if (agent === 'gemini') patch.geminiReasoningEffort = value;
       }
       if (Object.keys(patch).length) updateUserConfig(patch);
     } catch (e: any) {
@@ -1713,7 +1748,7 @@ export class Bot {
       }
 
       const nextEffort = resolveAgentEffort(config, agent);
-      if (nextEffort && agent !== 'gemini' && this.effortForAgent(agent) !== nextEffort) {
+      if (nextEffort && this.effortForAgent(agent) !== nextEffort) {
         if (opts.initial) this.agentConfigs[agent].reasoningEffort = nextEffort;
         else this.setEffortForAgent(agent, nextEffort);
       }

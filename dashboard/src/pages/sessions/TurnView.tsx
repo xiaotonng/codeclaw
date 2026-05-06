@@ -7,11 +7,11 @@ import { BrandIcon } from '../../components/BrandIcon';
 import { mdComponents, mdPlugins } from './markdown';
 import { isContinuationSummary } from './utils';
 import { AssistantMsg } from './AssistantContent';
-import type { MessageBlock } from '../../types';
+import type { MessageBlock, StreamPreviewMeta } from '../../types';
 import type { Turn } from './utils';
 
 export const TurnView = memo(function TurnView({ turn, agent, meta, model, effort, t, onResend, onEdit }: {
-  turn: Turn; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string; effort?: string | null; t: (k: string) => string;
+  turn: Turn; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
   onResend?: (text: string) => void;
   onEdit?: (text: string) => void;
 }) {
@@ -149,12 +149,54 @@ export function BubbleAction({ label, onClick, children }: { label: string; onCl
   );
 }
 
-export function TurnDivider({ agent, meta, model, effort }: { agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string; effort?: string | null }) {
+export function TurnDivider({ agent, meta, model, effort, previewMeta }: {
+  agent: string;
+  meta: ReturnType<typeof getAgentMeta>;
+  model?: string | null;
+  effort?: string | null;
+  /** Live token / context-window stats — when present, rendered as a trailing chip. */
+  previewMeta?: StreamPreviewMeta | null;
+}) {
+  const ctxPct = previewMeta?.contextPercent ?? null;
+  const ctxTokens = (previewMeta?.inputTokens ?? 0) + (previewMeta?.cachedInputTokens ?? 0);
+  const showCtx = ctxPct != null || ctxTokens > 0;
   return (
     <div className="flex items-center gap-1.5 mt-1 mb-3">
       <BrandIcon brand={agent} size={13} />
       <span style={{ color: meta.color }} className="text-[12px] font-semibold opacity-70">{meta.label}</span>
-      {model && <span className="text-[10px] font-mono text-fg-5/50">{model}{effort ? ` · ${effort}` : ''}</span>}
+      {(model || effort) && (
+        <span className="text-[10px] font-mono text-fg-5/50">
+          {model || ''}{model && effort ? ' · ' : ''}{effort || ''}
+        </span>
+      )}
+      {showCtx && (
+        <span className="ml-auto inline-flex items-center gap-1 text-[10px] font-mono text-fg-5/55" title={formatContextTitle(previewMeta)}>
+          {ctxPct != null && <ContextDot pct={ctxPct} />}
+          <span>{ctxPct != null ? `${ctxPct.toFixed(1)}%` : ''}</span>
+          {ctxTokens > 0 && <span className="text-fg-5/40">· {formatTokens(ctxTokens)}</span>}
+        </span>
+      )}
     </div>
   );
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M tok`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k tok`;
+  return `${n} tok`;
+}
+
+function formatContextTitle(meta: StreamPreviewMeta | null | undefined): string {
+  if (!meta) return '';
+  const parts: string[] = [];
+  if (meta.contextPercent != null) parts.push(`Context: ${meta.contextPercent.toFixed(1)}%`);
+  if (meta.inputTokens != null) parts.push(`Input: ${meta.inputTokens.toLocaleString()}`);
+  if (meta.outputTokens != null) parts.push(`Output: ${meta.outputTokens.toLocaleString()}`);
+  if (meta.cachedInputTokens != null) parts.push(`Cached: ${meta.cachedInputTokens.toLocaleString()}`);
+  return parts.join('  ·  ');
+}
+
+function ContextDot({ pct }: { pct: number }) {
+  const color = pct >= 85 ? 'bg-rose-400/70' : pct >= 60 ? 'bg-amber-400/70' : 'bg-emerald-400/70';
+  return <span className={`h-1.5 w-1.5 rounded-full ${color}`} />;
 }

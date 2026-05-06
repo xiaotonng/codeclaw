@@ -82,9 +82,23 @@ export function groupIntoTurns(msgs: RichMessage[]): Turn[] {
   return turns;
 }
 
-/** Detect continuation/summary messages that Claude stores as role=user */
+/** Top-level XML wrappers Claude Code injects into role=user events for
+ *  conversation infrastructure (background tasks, system reminders, IDE state,
+ *  persisted-output truncations, etc.). Never render as a user bubble. */
+const SYSTEM_INJECTED_USER_TAGS = new Set([
+  'task-notification', 'system-reminder', 'persisted-output',
+  'local-command-stdout', 'local-command-caveat', 'local-command-stderr',
+  'ide_opened_file', 'ide_diagnostics', 'ide_selection', 'event',
+  'analysis', 'case_id', 'tool-use-id', 'output-file',
+]);
+
+/** Detect continuation/summary messages and system-injected events that Claude
+ *  stores as role=user but never originated from the human. */
 export function isContinuationSummary(text: string): boolean {
   if (text.length > 800) return true;
+  const trimmed = text.trim();
+  const leading = trimmed.match(/^<([a-z][a-z0-9_-]*)\b/i);
+  if (leading && SYSTEM_INJECTED_USER_TAGS.has(leading[1].toLowerCase())) return true;
   const markers = ['continued from a previous', 'summary below covers', 'earlier portion of the conversation', 'Summary:', 'Key Technical Concepts'];
   return markers.some(m => text.includes(m));
 }

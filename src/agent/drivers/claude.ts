@@ -8,7 +8,7 @@ import { execSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { registerDriver, type AgentDriver } from '../driver.js';
 import {
-  type StreamOpts, type StreamResult, type StreamPreviewPlan,
+  type StreamOpts, type StreamResult, type StreamPreviewPlan, type StreamSubAgent,
   type SessionListResult, type SessionTailOpts, type SessionTailResult,
   type SessionMessagesOpts, type SessionMessagesResult,
   type TailMessage, type RichMessage, type MessageBlock,
@@ -83,6 +83,35 @@ function claudeCmd(o: StreamOpts): string[] {
   return args;
 }
 
+/**
+ * Route a JSONL event that belongs to a sub-agent (parent_tool_use_id is set).
+ * The event is owned by the Task tool_use whose id matches `parentToolUseId`;
+ * we accumulate the sub-agent's model and tool calls without ever touching
+ * `s.recentActivity` or `s.text` (those stay scoped to the parent agent).
+ */
+function routeClaudeSubAgentEvent(ev: any, t: string, parentToolUseId: string, s: any): void {
+  const sub: StreamSubAgent | undefined = s.subAgents.get(parentToolUseId);
+  if (!sub) return; // Task tool_use should always precede sub-agent events; ignore stragglers.
+
+  if (t === 'system' || t === 'assistant') {
+    const model = ev.model ?? ev.message?.model;
+    if (typeof model === 'string' && model.trim()) sub.model = model;
+  }
+  if (t === 'assistant') {
+    const contents = ev.message?.content || [];
+    for (const block of contents) {
+      if (block?.type !== 'tool_use') continue;
+      const toolId = String(block?.id || '').trim();
+      if (!toolId || s.seenClaudeToolIds.has(toolId)) continue;
+      const toolName = String(block?.name || 'Tool').trim() || 'Tool';
+      const summary = toolName === 'TodoWrite' ? 'Update plan' : summarizeClaudeToolUse(block?.name, block?.input || {});
+      s.seenClaudeToolIds.add(toolId);
+      s.claudeToolsById.set(toolId, { name: toolName, summary });
+      sub.tools.push({ id: toolId, name: toolName, summary });
+    }
+  }
+}
+
 function claudeContextWindowFromModel(model: unknown): number | null {
   const id = normalizeClaudeModelId(model).toLowerCase();
   if (!id) return null;
@@ -94,6 +123,17 @@ function claudeContextWindowFromModel(model: unknown): number | null {
 
 function claudeParse(ev: any, s: any) {
   const t = ev.type || '';
+  // Sub-agent events (Task tool spawns a child agent) carry parent_tool_use_id
+  // pointing back to the parent's Task tool_use_id. They share the JSONL stream
+  // with parent events but must be isolated so their tool calls don't pollute
+  // the parent's activity list and their model/effort don't override the
+  // parent's runtime context.
+  const parentToolUseId: string | null = (typeof ev.parent_tool_use_id === 'string' && ev.parent_tool_use_id)
+    ? ev.parent_tool_use_id : null;
+  if (parentToolUseId) {
+    routeClaudeSubAgentEvent(ev, t, parentToolUseId, s);
+    return;
+  }
   if (t === 'system') {
     s.sessionId = ev.session_id ?? s.sessionId;
     s.model = ev.model ?? s.model;
@@ -167,6 +207,24 @@ function claudeParse(ev: any, s: any) {
         s.claudeToolsById.set(toolId, { name: toolName, summary: 'Update plan' });
         continue;
       }
+      // Task → represents a sub-agent invocation. Carve it out as its own
+      // streamed unit so the child's tool stream and model don't bleed into
+      // the parent's activity card.
+      if (toolName === 'Task' || toolName === 'Agent') {
+        const input = block?.input || {};
+        const subAgent: StreamSubAgent = {
+          id: toolId,
+          kind: typeof input.subagent_type === 'string' ? input.subagent_type : null,
+          description: typeof input.description === 'string' ? input.description : null,
+          model: null,
+          tools: [],
+          status: 'running',
+        };
+        s.subAgents.set(toolId, subAgent);
+        s.seenClaudeToolIds.add(toolId);
+        s.claudeToolsById.set(toolId, { name: toolName, summary: subAgent.description || 'Run task' });
+        continue;
+      }
       const tool = {
         name: toolName,
         summary: summarizeClaudeToolUse(block?.name, block?.input || {}),
@@ -188,6 +246,15 @@ function claudeParse(ev: any, s: any) {
       const tool = toolId ? s.claudeToolsById.get(toolId) : undefined;
       // Skip TodoWrite results from activity — plan card handles it
       if (tool?.name === 'TodoWrite') continue;
+      // Sub-agent tool_result closes out the sub-agent's lifecycle — flip its
+      // status and skip the regular activity append (the sub-agent card carries
+      // it). The result content text is the sub-agent's full response which
+      // would otherwise leak into the parent activity feed.
+      if (tool?.name === 'Task' || tool?.name === 'Agent') {
+        const sub = s.subAgents.get(toolId);
+        if (sub) sub.status = block?.is_error ? 'failed' : 'done';
+        continue;
+      }
       pushRecentActivity(s.recentActivity, summarizeClaudeToolResult(tool, block, ev.tool_use_result));
     }
     s.activity = s.recentActivity.join('\n');
@@ -237,6 +304,7 @@ function createClaudeStreamState(opts: StreamOpts) {
     plan: null as StreamPreviewPlan | null,
     claudeToolsById: new Map<string, { name: string; summary: string }>(),
     seenClaudeToolIds: new Set<string>(),
+    subAgents: new Map<string, StreamSubAgent>(),
   };
 }
 
@@ -255,6 +323,7 @@ function resetClaudeTurnState(s: ReturnType<typeof createClaudeStreamState>, not
   s.activity = '';
   s.recentActivity = [];
   s.claudeToolsById = new Map();
+  s.subAgents = new Map();
   s.seenClaudeToolIds = new Set();
   if (note) {
     pushRecentActivity(s.recentActivity, note);
@@ -811,13 +880,40 @@ function extractClaudeBlocks(content: any, skipSystemBlocks = false, todoWriteTo
   return blocks;
 }
 
-/** Detect system-injected user events (context compression summaries, interruption markers)
- *  that should not split the assistant turn when parsing session JSONL. */
+/**
+ * Top-level XML wrapper tags that Claude Code injects into "user" events for
+ * non-user-authored content: background-task results, system reminders, IDE
+ * state, persisted output truncations, slash-command stdout, etc. The dashboard
+ * should never render these as a user bubble — they're conversation infra.
+ */
+const SYSTEM_INJECTED_USER_TAGS = new Set([
+  'task-notification',
+  'system-reminder',
+  'persisted-output',
+  'local-command-stdout',
+  'local-command-caveat',
+  'local-command-stderr',
+  'ide_opened_file',
+  'ide_diagnostics',
+  'ide_selection',
+  'event',
+  'analysis',
+  'case_id',
+  'tool-use-id',
+  'output-file',
+]);
+
+/** Detect system-injected user events (compression summaries, interruption
+ *  markers, task-notifications, IDE state, etc.) that should not render as a
+ *  user message when parsing session JSONL. */
 function isSystemInjectedUserEvent(text: string): boolean {
   const trimmed = (text || '').trim();
   if (!trimmed) return true;
   // Interruption markers injected by Claude Code
   if (/^\[Request interrupted by user(?: for tool use)?\]$/i.test(trimmed)) return true;
+  // Leading XML wrapper from a known infra tag — these are never user-authored.
+  const leading = trimmed.match(/^<([a-z][a-z0-9_-]*)\b/i);
+  if (leading && SYSTEM_INJECTED_USER_TAGS.has(leading[1].toLowerCase())) return true;
   // Context compression summaries are typically very long
   if (trimmed.length > 800) return true;
   // Known continuation markers
@@ -850,11 +946,20 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
     let pendingTextParts: string[] = [];
     let pendingBlocks: MessageBlock[] = [];
     const todoWriteToolIds = new Set<string>();
+    /**
+     * Sub-agent blocks live in `pendingBlocks` like any other block but we keep
+     * a side-table of references keyed by the Task tool_use_id so subsequent
+     * sub-agent assistant events (which carry parent_tool_use_id) can mutate
+     * the captured `subAgent` payload in place — that way the rendered turn
+     * shows the sub-agent's full tool stream without polluting the parent's
+     * tool list.
+     */
+    const subAgentBlocksById = new Map<string, MessageBlock>();
+    /** Tool ids belonging to sub-agents — their tool_results in user events are skipped from the parent activity. */
+    const subAgentToolIds = new Set<string>();
 
     const flush = () => {
       if (!pendingRole) return;
-      // Join with blank line so paragraphs from separate assistant events remain
-      // distinct when rendered as markdown.
       const text = pendingTextParts.join('\n\n');
       if (text || pendingBlocks.length) {
         allMsgs.push({ role: pendingRole, text });
@@ -863,52 +968,92 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
       pendingRole = null;
       pendingTextParts = [];
       pendingBlocks = [];
+      subAgentBlocksById.clear();
+      subAgentToolIds.clear();
     };
 
     for (const raw of lines) {
       if (!raw || raw[0] !== '{') continue;
       try {
         const ev = JSON.parse(raw);
+        const parentToolUseId: string | null = (typeof ev.parent_tool_use_id === 'string' && ev.parent_tool_use_id) ? ev.parent_tool_use_id : null;
+
+        if (parentToolUseId) {
+          // Sub-agent emission — fold tool calls into the matching sub_agent block
+          // and never let them surface as siblings of the parent's blocks.
+          const block = subAgentBlocksById.get(parentToolUseId);
+          if (!block?.subAgent) continue;
+          const sub = block.subAgent;
+          if (ev.type === 'assistant') {
+            const model = ev.model ?? ev.message?.model;
+            if (typeof model === 'string' && model.trim()) sub.model = model;
+            const contents = Array.isArray(ev.message?.content) ? ev.message.content : [];
+            for (const inner of contents) {
+              if (inner?.type !== 'tool_use') continue;
+              const toolId = String(inner?.id || '').trim();
+              if (!toolId) continue;
+              const toolName = String(inner?.name || 'Tool').trim() || 'Tool';
+              subAgentToolIds.add(toolId);
+              const summary = toolName === 'TodoWrite' ? 'Update plan' : summarizeClaudeToolUse(inner?.name, inner?.input || {});
+              if (!sub.tools.some(t => t.id === toolId)) {
+                sub.tools.push({ id: toolId, name: toolName, summary });
+              }
+            }
+          }
+          continue;
+        }
+
         if (ev.type === 'user') {
-          // Check if this is a tool_result (system-injected) or actual user message
           const contentArr = ev.message?.content;
           const isToolResult = Array.isArray(contentArr)
             && contentArr.length > 0
             && contentArr.every((b: any) => b?.type === 'tool_result');
 
           if (isToolResult) {
-            // Tool results belong to the preceding assistant turn — append as blocks
             if (pendingRole === 'assistant') {
               for (const block of contentArr) {
-                // Skip TodoWrite results — plan card handles it
-                if (todoWriteToolIds.has(block.tool_use_id)) continue;
+                const toolUseId = block.tool_use_id;
+                if (todoWriteToolIds.has(toolUseId)) continue;
+                // Sub-agent inner tool results — already accounted for by the sub_agent block.
+                if (subAgentToolIds.has(toolUseId)) continue;
+                // Top-level tool_result for a sub-agent (Task / Agent) — close
+                // out its lifecycle. The result content text is the sub-agent's
+                // full final answer; surface it on the sub_agent block so the
+                // dedicated card can render it instead of leaking into the
+                // parent's tool_result feed.
+                const subBlock = subAgentBlocksById.get(toolUseId);
+                if (subBlock?.subAgent) {
+                  subBlock.subAgent.status = block?.is_error ? 'failed' : 'done';
+                  const resultText = typeof block.content === 'string'
+                    ? block.content
+                    : Array.isArray(block.content)
+                      ? block.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n')
+                      : '';
+                  if (resultText) subBlock.content = resultText;
+                  continue;
+                }
                 const resultText = typeof block.content === 'string'
                   ? block.content
                   : Array.isArray(block.content)
                     ? block.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n')
                     : '';
                 if (resultText) {
-                  pendingBlocks.push({ type: 'tool_result', content: resultText, toolId: block.tool_use_id });
+                  pendingBlocks.push({ type: 'tool_result', content: resultText, toolId: toolUseId });
                 }
               }
             }
             continue;
           }
 
-          // Context compression summaries and interruption markers should not
-          // split the current assistant turn — skip them so the response stays merged.
           if (pendingRole === 'assistant') {
             const probe = extractClaudeText(ev.message?.content, true);
             if (isSystemInjectedUserEvent(probe)) continue;
           }
 
-          // Actual user message — flush previous and start new
           flush();
           const rawText = stripInjectedPrompts(extractClaudeText(ev.message?.content, true));
           const userBlocks = extractClaudeBlocks(ev.message?.content, true);
-          // Include image blocks from the user message
           const imageBlocks = userBlocks.filter(b => b.type === 'image');
-          // Strip [Image:...] placeholders from display text — the actual images are in imageBlocks
           const text = rawText.replace(SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE, '').replace(/\s+/g, ' ').trim();
           if (text || imageBlocks.length) {
             pendingRole = 'user';
@@ -916,22 +1061,112 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
             pendingBlocks = text ? [{ type: 'text', content: text }, ...imageBlocks] : [...imageBlocks];
           }
         } else if (ev.type === 'assistant') {
-          // If we were accumulating a user message, flush it
           if (pendingRole === 'user') flush();
-          // Start or continue accumulating assistant blocks
           pendingRole = 'assistant';
           const text = extractClaudeText(ev.message?.content, true);
           if (text) pendingTextParts.push(text);
           const blocks = extractClaudeBlocks(ev.message?.content, true, todoWriteToolIds);
+          // Convert sub-agent tool_use blocks into sub_agent placeholders we
+          // can later mutate. Claude Code surfaces the Task tool as `Agent` in
+          // its v2 stream format; accept both names so older sessions still
+          // parse correctly.
+          const contents = Array.isArray(ev.message?.content) ? ev.message.content : [];
+          for (let i = 0; i < blocks.length; i++) {
+            const block = blocks[i];
+            if (block.type !== 'tool_use') continue;
+            if (block.toolName !== 'Task' && block.toolName !== 'Agent') continue;
+            const raw = contents.find((c: any) => c?.type === 'tool_use' && c?.id === block.toolId);
+            const input = raw?.input || {};
+            const subAgent: StreamSubAgent = {
+              id: block.toolId || '',
+              kind: typeof input.subagent_type === 'string' ? input.subagent_type : null,
+              description: typeof input.description === 'string' ? input.description : null,
+              model: null,
+              tools: [],
+              status: 'running',
+            };
+            const subBlock: MessageBlock = { type: 'sub_agent', content: '', toolId: block.toolId, subAgent };
+            blocks[i] = subBlock;
+            if (subAgent.id) subAgentBlocksById.set(subAgent.id, subBlock);
+          }
           pendingBlocks.push(...blocks);
         }
       } catch { /* skip malformed lines */ }
     }
     flush();
 
+    // Hydrate sub_agent blocks from sidecar files. Claude Code stores each
+    // sub-agent's full transcript in
+    //   ~/.claude/projects/<dir>/<session-id>/subagents/agent-<id>.jsonl
+    // alongside an `agent-<id>.meta.json` carrying the agentType. The parent
+    // session only records the Agent tool_use + tool_result; without this step
+    // the sub-agent card has no tool list.
+    const subAgentsDir = path.join(projectDir, opts.sessionId, 'subagents');
+    if (fs.existsSync(subAgentsDir)) hydrateSubAgentBlocksFromSidecar(richMsgs, subAgentsDir);
+
     return applyTurnWindow(allMsgs, opts, opts.rich ? richMsgs : undefined);
   } catch (e: any) {
     return { ok: false, messages: [], totalTurns: 0, error: e.message };
+  }
+}
+
+/**
+ * Walk a session's `subagents/` directory and merge each sidecar's tool stream
+ * onto the matching `sub_agent` block (matched by description, the only stable
+ * shared field between parent and child sessions). Best-effort — silent on any
+ * I/O or parse failure.
+ */
+function hydrateSubAgentBlocksFromSidecar(richMsgs: RichMessage[], subAgentsDir: string): void {
+  let entries: string[];
+  try { entries = fs.readdirSync(subAgentsDir); } catch { return; }
+  const sidecars = new Map<string, { kind: string | null; tools: Array<{ id: string; name: string; summary: string }>; model: string | null }>();
+  for (const name of entries) {
+    if (!name.endsWith('.jsonl')) continue;
+    const id = name.replace(/\.jsonl$/, '');
+    const metaPath = path.join(subAgentsDir, `${id}.meta.json`);
+    let metaKind: string | null = null;
+    let metaDescription: string | null = null;
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      metaKind = typeof meta?.agentType === 'string' ? meta.agentType : null;
+      metaDescription = typeof meta?.description === 'string' ? meta.description : null;
+    } catch { /* meta optional */ }
+    const tools: Array<{ id: string; name: string; summary: string }> = [];
+    let model: string | null = null;
+    try {
+      const content = fs.readFileSync(path.join(subAgentsDir, name), 'utf-8');
+      for (const raw of content.split('\n')) {
+        if (!raw || raw[0] !== '{') continue;
+        let ev: any;
+        try { ev = JSON.parse(raw); } catch { continue; }
+        if (ev.type !== 'assistant') continue;
+        const msg = ev.message || {};
+        if (typeof msg.model === 'string' && msg.model.trim()) model = msg.model;
+        const contents = Array.isArray(msg.content) ? msg.content : [];
+        for (const block of contents) {
+          if (block?.type !== 'tool_use') continue;
+          const toolId = String(block?.id || '').trim();
+          if (!toolId || tools.some(t => t.id === toolId)) continue;
+          const toolName = String(block?.name || 'Tool').trim() || 'Tool';
+          const summary = toolName === 'TodoWrite' ? 'Update plan' : summarizeClaudeToolUse(block?.name, block?.input || {});
+          tools.push({ id: toolId, name: toolName, summary });
+        }
+      }
+    } catch { continue; }
+    if (metaDescription) {
+      sidecars.set(metaDescription, { kind: metaKind, tools, model });
+    }
+  }
+  if (sidecars.size === 0) return;
+  for (const msg of richMsgs) {
+    for (const block of msg.blocks) {
+      if (block.type !== 'sub_agent' || !block.subAgent || !block.subAgent.description) continue;
+      const sidecar = sidecars.get(block.subAgent.description);
+      if (!sidecar) continue;
+      if (!block.subAgent.kind && sidecar.kind) block.subAgent.kind = sidecar.kind;
+      if (!block.subAgent.model && sidecar.model) block.subAgent.model = sidecar.model;
+      if (block.subAgent.tools.length === 0 && sidecar.tools.length > 0) block.subAgent.tools = sidecar.tools;
+    }
   }
 }
 

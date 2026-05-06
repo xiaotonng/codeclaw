@@ -8,6 +8,7 @@ import type {
   StreamPreviewMeta,
   StreamPreviewPlan,
   StreamPreviewPlanStep,
+  StreamSubAgent,
   UsageResult,
   UsageWindowInfo,
   Agent,
@@ -189,11 +190,14 @@ export function buildStreamPreviewMeta(s: {
   inputTokens: number | null; outputTokens: number | null;
   cachedInputTokens: number | null; cacheCreationInputTokens: number | null;
   contextWindow: number | null; contextUsedTokens?: number | null;
+  subAgents?: ReadonlyMap<string, StreamSubAgent> | null;
 }): StreamPreviewMeta {
-  return {
+  const meta: StreamPreviewMeta = {
     inputTokens: s.inputTokens, outputTokens: s.outputTokens,
     cachedInputTokens: s.cachedInputTokens, contextPercent: computeContext(s).contextPercent,
   };
+  if (s.subAgents && s.subAgents.size > 0) meta.subAgents = Array.from(s.subAgents.values());
+  return meta;
 }
 
 // Claude tool use helpers (used by driver-claude.ts)

@@ -78,6 +78,7 @@ export interface UserConfig {
   codexModel?: string;
   codexReasoningEffort?: string;
   geminiModel?: string;
+  geminiReasoningEffort?: string;
   workdir?: string;
   workspaces?: WorkspaceEntry[];
   telegramBotToken?: string;
@@ -350,10 +351,9 @@ export function setUserWorkdir(workdir: string, options: { notify?: boolean } = 
   const resolvedWorkdir = resolveUserWorkdir({ workdir });
   const config = normalizeUserConfig({ ...loadUserConfig(), workdir: resolvedWorkdir });
   const configPath = saveUserConfig(config);
-  // Update sync overrides so the periodic config sync doesn't revert the change
-  if (userConfigSyncOverrides.workdir !== undefined || userConfigSyncTimer) {
-    userConfigSyncOverrides = { ...userConfigSyncOverrides, workdir: resolvedWorkdir };
-  }
+  // Don't pin workdir into userConfigSyncOverrides: the periodic sync reads
+  // setting.json fresh each tick, so an external `npx pikiclaw@latest` that
+  // updates the file should be honored, not clobbered by an in-memory lock.
   applyUserConfig(config, undefined, { overwrite: true, clearMissing: true, notify: options.notify ?? true });
   return { configPath, workdir: resolvedWorkdir, config };
 }

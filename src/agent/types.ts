@@ -96,6 +96,12 @@ export interface StreamPreviewMeta {
   outputTokens: number | null;
   cachedInputTokens: number | null;
   contextPercent: number | null;
+  /**
+   * Active sub-agent invocations (Claude `Task` tool). Drivers without sub-agent
+   * support omit this field. Each sub-agent renders as its own UI block so its
+   * tool stream and model/effort don't bleed into the parent agent's view.
+   */
+  subAgents?: StreamSubAgent[];
 }
 
 /** A single step within a streaming plan preview. */
@@ -108,6 +114,27 @@ export interface StreamPreviewPlanStep {
 export interface StreamPreviewPlan {
   explanation: string | null;
   steps: StreamPreviewPlanStep[];
+}
+
+/**
+ * Snapshot of a sub-agent invocation (Claude `Task` tool). Sub-agents run in
+ * an isolated context with their own model and tool stream; surfacing them as
+ * a discrete unit prevents their activity from polluting the parent agent's
+ * tool list or model/effort header.
+ */
+export interface StreamSubAgent {
+  /** The parent's tool_use id for the Task invocation — stable identifier. */
+  id: string;
+  /** Sub-agent type (e.g. "Explore", "general-purpose") from Task input. */
+  kind: string | null;
+  /** Description from Task input — short one-liner that names the work. */
+  description: string | null;
+  /** Model the sub-agent is running on (often differs from the parent). */
+  model: string | null;
+  /** Ordered list of tools the sub-agent has invoked, deduplicated by id. */
+  tools: Array<{ id: string; name: string; summary: string }>;
+  /** Lifecycle status — flips to 'done' / 'failed' when the parent receives the Task tool_result. */
+  status: 'running' | 'done' | 'failed';
 }
 
 // ---------------------------------------------------------------------------
@@ -296,12 +323,14 @@ export interface TailMessage { role: 'user' | 'assistant'; text: string; }
 
 /** A content block within a message — text, thinking, tool activity, or image. */
 export interface MessageBlock {
-  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | 'plan';
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | 'plan' | 'sub_agent';
   content: string;
   toolName?: string;
   toolId?: string;
   phase?: 'commentary' | 'final_answer';
   plan?: StreamPreviewPlan | null;
+  /** Set on `sub_agent` blocks — captures the Task invocation as a discrete unit. */
+  subAgent?: StreamSubAgent | null;
 }
 
 /** Rich message with structured content blocks. */

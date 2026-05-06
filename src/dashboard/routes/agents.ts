@@ -4,6 +4,8 @@
 
 import { Hono } from 'hono';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { getAgentInstallCommand, getAgentLabel, getAgentPackage } from '../../agent/npm.js';
 import { loadUserConfig, saveUserConfig, applyUserConfig, type UserConfig } from '../../core/config/user-config.js';
 import { listModels, type AgentDetectOptions, type UsageResult } from '../../agent/index.js';
@@ -83,13 +85,46 @@ function runCommand(
   });
 }
 
+/**
+ * Parse `ENOTEMPTY: ... rename 'A' -> 'B'` paths out of npm stderr and remove
+ * any staging dirs (siblings of the package dir whose name starts with `.`).
+ * Never touches the live package dir itself.
+ */
+function cleanupNpmStagingFromError(stderr: string): string[] {
+  const removed: string[] = [];
+  const re = /rename\s+'([^']+)'\s+->\s+'([^']+)'/g;
+  const candidates = new Set<string>();
+  for (let m: RegExpExecArray | null; (m = re.exec(stderr));) {
+    candidates.add(m[1]);
+    candidates.add(m[2]);
+  }
+  for (const p of candidates) {
+    const base = path.basename(p);
+    if (!base.startsWith('.')) continue;
+    try {
+      fs.rmSync(p, { recursive: true, force: true });
+      removed.push(p);
+    } catch { /* best effort */ }
+  }
+  return removed;
+}
+
 async function installAgentViaNpm(agent: Agent, log: (msg: string) => void): Promise<void> {
   const pkg = getAgentPackage(agent);
   if (!pkg) throw new Error(`Unsupported agent: ${agent}`);
   log(`Installing ${getAgentLabel(agent)} via npm...`);
-  const result = await runCommand('npm', ['install', '-g', `${pkg}@latest`], {
+  let result = await runCommand('npm', ['install', '-g', `${pkg}@latest`], {
     timeoutMs: AGENT_INSTALL_TIMEOUT_MS,
   });
+  if (!result.ok && /ENOTEMPTY/.test(result.stderr)) {
+    const removed = cleanupNpmStagingFromError(result.stderr);
+    if (removed.length > 0) {
+      log(`Cleaned npm staging dirs after ENOTEMPTY: ${removed.join(', ')}; retrying...`);
+      result = await runCommand('npm', ['install', '-g', `${pkg}@latest`], {
+        timeoutMs: AGENT_INSTALL_TIMEOUT_MS,
+      });
+    }
+  }
   if (!result.ok) throw new Error(result.error || `Failed to install ${pkg}`);
   log(`${getAgentLabel(agent)} installation complete.`);
 }
@@ -306,11 +341,12 @@ app.post('/api/runtime-agent', async (c) => {
       if (targetAgent === 'gemini') nextConfig.geminiModel = model;
       if (botRef) botRef.setModelForAgent(targetAgent, model);
     }
-    if (effort && targetAgent !== 'gemini') {
+    if (effort) {
       runtime.runtimePrefs.efforts[targetAgent] = effort;
       runtime.setEffortEnv(targetAgent, effort);
       if (targetAgent === 'claude') nextConfig.claudeReasoningEffort = effort;
       if (targetAgent === 'codex') nextConfig.codexReasoningEffort = effort;
+      if (targetAgent === 'gemini') nextConfig.geminiReasoningEffort = effort;
       if (botRef) botRef.setEffortForAgent(targetAgent, effort);
     }
   }
