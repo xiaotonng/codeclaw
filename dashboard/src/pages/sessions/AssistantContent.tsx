@@ -4,7 +4,7 @@ import { cn } from '../../utils';
 import { CollapsibleCard, CountBadge } from '../../components/ui';
 import { PlanProgressCard, hasPlan } from '../../components/PlanProgressCard';
 import { mdComponents, mdPlugins } from './markdown';
-import { lastNLines } from './utils';
+import { lastNLines, summarizeToolResult, summarizeToolUse } from './utils';
 import { ImageLightbox } from './TurnView';
 import { SubAgentCard } from './LivePreview';
 import type { RichMessage, MessageBlock } from '../../types';
@@ -13,11 +13,11 @@ import type { RichMessage, MessageBlock } from '../../types';
    Assistant message — separated activity, thinking, output
    ═══════════════════════════════════════════════════════════════ */
 export function AssistantMsg({ message, t }: { message: RichMessage; t: (k: string) => string }) {
-  const { activityBlocks, thinkingBlocks, processNotes, planBlocks, subAgentBlocks, outputBlocks } = categorizeAssistantBlocks(message.blocks);
+  const { activityBlocks, thinkingBlocks, planBlocks, subAgentBlocks, outputBlocks } = categorizeAssistantBlocks(message.blocks);
   const latestPlan = [...planBlocks].reverse().find(block => hasPlan(block.plan));
   return (
     <div className="space-y-3">
-      {(activityBlocks.length > 0 || processNotes.length > 0) && <ActivitySection blocks={activityBlocks} notes={processNotes} t={t} />}
+      {activityBlocks.length > 0 && <ActivitySection blocks={activityBlocks} t={t} />}
       {subAgentBlocks.map(block => block.subAgent ? (
         <SubAgentCard key={block.toolId || block.subAgent.id} sub={block.subAgent} t={t} />
       ) : null)}
@@ -31,7 +31,6 @@ export function AssistantMsg({ message, t }: { message: RichMessage; t: (k: stri
 export function categorizeAssistantBlocks(blocks: MessageBlock[]): {
   activityBlocks: MessageBlock[];
   thinkingBlocks: MessageBlock[];
-  processNotes: MessageBlock[];
   planBlocks: MessageBlock[];
   subAgentBlocks: MessageBlock[];
   outputBlocks: MessageBlock[];
@@ -44,52 +43,24 @@ export function categorizeAssistantBlocks(blocks: MessageBlock[]): {
     || block.type === 'sub_agent'
     || !!block.content.trim(),
   );
-  const hasExplicitPhases = normalized.some(block => block.type === 'text' && !!block.phase);
-  const hasStructured = normalized.some(block => block.type !== 'text' && block.type !== 'image');
-  const empty = { activityBlocks: [], thinkingBlocks: [], processNotes: [], planBlocks: [], subAgentBlocks: [], outputBlocks: [] };
-  if (!hasStructured && !hasExplicitPhases) {
-    return { ...empty, outputBlocks: normalized };
-  }
-
-  if (hasExplicitPhases) {
-    return {
-      activityBlocks: normalized.filter(block => block.type === 'tool_use' || block.type === 'tool_result'),
-      thinkingBlocks: normalized.filter(block => block.type === 'thinking'),
-      processNotes: [],
-      planBlocks: normalized.filter(block => block.type === 'plan' && hasPlan(block.plan)),
-      subAgentBlocks: normalized.filter(block => block.type === 'sub_agent'),
-      outputBlocks: normalized.filter(block => block.type === 'image' || block.type === 'text'),
-    };
-  }
-
-  let trailingStart = normalized.length;
-  while (trailingStart > 0 && (normalized[trailingStart - 1].type === 'text' || normalized[trailingStart - 1].type === 'image')) trailingStart--;
-
-  const processRegion = trailingStart < normalized.length ? normalized.slice(0, trailingStart) : normalized;
-  const outputBlocks = trailingStart < normalized.length ? normalized.slice(trailingStart) : [];
-
   return {
-    activityBlocks: processRegion.filter(b => b.type === 'tool_use' || b.type === 'tool_result'),
-    thinkingBlocks: processRegion.filter(b => b.type === 'thinking'),
-    planBlocks: processRegion.filter(b => b.type === 'plan' && hasPlan(b.plan)),
-    subAgentBlocks: processRegion.filter(b => b.type === 'sub_agent'),
-    processNotes: processRegion.filter(b => b.type === 'text'),
-    outputBlocks: [...outputBlocks, ...processRegion.filter(b => b.type === 'image')],
+    activityBlocks: normalized.filter(b => b.type === 'tool_use' || b.type === 'tool_result'),
+    thinkingBlocks: normalized.filter(b => b.type === 'thinking'),
+    planBlocks: normalized.filter(b => b.type === 'plan' && hasPlan(b.plan)),
+    subAgentBlocks: normalized.filter(b => b.type === 'sub_agent'),
+    outputBlocks: normalized.filter(b => b.type === 'text' || b.type === 'image'),
   };
 }
 
 /* ═══════════════════════════════════════════════════════════════
    Activity section — collapsible tool call summary (cyan accent)
    ═══════════════════════════════════════════════════════════════ */
-export function ActivitySection({ blocks, notes, t }: { blocks: MessageBlock[]; notes: MessageBlock[]; t: (k: string) => string }) {
+export function ActivitySection({ blocks, t }: { blocks: MessageBlock[]; t: (k: string) => string }) {
   const [open, setOpen] = useState(false);
-  const tools = blocks
-    .filter(b => b.type === 'tool_use')
-    .map(b => b.toolName || 'tool')
-    .filter((name, i, list) => list.indexOf(name) === i);
-  const totalOps = blocks.filter(b => b.type === 'tool_use').length;
-  const notePreview = notes.map(block => block.content.split('\n').find(Boolean)?.trim() || '').find(Boolean) || '';
-  const preview = tools.length > 0 ? tools.join(' \u00b7 ') : notePreview;
+  const useBlocks = blocks.filter(b => b.type === 'tool_use');
+  const totalOps = useBlocks.length;
+  const lastUse = useBlocks[useBlocks.length - 1];
+  const preview = lastUse ? summarizeToolUse(lastUse) : '';
 
   return (
     <CollapsibleCard
@@ -102,17 +73,6 @@ export function ActivitySection({ blocks, notes, t }: { blocks: MessageBlock[]; 
     >
       <div className="px-3.5 py-2.5 space-y-0.5">
         {blocks.map((block, i) => <ActivityLine key={i} block={block} />)}
-        {notes.length > 0 && (
-          <div className="mt-2 space-y-1.5">
-            {notes.map((block, i) => (
-              <div key={`note-${i}`} className="rounded-md border border-edge bg-inset px-3 py-2 session-md text-[12px] leading-[1.7] text-fg-4">
-                <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
-                  {block.content}
-                </ReactMarkdown>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
     </CollapsibleCard>
   );
@@ -121,12 +81,13 @@ export function ActivitySection({ blocks, notes, t }: { blocks: MessageBlock[]; 
 export function ActivityLine({ block }: { block: MessageBlock }) {
   const [open, setOpen] = useState(false);
   const isUse = block.type === 'tool_use';
+  const summary = isUse ? summarizeToolUse(block) : summarizeToolResult(block);
   return (
     <div>
       <button onClick={() => block.content && setOpen(v => !v)} className={cn('flex items-center gap-2 py-[3px] w-full text-left group rounded-sm transition-colors', block.content && 'hover:bg-panel-h/30')}>
         <span className={cn('h-1.5 w-1.5 rounded-full shrink-0', isUse ? 'bg-fg-5/40' : 'bg-ok/40')} />
         <span className="text-[11px] font-mono text-fg-5/60 group-hover:text-fg-3 transition-colors truncate">
-          {isUse ? (block.toolName || 'tool') : 'result'}
+          {summary}
         </span>
       </button>
       {open && block.content && (

@@ -1,4 +1,4 @@
-export type Agent = 'claude' | 'codex' | 'gemini';
+export type Agent = 'claude' | 'codex' | 'gemini' | 'hermes';
 export type OpenTarget = 'vscode' | 'cursor' | 'windsurf' | 'finder' | 'default';
 
 export interface AgentInfo {
@@ -33,12 +33,31 @@ export interface UsageResult {
   error: string | null;
 }
 
+/**
+ * Read-only snapshot of an agent's *external* configuration (e.g. Hermes'
+ * ~/.hermes/config.yaml). Pikiclaw never writes to the source — this is
+ * surfaced only so the dashboard can display what an unbound agent will
+ * actually run with.
+ */
+export interface AgentNativeConfig {
+  model: string;
+  provider: string;
+  baseURL: string | null;
+  effort: string | null;
+  configPath: string;
+  source: string;
+}
+
 export interface AgentRuntimeStatus extends AgentInfo {
   selectedModel: string | null;
   selectedEffort: string | null;
   isDefault: boolean;
   models: ModelInfo[];
   usage: UsageResult | null;
+  /** Driver-supplied snapshot of the agent's external config, when applicable. */
+  nativeConfig?: AgentNativeConfig | null;
+  /** Static driver capability flags, e.g. fork support. */
+  capabilities?: { fork?: boolean; modelSwitch?: boolean };
   latestVersion?: string | null;
   updateAvailable?: boolean;
   updateStatus?: string | null;
@@ -206,10 +225,20 @@ export interface SessionInfo {
   userStatus?: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
   userNote?: string | null;
   workspacePath?: string | null;
-  migratedFrom?: { agent: Agent; sessionId: string } | null;
-  migratedTo?: { agent: Agent; sessionId: string } | null;
-  linkedSessions?: Array<{ agent: Agent; sessionId: string }>;
+  migratedFrom?: SessionLineageRef | null;
+  migratedTo?: SessionLineageRef | null;
+  linkedSessions?: SessionLineageRef[];
   numTurns?: number | null;
+}
+
+/** Reference to a related session (migration twin or fork child/parent). */
+export interface SessionLineageRef {
+  agent: Agent;
+  sessionId: string;
+  /** 'fork' = branch off at a turn, 'migrate' = cross-agent twin (default). */
+  kind?: 'migrate' | 'fork';
+  /** 0-based turn index where the fork occurred (set on `migratedFrom` only). */
+  forkedAtTurn?: number;
 }
 
 export interface WorkspaceEntry {
@@ -262,6 +291,9 @@ export interface RichMessage {
   role: 'user' | 'assistant';
   text: string;
   blocks: MessageBlock[];
+  /** Per-turn token usage snapshot for assistant messages. Null when the
+   *  driver does not surface per-message usage (Codex, Gemini). */
+  usage?: StreamPreviewMeta | null;
 }
 
 export interface StreamPlanStep {
@@ -278,6 +310,10 @@ export interface StreamPreviewMeta {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
+  /** Single-call context window occupancy. Use this for "% of context used"
+   *  displays — the cumulative inputTokens/cachedInputTokens fields above
+   *  double-count the same cached prefix on every tool roundtrip. */
+  contextUsedTokens?: number | null;
   contextPercent: number | null;
   subAgents?: StreamSubAgent[];
 }

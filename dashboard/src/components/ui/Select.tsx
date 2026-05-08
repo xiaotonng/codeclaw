@@ -5,6 +5,10 @@ import { cn } from '../../utils';
 interface SelectOption {
   value: string;
   label: string;
+  /** Secondary line shown beneath the label inside the menu only (not in the trigger). */
+  description?: string;
+  /** Right-aligned monospace tag shown next to the label inside the menu only. */
+  meta?: string;
 }
 
 interface SelectMenuStyle {
@@ -88,15 +92,18 @@ export function Select({
   }, [open]);
 
   if (isReadOnly) {
+    // Visual treatment matches a disabled <Input> — panel-alt bg, lighter edge,
+    // muted text — so any non-interactive field reads the same way regardless
+    // of whether it's a Select or an Input.
     return (
       <div
         className={cn(
-          'flex h-8 w-full items-center rounded-md border border-edge bg-panel-alt px-2.5 text-[13px] text-fg-3 shadow-[inset_0_1px_0_var(--th-inset-hl),0_1px_2px_rgba(15,23,42,0.05)]',
-          disabled && 'cursor-not-allowed opacity-50',
+          'flex h-9 w-full items-center rounded-md border border-edge bg-panel-alt px-3 text-[13px] text-fg-5 shadow-none',
+          disabled && 'cursor-not-allowed',
           className
         )}
       >
-        <span className={cn('truncate', !current && 'text-fg-5')}>{current?.label || placeholder}</span>
+        <span className={cn('truncate', !current && 'text-fg-6')}>{current?.label || placeholder}</span>
       </div>
     );
   }
@@ -130,15 +137,25 @@ export function Select({
                 aria-selected={selected}
                 onClick={() => handleSelect(option.value)}
                 className={cn(
-                  'flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors duration-200',
+                  'flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors duration-200',
                   selected
                     ? 'bg-panel text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]'
                     : 'text-fg-3 hover:bg-panel-alt hover:text-fg-2'
                 )}
               >
-                <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-2">
+                    <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                    {option.meta && (
+                      <span className="shrink-0 font-mono text-[10px] text-fg-5">{option.meta}</span>
+                    )}
+                  </div>
+                  {option.description && (
+                    <div className="mt-0.5 truncate font-mono text-[10px] leading-relaxed text-fg-5">{option.description}</div>
+                  )}
+                </div>
                 {selected && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-fg-4">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mt-0.5 shrink-0 text-fg-4">
                     <polyline points="20 6 9 17 4 12" />
                   </svg>
                 )}
@@ -160,12 +177,15 @@ export function Select({
         aria-expanded={open}
         onClick={() => setOpen(currentOpen => !currentOpen)}
         className={cn(
-          'flex h-8 w-full items-center rounded-md border border-edge bg-inset px-2.5 pr-8 text-left text-[13px] text-fg shadow-[inset_0_1px_0_var(--th-inset-hl),0_1px_2px_rgba(15,23,42,0.05)]',
+          'flex h-9 w-full items-center rounded-md border border-control-border bg-control px-3 pr-8 text-left text-[13px] text-fg shadow-sm',
           'transition-[border-color,box-shadow,background] duration-200 outline-none',
-          'hover:border-edge-h hover:bg-panel',
-          'focus-visible:border-edge-h focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
-          'disabled:cursor-not-allowed disabled:opacity-50',
-          open && 'border-edge-h bg-panel shadow-[0_0_0_4px_var(--th-glow-a)]'
+          'hover:border-control-border-h hover:bg-control-h',
+          'focus-visible:border-control-border-h focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
+          // Match Input's disabled treatment: muted bg/border/text, no shadow,
+          // no hover reaction.
+          'disabled:cursor-not-allowed disabled:bg-panel-alt disabled:border-edge disabled:text-fg-5',
+          'disabled:shadow-none disabled:hover:border-edge disabled:hover:bg-panel-alt',
+          open && 'border-control-border-h bg-control-h shadow-[0_0_0_4px_var(--th-glow-a)]'
         )}
       >
         <span className={cn('min-w-0 flex-1 truncate', !current && 'text-fg-5')}>

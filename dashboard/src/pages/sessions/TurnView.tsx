@@ -10,20 +10,23 @@ import { AssistantMsg } from './AssistantContent';
 import type { MessageBlock, StreamPreviewMeta } from '../../types';
 import type { Turn } from './utils';
 
-export const TurnView = memo(function TurnView({ turn, agent, meta, model, effort, t, onResend, onEdit }: {
-  turn: Turn; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
+export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, t, onResend, onEdit, onFork }: {
+  turn: Turn; turnIndex?: number; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
   onResend?: (text: string) => void;
   onEdit?: (text: string) => void;
+  /** When defined, the user-bubble shows a fork action that opens a fork composer scoped to this turn. */
+  onFork?: (atTurn: number) => void;
 }) {
   // Detect system continuation messages stored as user role (context compression summaries,
   // interruption markers). These should not render as user bubbles regardless of whether
   // the turn also contains an assistant response.
   const isSystemMsg = turn.user && isContinuationSummary(turn.user.text);
+  const handleFork = onFork && typeof turnIndex === 'number' ? () => onFork(turnIndex) : undefined;
 
   return (
     <div className="session-turn">
       {turn.user && !isSystemMsg && (
-        <UserBubble text={turn.user.text} blocks={turn.user.blocks} t={t} onResend={onResend} onEdit={onEdit} />
+        <UserBubble text={turn.user.text} blocks={turn.user.blocks} t={t} onResend={onResend} onEdit={onEdit} onFork={handleFork} />
       )}
       {isSystemMsg && turn.user && !turn.assistant && (
         <div className="mb-4 px-4 py-3 rounded-lg bg-[rgba(255,255,255,0.02)] border border-edge/20 text-[12.5px] leading-[1.7] text-fg-4">
@@ -32,7 +35,7 @@ export const TurnView = memo(function TurnView({ turn, agent, meta, model, effor
           </ReactMarkdown>
         </div>
       )}
-      {turn.assistant && <TurnDivider agent={agent} meta={meta} model={model} effort={effort} />}
+      {turn.assistant && <TurnDivider agent={agent} meta={meta} model={model} effort={effort} previewMeta={turn.assistant.usage ?? null} />}
       {turn.assistant && (
         <div className="mb-6">
           <AssistantMsg message={turn.assistant} t={t} />
@@ -66,17 +69,19 @@ export function ImageLightbox({ src, onClose }: { src: string; onClose: () => vo
 }
 
 /** User message bubble with actions */
-export function UserBubble({ text, blocks, t, onResend, onEdit }: {
+export function UserBubble({ text, blocks, t, onResend, onEdit, onFork }: {
   text: string;
   blocks?: MessageBlock[];
   t: (k: string) => string;
   onResend?: (text: string) => void;
   onEdit?: (text: string) => void;
+  /** When provided, hover action bar shows a fork button that branches off this turn. */
+  onFork?: () => void;
 }) {
   const [showActions, setShowActions] = useState(false);
   const [copied, setCopied] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
-  const hasActions = !!(onResend || onEdit);
+  const hasActions = !!(onResend || onEdit || onFork);
   const imageBlocks = blocks?.filter(b => b.type === 'image') || [];
 
   const handleCopy = () => {
@@ -131,6 +136,14 @@ export function UserBubble({ text, blocks, t, onResend, onEdit }: {
               </svg>
             </BubbleAction>
           )}
+          {onFork && (
+            <BubbleAction label={t('hub.fork')} onClick={onFork}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="12" cy="20" r="2" />
+                <path d="M6 8v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8" /><path d="M12 14v4" />
+              </svg>
+            </BubbleAction>
+          )}
         </div>
       )}
     </div>
@@ -158,7 +171,10 @@ export function TurnDivider({ agent, meta, model, effort, previewMeta }: {
   previewMeta?: StreamPreviewMeta | null;
 }) {
   const ctxPct = previewMeta?.contextPercent ?? null;
-  const ctxTokens = (previewMeta?.inputTokens ?? 0) + (previewMeta?.cachedInputTokens ?? 0);
+  // Use the per-call context occupancy (input + cache_read + cache_creation
+  // for the latest LLM call) — NOT the cumulative inputTokens/cachedInputTokens,
+  // which double-count the same cached prefix on every tool roundtrip.
+  const ctxTokens = previewMeta?.contextUsedTokens ?? 0;
   const showCtx = ctxPct != null || ctxTokens > 0;
   return (
     <div className="flex items-center gap-1.5 mt-1 mb-3">

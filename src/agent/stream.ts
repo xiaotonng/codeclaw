@@ -10,16 +10,15 @@ import { fileURLToPath } from 'node:url';
 import { terminateProcessTree } from '../core/process-control.js';
 import { AGENT_DETECT_TIMEOUTS, AGENT_STREAM_HARD_KILL_GRACE_MS } from '../core/constants.js';
 import { getDriver, allDrivers } from './driver.js';
+import { resolveAgentInjection, getActiveProfile, getProvider, getProviderModelList, updateProfile } from '../model/index.js';
 import type {
   Agent, AgentDetectOptions, AgentInfo, AgentListResult,
-  AgentInteraction, AgentInteractionQuestion,
   StreamOpts, StreamResult, CodexCumulativeUsage,
   ModelListOpts, ModelListResult, UsageOpts, UsageResult,
   SessionListOpts, SessionListResult, SessionTailOpts, SessionTailResult,
   SessionMessagesOpts, SessionMessagesResult,
   StreamPreviewMeta, StreamSubAgent,
 } from './types.js';
-import type { McpAskUserCallback } from './mcp/bridge.js';
 import {
   Q, agentLog, agentWarn, agentError, joinErrorMessages, normalizeErrorMessage,
   buildStreamPreviewMeta, computeContext, shortValue, isPendingSessionId, dedupeStrings,
@@ -28,7 +27,7 @@ import {
 import {
   saveSessionRecord, setSessionRunState, applySessionRunResult,
   ensureSessionWorkspace, importFilesIntoWorkspace, syncManagedSessionIdentity,
-  summarizePromptTitle,
+  summarizePromptTitle, recordFork,
 } from './session.js';
 
 // ---------------------------------------------------------------------------
@@ -40,51 +39,6 @@ function trimSessionText(value: unknown, max = 24_000): string | null {
   if (!text) return null;
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
-}
-
-/**
- * Adapt a driver-agnostic `onInteraction` callback into the shape the MCP
- * bridge needs for the `im_ask_user` tool.  Converts the raw question/options
- * payload into an AgentInteraction and unwraps the structured answer back into
- * a plain string for the calling agent.
- */
-function buildAskUserCallback(
-  onInteraction: NonNullable<StreamOpts['onInteraction']>,
-): McpAskUserCallback {
-  return async (askOpts) => {
-    const interactionId = `ask-user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const questionId = 'answer';
-    const optionEntries = (askOpts.options || [])
-      .map(o => ({ label: o.label, description: o.description || '', value: o.label }))
-      .filter(o => o.label);
-    const question: AgentInteractionQuestion = {
-      id: questionId,
-      header: (askOpts.header || '').trim() || 'Question',
-      prompt: askOpts.question,
-      options: optionEntries.length ? optionEntries : null,
-      allowFreeform: askOpts.allowFreeform !== false,
-      secret: false,
-      allowEmpty: false,
-    };
-    const interaction: AgentInteraction = {
-      kind: 'user-input',
-      id: interactionId,
-      title: (askOpts.header || '').trim() || 'User Input',
-      hint: (askOpts.hint || '').trim() || null,
-      questions: [question],
-      resolveWith: (answers) => {
-        const first = answers[questionId]?.[0];
-        return { answer: typeof first === 'string' ? first : '' };
-      },
-    };
-    try {
-      const response = await onInteraction(interaction);
-      const answer = response?.answer;
-      return { ok: true, answer: typeof answer === 'string' ? answer : '' };
-    } catch (error: any) {
-      return { ok: false, error: error?.message || String(error) };
-    }
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -426,26 +380,29 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
   try {
     const { startMcpBridge } = await import('./mcp/bridge.js');
     const sessionDir = path.dirname(session.workspacePath);
-    // When onInteraction is wired (dashboard and/or IM channel), expose the
-    // im_ask_user MCP tool so agents can surface user-input questions through
-    // the same pathway used by Codex's native requestUserInput.
-    const askUser: import('./mcp/bridge.js').McpAskUserCallback | undefined = opts.onInteraction
-      ? buildAskUserCallback(opts.onInteraction)
-      : undefined;
+    // Pikiclaw no longer injects an MCP `im_ask_user` tool. Each driver routes
+    // its native ask-user signal directly through `opts.onInteraction`:
+    //   - Codex:  JSON-RPC `item/tool/requestUserInput` → `toAgentInteraction`
+    //   - Claude: native `AskUserQuestion` tool (CLI degrades to plain text in
+    //             non-interactive mode, which then flows back as a normal next
+    //             user message)
+    //   - Gemini/Hermes: their CLIs disable native ask-user in non-interactive
+    //             mode by design; the model picks a default and proceeds.
     bridge = await startMcpBridge({
       sessionDir,
       workspacePath: session.workspacePath,
       workdir: opts.workdir,
       stagedFiles,
       sendFile: opts.mcpSendFile,
-      askUser,
       agent: opts.agent,
       onLog: (message: string) => agentLog(`[mcp] ${message}`),
     });
     if (bridge) {
       prepared.mcpConfigPath = bridge.configPath;
+      if (bridge.mcpServers) prepared.mcpServers = bridge.mcpServers;
       if (bridge.extraEnv) prepared.extraEnv = { ...(prepared.extraEnv || {}), ...bridge.extraEnv };
       if (bridge.configPath) agentLog(`[mcp] bridge started on ${bridge.configPath}`);
+      else if (bridge.mcpServers) agentLog(`[mcp] bridge registered with ${Object.keys(bridge.mcpServers).length} server(s)`);
       else agentLog('[mcp] bridge registered with codex');
       try { agentLog(`[mcp] config content:\n${fs.readFileSync(bridge.configPath, 'utf-8')}`); } catch {};
     }
@@ -453,10 +410,50 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
     agentWarn(`[mcp] bridge start failed: ${e.message} — proceeding without MCP`);
   }
 
+  // Apply BYOK injection (Provider/Profile from the model layer): merges env
+  // vars into prepared.extraEnv, overrides the per-agent model field, and
+  // hands argvAppend to drivers that consume it (Hermes via opts.extraEnv → its own argv builder).
+  try {
+    const injection = await resolveAgentInjection(prepared.agent);
+    if (injection) {
+      prepared.extraEnv = { ...(prepared.extraEnv || {}), ...injection.env };
+      if (injection.modelOverride) {
+        if (prepared.agent === 'claude') prepared.claudeModel = injection.modelOverride;
+        else if (prepared.agent === 'codex') prepared.codexModel = injection.modelOverride;
+        else if (prepared.agent === 'gemini') prepared.geminiModel = injection.modelOverride;
+        else if (prepared.agent === 'hermes') prepared.hermesModel = injection.modelOverride;
+        prepared.model = injection.modelOverride;
+      }
+      if (injection.argvAppend?.length) {
+        prepared.byokArgvAppend = injection.argvAppend;
+      }
+      agentLog(`[byok] ${injection.detail}`);
+    }
+  } catch (e: any) {
+    agentWarn(`[byok] failed to apply Profile injection: ${e?.message || e}`);
+  }
+
   try {
     const driver = getDriver(prepared.agent);
+    if (opts.forkOf && !driver.capabilities?.fork) {
+      throw new Error(`Agent ${prepared.agent} does not support fork`);
+    }
     const result = await driver.doStream(prepared);
-    return finalizeStreamResult(result, opts.workdir, opts.prompt, session);
+    const finalized = finalizeStreamResult(result, opts.workdir, opts.prompt, session);
+    // Once the child has its real session ID, link the lineage. We do this
+    // after finalize so the child record is persisted with its native ID.
+    if (opts.forkOf && finalized.sessionId) {
+      try {
+        recordFork(opts.workdir, {
+          parent: { agent: opts.agent, sessionId: opts.forkOf.parentSessionId },
+          child: { agent: opts.agent, sessionId: finalized.sessionId },
+          atTurn: opts.forkOf.atTurn,
+        });
+      } catch (e: any) {
+        agentWarn(`[fork] recordFork failed: ${e?.message || e}`);
+      }
+    }
+    return finalized;
   } catch (error: any) {
     const failedResult: StreamResult = {
       ok: false,
@@ -522,6 +519,76 @@ export function listModels(agent: Agent, opts: ModelListOpts = {}): Promise<Mode
   return getDriver(agent).listModels(opts);
 }
 
+/**
+ * Resolve the model list a UI surface should show for `agent`.
+ *
+ * If the agent has an active BYOK Profile, the bound provider's `/models`
+ * response wins — every model the user can pick is one the provider exposes.
+ * Otherwise we fall back to the agent driver's native list.
+ *
+ * Used by the dashboard agent-status response and the IM `/models` command so
+ * both surfaces stay consistent with the configured provider binding.
+ */
+export async function resolveAgentModels(agent: Agent, opts: ModelListOpts = {}): Promise<ModelListResult> {
+  const profile = getActiveProfile(agent);
+  if (!profile) return getDriver(agent).listModels(opts);
+
+  const provider = getProvider(profile.providerId);
+  if (!provider) return getDriver(agent).listModels(opts);
+
+  try {
+    const result = await getProviderModelList(provider.id);
+    if (result && result.models.length > 0) {
+      return {
+        agent,
+        models: result.models.map(id => ({ id, alias: null })),
+        sources: [`${provider.name} · ${provider.baseURL}`],
+        note: `Provider-bound models. ${result.fromCache ? 'Cached' : 'Live'}.`,
+      };
+    }
+  } catch {
+    /* fall through to driver */
+  }
+
+  // Provider unreachable or returned 0 models — let the user still pick the
+  // currently-bound id by surfacing it as a single-entry list.
+  return {
+    agent,
+    models: profile.modelId ? [{ id: profile.modelId, alias: null }] : [],
+    sources: [`${provider.name} · unreachable`],
+    note: 'Could not enumerate provider models. Showing bound model only.',
+  };
+}
+
 export function getUsage(opts: UsageOpts): UsageResult {
   return getDriver(opts.agent).getUsage(opts);
+}
+
+/**
+ * If the user has a BYOK Profile bound to `agent`, return its raw modelId
+ * (e.g. "deepseek/deepseek-v4-flash"). Returns null when no profile is bound.
+ * Used by display paths that need to show the profile's model rather than the
+ * pikiclaw user-config model (which may be stale or unrelated to the active profile).
+ */
+export function getAgentBoundModelId(agent: Agent): string | null {
+  const profile = getActiveProfile(agent);
+  return profile?.modelId ?? null;
+}
+
+/**
+ * Persist a model id to the active BYOK Profile for `agent`. Returns true when
+ * the Profile was updated (caller should skip writing the legacy
+ * `<agent>Model` user-config field), false when no Profile is bound.
+ *
+ * Hermes uses this as the *primary* persistence path because `hermes acp` does
+ * not support runtime model switching via CLI flags — the only way to change
+ * the model is the Profile (which the driver passes to ACP `session/set_model`).
+ */
+export function setAgentBoundModelId(agent: Agent, modelId: string): boolean {
+  const profile = getActiveProfile(agent);
+  if (!profile) return false;
+  const trimmed = modelId.trim();
+  if (!trimmed || trimmed === profile.modelId) return true;
+  updateProfile(profile.id, { modelId: trimmed });
+  return true;
 }

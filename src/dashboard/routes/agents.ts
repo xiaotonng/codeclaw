@@ -8,10 +8,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getAgentInstallCommand, getAgentLabel, getAgentPackage } from '../../agent/npm.js';
 import { loadUserConfig, saveUserConfig, applyUserConfig, type UserConfig } from '../../core/config/user-config.js';
-import { listModels, type AgentDetectOptions, type UsageResult } from '../../agent/index.js';
+import { resolveAgentModels, setAgentBoundModelId, type AgentDetectOptions, type UsageResult } from '../../agent/index.js';
 import { getAgentUpdateState, checkAgentLatestVersion, manualAgentUpdate } from '../../agent/auto-update.js';
 import type { Agent } from '../../agent/index.js';
-import { getDriver } from '../../agent/driver.js';
+import { getDriver, getDriverCapabilities } from '../../agent/driver.js';
 import { DASHBOARD_TIMEOUTS } from '../../core/constants.js';
 import { withTimeoutFallback } from '../../core/utils.js';
 import { runtime } from '../runtime.js';
@@ -154,19 +154,23 @@ async function buildAgentStatusResponse(config = loadUserConfig(), agentOptions:
       };
     }
 
-    const selectedModel = runtime.getRuntimeModel(agentId, config);
-    const selectedEffort = runtime.getRuntimeEffort(agentId, config);
+    const runtimeSelectedModel = runtime.getRuntimeModel(agentId, config);
+    const runtimeSelectedEffort = runtime.getRuntimeEffort(agentId, config);
     let models: { id: string; alias: string | null }[] = [];
     let usage: UsageResult = emptyUsage(agentId, 'Agent not installed.');
+    let nativeConfig: ReturnType<NonNullable<ReturnType<typeof getDriver>['getNativeConfig']>> = null;
 
     if (agentState.installed) {
-      const modelFallback = selectedModel ? [{ id: selectedModel, alias: null }] : [];
       try {
         const driver = getDriver(agentId);
-        const cachedUsage = driver.getUsage({ agent: agentId, model: selectedModel });
+        if (driver.getNativeConfig) {
+          try { nativeConfig = driver.getNativeConfig(); } catch { /* tolerate driver errors */ }
+        }
+        const modelFallback = runtimeSelectedModel ? [{ id: runtimeSelectedModel, alias: null }] : [];
+        const cachedUsage = driver.getUsage({ agent: agentId, model: runtimeSelectedModel });
         const [resolvedModels, resolvedUsage] = await Promise.all([
           withTimeoutFallback(
-            listModels(agentId, { workdir, currentModel: selectedModel }).then(result => dedupeModels([
+            resolveAgentModels(agentId, { workdir, currentModel: runtimeSelectedModel }).then(result => dedupeModels([
               ...modelFallback,
               ...result.models,
             ])),
@@ -175,7 +179,7 @@ async function buildAgentStatusResponse(config = loadUserConfig(), agentOptions:
           ),
           driver.getUsageLive
             ? withTimeoutFallback(
-              driver.getUsageLive({ agent: agentId, model: selectedModel }),
+              driver.getUsageLive({ agent: agentId, model: runtimeSelectedModel }),
               AGENT_STATUS_USAGE_TIMEOUT_MS,
               cachedUsage,
             )
@@ -189,6 +193,13 @@ async function buildAgentStatusResponse(config = loadUserConfig(), agentOptions:
       }
     }
 
+    // Effective model/effort surfaced to the UI:
+    //   1) explicit pikiclaw runtime override wins
+    //   2) otherwise fall back to the driver's native config (e.g. ~/.hermes/config.yaml)
+    //   3) otherwise null
+    const selectedModel = runtimeSelectedModel || nativeConfig?.model || null;
+    const selectedEffort = runtimeSelectedEffort || nativeConfig?.effort || null;
+
     const updateState = getAgentUpdateState(agentId);
 
     return {
@@ -198,6 +209,8 @@ async function buildAgentStatusResponse(config = loadUserConfig(), agentOptions:
       isDefault: agentId === defaultAgent,
       models,
       usage,
+      nativeConfig,
+      capabilities: getDriverCapabilities(agentId),
       latestVersion: updateState?.latestVersion || null,
       updateAvailable: updateState?.updateAvailable || false,
       updateStatus: updateState?.status || null,
@@ -339,6 +352,12 @@ app.post('/api/runtime-agent', async (c) => {
       if (targetAgent === 'claude') nextConfig.claudeModel = model;
       if (targetAgent === 'codex') nextConfig.codexModel = model;
       if (targetAgent === 'gemini') nextConfig.geminiModel = model;
+      if (targetAgent === 'hermes') {
+        // Prefer the active BYOK Profile (the only surface `hermes acp` honors
+        // at runtime); fall back to the legacy `hermesModel` field only when no
+        // Profile is bound, so older configs keep working.
+        if (!setAgentBoundModelId('hermes', model)) nextConfig.hermesModel = model;
+      }
       if (botRef) botRef.setModelForAgent(targetAgent, model);
     }
     if (effort) {
@@ -347,6 +366,7 @@ app.post('/api/runtime-agent', async (c) => {
       if (targetAgent === 'claude') nextConfig.claudeReasoningEffort = effort;
       if (targetAgent === 'codex') nextConfig.codexReasoningEffort = effort;
       if (targetAgent === 'gemini') nextConfig.geminiReasoningEffort = effort;
+      if (targetAgent === 'hermes') nextConfig.hermesReasoningEffort = effort;
       if (botRef) botRef.setEffortForAgent(targetAgent, effort);
     }
   }

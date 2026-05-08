@@ -478,7 +478,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const shortModel = displayModel ? shortenModel(displayModel) : '';
   const cascadeLabel = [
     displayMeta.shortLabel,
-    shortModel ? (shortModel.length > 18 ? shortModel.slice(0, 18) + '\u2026' : shortModel) : null,
+    shortModel || null,
     displayEffort ? displayEffort.charAt(0).toUpperCase() + displayEffort.slice(1) : null,
   ].filter(Boolean).join(' / ');
 
@@ -673,6 +673,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
               ref={triggerRef}
               onClick={toggleCascade}
               disabled={!agents.length}
+              title={agents.length ? cascadeLabel : undefined}
               className={cn(
                 'flex items-center gap-1.5 h-[28px] px-2.5 rounded-lg text-[11px] font-medium transition-all duration-200 select-none',
                 cascadeStep !== 'closed'
@@ -683,7 +684,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
               {agents.length
                 ? <BrandIcon brand={displayAgent} size={12} />
                 : <Spinner className="h-3 w-3" />}
-              <span className="max-w-[320px] truncate">{agents.length ? cascadeLabel : t('hub.selectAgent')}</span>
+              <span className="max-w-[420px] truncate">{agents.length ? cascadeLabel : t('hub.selectAgent')}</span>
               <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
                 className={cn('text-fg-5/30 transition-transform duration-200', cascadeStep !== 'closed' && 'rotate-180')}>
                 <polyline points="6 9 12 15 18 9" />
@@ -694,14 +695,24 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             {cascadeStep !== 'closed' && cascadePos && createPortal(
               <div
                 id="cascade-portal"
-                className="fixed z-[200] w-[220px] rounded-xl border border-edge/40 bg-[var(--th-dropdown)] backdrop-blur-xl shadow-lg overflow-hidden animate-in"
+                className="fixed z-[200] w-[300px] rounded-xl border border-edge/40 bg-[var(--th-dropdown)] backdrop-blur-xl shadow-lg overflow-hidden animate-in"
                 style={{ left: cascadePos.left, bottom: cascadePos.bottom }}
               >
                 {/* Step header */}
                 <div className="flex items-center gap-2 px-3 pt-2.5 pb-1.5 border-b border-edge/20">
                   {cascadeStep !== 'agent' && (
                     <button
-                      onClick={() => setCascadeStep(cascadeStep === 'effort' ? 'model' : 'agent')}
+                      onClick={() => {
+                        if (cascadeStep === 'effort') {
+                          // For agents that don't support model switching the
+                          // model step was skipped on the way in, so back from
+                          // effort goes straight to agent.
+                          const supportsModelSwitch = cascadeAgent?.capabilities?.modelSwitch !== false;
+                          setCascadeStep(supportsModelSwitch ? 'model' : 'agent');
+                        } else {
+                          setCascadeStep('agent');
+                        }
+                      }}
                       className="p-0.5 rounded text-fg-5/50 hover:text-fg-3 transition-colors"
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
@@ -713,12 +724,19 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                     {cascadeStep === 'agent' ? t('hub.selectAgent') : cascadeStep === 'model' ? t('hub.selectModel') : t('hub.selectEffort')}
                   </span>
                   <div className="ml-auto flex items-center gap-0.5">
-                    {(['agent', 'model', 'effort'] as const).map((step, idx) => (
-                      <span key={step} className={cn(
-                        'w-1.5 h-1.5 rounded-full transition-colors',
-                        cascadeStep === step ? 'bg-primary' : idx < ['agent', 'model', 'effort'].indexOf(cascadeStep) ? 'bg-primary/40' : 'bg-fg-5/15',
-                      )} />
-                    ))}
+                    {(() => {
+                      const supportsModelSwitch = cascadeAgent?.capabilities?.modelSwitch !== false;
+                      const steps = supportsModelSwitch
+                        ? (['agent', 'model', 'effort'] as const)
+                        : (['agent', 'effort'] as const);
+                      const activeIdx = steps.indexOf(cascadeStep as any);
+                      return steps.map((step, idx) => (
+                        <span key={step} className={cn(
+                          'w-1.5 h-1.5 rounded-full transition-colors',
+                          cascadeStep === step ? 'bg-primary' : idx < activeIdx ? 'bg-primary/40' : 'bg-fg-5/15',
+                        )} />
+                      ));
+                    })()}
                   </div>
                 </div>
 
@@ -731,6 +749,16 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                         setPendingAgent(a.agent);
                         setPendingModel(a.selectedModel || '');
                         setPendingEffort(a.selectedEffort || '');
+                        // Agents that lock the model at profile-binding time skip the
+                        // model step. We jump straight to effort (or close if the
+                        // agent has no effort knob either).
+                        const supportsModelSwitch = a.capabilities?.modelSwitch !== false;
+                        if (!supportsModelSwitch) {
+                          const efforts = EFFORT_OPTIONS[a.agent as keyof typeof EFFORT_OPTIONS] || [];
+                          if (efforts.length) setCascadeStep('effort');
+                          else { void applyCascade(a.agent, a.selectedModel || '', null); }
+                          return;
+                        }
                         setCascadeStep('model');
                       }}>
                         <BrandIcon brand={a.agent} size={14} />
@@ -750,7 +778,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                           }
                           void applyCascade(finalAgent, m.id, null);
                         }}>
-                          <span className="font-mono text-[11px]">{m.id}</span>
+                          <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={m.id}>{m.id}</span>
                         </CascadeItem>
                       ))}
                       {models.length === 0 && <div className="px-3 py-3 text-[11px] text-fg-5 text-center">{t('config.noModel')}</div>}

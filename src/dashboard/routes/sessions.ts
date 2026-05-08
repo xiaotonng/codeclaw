@@ -13,6 +13,7 @@ import {
   cancelSessionTask,
   getSessionStreamState,
   queueDashboardSessionTask,
+  forkDashboardSessionTask,
   steerSessionTask,
   interactionSelectOption,
   interactionSubmitText,
@@ -550,6 +551,39 @@ app.get('/api/session-hub/session/stream-state', (c) => {
     return c.json({ ok: false, error: 'agent and sessionId query params required' }, 400);
   }
   return c.json(getSessionStreamState(agent, sessionId));
+});
+
+// Fork: branch off a parent session at `atTurn`, queue the new prompt against
+// the freshly forked child. Returns the queued task + the pending child session
+// key so the dashboard can navigate the user into the child immediately.
+app.post('/api/session-hub/session/fork', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { workdir, agent, sessionId, atTurn, prompt, model, effort, attachments } = body || {};
+    if (!workdir || !agent || !sessionId || typeof atTurn !== 'number' || !prompt) {
+      return c.json({ ok: false, error: 'workdir, agent, sessionId, atTurn (number), and prompt are required' }, 400);
+    }
+    const queued = forkDashboardSessionTask({
+      workdir,
+      agent,
+      parentSessionId: sessionId,
+      atTurn,
+      prompt,
+      model: model || null,
+      effort: effort || null,
+      attachments: Array.isArray(attachments) ? attachments : [],
+    });
+    if (!queued.ok) {
+      const status = queued.error === 'Bot is not running' ? 503 : 400;
+      return c.json(queued, status);
+    }
+    runtime.debug(
+      `[session-fork] queued task=${queued.taskId} parent=${agent}:${sessionId} child=${queued.sessionKey} atTurn=${atTurn}`
+    );
+    return c.json(queued);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
 });
 
 app.post('/api/session-hub/session/recall', async (c) => {

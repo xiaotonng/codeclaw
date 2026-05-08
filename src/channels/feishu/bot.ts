@@ -38,6 +38,7 @@ import {
   getSessionTurnPreviewData,
   getStatusDataAsync,
   getHostDataSync,
+  getWorkspacesData,
   resolveSkillPrompt,
 } from '../../bot/commands.js';
 import {
@@ -68,6 +69,7 @@ import {
   renderStatus,
   renderHost,
   buildSwitchWorkdirCard,
+  buildWorkspacesCard,
   resolveFeishuRegisteredPath,
 } from './render.js';
 import { currentHumanLoopQuestion, humanLoopOptionSelected, type HumanLoopPromptState } from '../../bot/human-loop.js';
@@ -487,7 +489,14 @@ export class FeishuBot extends Bot {
 
     const wd = this.chatWorkdir(ctx.chatId);
     const browsePath = path.dirname(wd);
-    const view = buildSwitchWorkdirCard(wd, browsePath);
+    const savedCount = getWorkspacesData(this, ctx.chatId).workspaces.length;
+    const view = buildSwitchWorkdirCard(wd, browsePath, 0, { savedWorkspaceCount: savedCount });
+    await ctx.channel.sendCard(ctx.chatId, view);
+  }
+
+  private async cmdWorkspaces(ctx: FeishuContext) {
+    const data = getWorkspacesData(this, ctx.chatId);
+    const view = buildWorkspacesCard(data);
     await ctx.channel.sendCard(ctx.chatId, view);
   }
 
@@ -671,8 +680,12 @@ export class FeishuBot extends Bot {
     const queuePosition = waiting ? this.getQueuePosition(session.key, taskId) : 0;
     const placeholderKeyboard = this.buildStopKeyboard(this.actionIdForTask(taskId), { queued: waiting });
 
-    const model = session.modelId || this.modelForAgent(session.agent);
-    const effort = this.effortForAgent(session.agent);
+    // Use the canonical resolver so the labels in the IM card match what
+    // runStream actually invokes the agent with (and what the dashboard's
+    // `start` event reports).
+    const startConfig = this.resolveSessionStreamConfig(session);
+    const model = startConfig.model;
+    const effort = startConfig.effort;
     const placeholderId = await this.channel.send(ctx.chatId, buildInitialPreviewMarkdown(session.agent, model, effort, waiting, queuePosition), {
       replyTo: ctx.messageId || undefined,
       keyboard: placeholderKeyboard,
@@ -713,6 +726,8 @@ export class FeishuBot extends Bot {
             canSendTyping: false,
             parseMode: 'Markdown',
             keyboard: runningKeyboard,
+            model,
+            effort,
             log: (message: string) => this.debug(message),
           });
           livePreview.start();
@@ -889,6 +904,7 @@ export class FeishuBot extends Bot {
         case 'status':   await this.cmdStatus(ctx); return;
         case 'host':     await this.cmdHost(ctx); return;
         case 'switch':   await this.cmdSwitch(ctx, args); return;
+        case 'workspaces': await this.cmdWorkspaces(ctx); return;
         case 'restart':  await this.cmdRestart(ctx); return;
         default:
           // Skill commands
@@ -938,6 +954,7 @@ export class FeishuBot extends Bot {
       if (await this.handleTaskSteerCallback(data, ctx)) return;
       if (await this.handleSwitchNavigateCallback(data, ctx)) return;
       if (await this.handleSwitchSelectCallback(data, ctx)) return;
+      if (await this.handleWorkspacesCallback(data, ctx)) return;
 
       const action = decodeCommandAction(data);
       if (!action) return;
@@ -1029,6 +1046,26 @@ export class FeishuBot extends Bot {
       `**Workdir**\n● \`${oldPath}\`\n→ \`${dirPath}\``,
     );
     return true;
+  }
+
+  private async handleWorkspacesCallback(data: string, ctx: FeishuCallbackContext): Promise<boolean> {
+    if (data.startsWith('wsp:p:')) {
+      const page = parseInt(data.slice('wsp:p:'.length), 10) || 0;
+      const view = buildWorkspacesCard(getWorkspacesData(this, ctx.chatId), page);
+      await ctx.channel.editCard(ctx.chatId, ctx.messageId, view);
+      return true;
+    }
+    if (data.startsWith('wsp:s:')) {
+      const dirPath = resolveFeishuRegisteredPath(parseInt(data.slice('wsp:s:'.length), 10));
+      if (!dirPath || !fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) return true;
+      const oldPath = this.switchWorkdir(dirPath);
+      await ctx.editReply(
+        ctx.messageId,
+        `**Workdir**\n● \`${oldPath}\`\n→ \`${dirPath}\``,
+      );
+      return true;
+    }
+    return false;
   }
 
   private async previewCurrentSessionTurn(chatId: string, agent: Agent, sessionId: string | null) {

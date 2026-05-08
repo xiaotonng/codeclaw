@@ -8,7 +8,7 @@ import { execSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { registerDriver, type AgentDriver } from '../driver.js';
 import {
-  type StreamOpts, type StreamResult, type StreamPreviewPlan, type StreamSubAgent,
+  type StreamOpts, type StreamResult, type StreamPreviewPlan, type StreamPreviewMeta, type StreamSubAgent,
   type SessionListResult, type SessionTailOpts, type SessionTailResult,
   type SessionMessagesOpts, type SessionMessagesResult,
   type TailMessage, type RichMessage, type MessageBlock,
@@ -70,7 +70,16 @@ function claudeCmd(o: StreamOpts): string[] {
   const model = normalizeClaudeModelId(o.claudeModel);
   if (model) args.push('--model', model);
   if (o.claudePermissionMode) args.push('--permission-mode', o.claudePermissionMode);
-  if (o.sessionId) args.push('--resume', o.sessionId);
+  // Fork: branch off the parent's full history into a fresh sessionId. The
+  // claude CLI exposes this via `--resume <parent> --fork-session`; the new
+  // session inherits the parent's transcript and gets its own JSONL file.
+  // We record `forkedAtTurn` as lineage metadata only — the agent's actual
+  // context is the full parent history.
+  if (o.forkOf) {
+    args.push('--resume', o.forkOf.parentSessionId, '--fork-session');
+  } else if (o.sessionId) {
+    args.push('--resume', o.sessionId);
+  }
   if (claudeUsesStreamJsonInput(o)) {
     args.push('--input-format', 'stream-json');
     if (o.onSteerReady) args.push('--replay-user-messages');
@@ -78,6 +87,13 @@ function claudeCmd(o: StreamOpts): string[] {
   }
   if (o.thinkingEffort) args.push('--effort', o.thinkingEffort);
   if (o.claudeAppendSystemPrompt) args.push('--append-system-prompt', o.claudeAppendSystemPrompt);
+  // We allow Claude's native `AskUserQuestion` tool to fire. In `-p` mode the
+  // CLI self-resolves it with `is_error=true content="Answer questions?"` after
+  // a short timeout (no input back-channel exists for in-turn answers), and
+  // Claude then degrades gracefully by re-asking the question as plain text in
+  // the same turn. The user replies normally in the next turn — i.e. the
+  // chat-style multi-turn flow is the answer channel. We do NOT inject a
+  // bespoke MCP `im_ask_user` tool any more; see `src/agent/mcp/bridge.ts`.
   if (o.mcpConfigPath) args.push('--mcp-config', o.mcpConfigPath);
   if (o.claudeExtraArgs?.length) args.push(...o.claudeExtraArgs);
   return args;
@@ -110,6 +126,58 @@ function routeClaudeSubAgentEvent(ev: any, t: string, parentToolUseId: string, s
       sub.tools.push({ id: toolId, name: toolName, summary });
     }
   }
+}
+
+function buildClaudeTurnUsage(u: { input: number | null; output: number | null; cacheRead: number | null; cacheCreation: number | null; model: string | null }): StreamPreviewMeta | null {
+  if (u.input == null && u.output == null && u.cacheRead == null && u.cacheCreation == null) return null;
+  const ctxWindow = claudeContextWindowFromModel(u.model);
+  const used = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheCreation ?? 0);
+  const contextPercent = ctxWindow && used > 0
+    ? Math.min(99.9, Math.round(used / ctxWindow * 1000) / 10)
+    : null;
+  return {
+    inputTokens: u.input,
+    outputTokens: u.output,
+    cachedInputTokens: u.cacheRead,
+    contextUsedTokens: used > 0 ? used : null,
+    contextPercent,
+  };
+}
+
+/** Hard cap beyond which a native Claude session is treated as idle regardless
+ *  of the last JSONL event — guards against sessions abandoned mid-turn (Ctrl-C
+ *  during a tool call, terminal crash) so they don't stick on "running". */
+const CLAUDE_NATIVE_RUNNING_HARD_CAP_MS = 5 * 60 * 1000;
+
+const CLAUDE_TURN_TERMINAL_STOP_REASONS = new Set(['end_turn', 'stop_sequence', 'max_tokens', 'refusal']);
+
+/** Inspect a native Claude JSONL to decide whether a turn is currently in
+ *  progress. Pure-mtime detection misses cases where Claude is mid-tool-use and
+ *  hasn't appended for >10s; this checks the trailing event for a non-terminal
+ *  state (user message awaiting reply, or assistant message with a non-end stop
+ *  reason like `tool_use`). */
+function isClaudeNativeSessionRunning(filePath: string, mtimeMs: number): boolean {
+  const age = Date.now() - mtimeMs;
+  if (age < SESSION_RUNNING_THRESHOLD_MS) return true;
+  if (age > CLAUDE_NATIVE_RUNNING_HARD_CAP_MS) return false;
+  const tailLines = readTailLines(filePath, 64 * 1024);
+  for (let i = tailLines.length - 1; i >= 0; i--) {
+    const line = tailLines[i];
+    if (!line || line[0] !== '{') continue;
+    let ev: any;
+    try { ev = JSON.parse(line); } catch { continue; }
+    const t = ev?.type;
+    // Skip auto-title events — they fire after a turn completes and are not a liveness signal.
+    if (t === 'ai-title' || t === 'system') continue;
+    if (t === 'user') return true;
+    if (t === 'assistant') {
+      const stop = ev?.message?.stop_reason;
+      return stop != null ? !CLAUDE_TURN_TERMINAL_STOP_REASONS.has(stop) : true;
+    }
+    // Unknown event type — be conservative.
+    return false;
+  }
+  return false;
 }
 
 function claudeContextWindowFromModel(model: unknown): number | null {
@@ -145,14 +213,27 @@ function claudeParse(ev: any, s: any) {
     const inner = ev.event || {};
     if (inner.type === 'message_start') {
       const u = inner.message?.usage;
-      s.inputTokens = u?.input_tokens ?? null;
-      s.cachedInputTokens = u?.cache_read_input_tokens ?? null;
-      s.cacheCreationInputTokens = u?.cache_creation_input_tokens ?? null;
-      s.outputTokens = null;
-      // Snapshot per-call input total so result-event cumulative values don't
-      // inflate the context-window percentage.
-      const callCtx = (u?.input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0);
+      const callInput = u?.input_tokens ?? 0;
+      const callCached = u?.cache_read_input_tokens ?? 0;
+      const callCacheCreation = u?.cache_creation_input_tokens ?? 0;
+      // Per-call input snapshot drives the context-window % indicator (the
+      // size of THIS call's prompt, not summed across calls).
+      const callCtx = callInput + callCached + callCacheCreation;
       if (callCtx > 0) s.contextUsedTokens = callCtx;
+      // Accumulate cumulative live counters across LLM calls within the turn
+      // so the running display matches the cumulative figure reported in the
+      // final `result` event. The previous behaviour reset on every call,
+      // making mid-stream values smaller than the final cumulative.
+      s.inputTokens = (s.inputTokens ?? 0) + callInput;
+      s.cachedInputTokens = (s.cachedInputTokens ?? 0) + callCached;
+      s.cacheCreationInputTokens = (s.cacheCreationInputTokens ?? 0) + callCacheCreation;
+      s.outputTokens = s.outputTokens ?? 0;
+      // Per-call running totals — message_delta reports running totals for
+      // the active call, which we translate into deltas against these.
+      s._callInput = callInput;
+      s._callCached = callCached;
+      s._callCacheCreation = callCacheCreation;
+      s._callOutput = 0;
     }
     // When a new text/thinking block starts after an earlier one (e.g. between
     // a text block and a tool_use and back to text), insert a paragraph break
@@ -176,10 +257,33 @@ function claudeParse(ev: any, s: any) {
       s.stopReason = d.stop_reason ?? s.stopReason;
       const u = inner.usage;
       if (u) {
-        if (u.input_tokens != null) s.inputTokens = u.input_tokens;
-        if (u.cache_read_input_tokens != null) s.cachedInputTokens = u.cache_read_input_tokens;
-        if (u.cache_creation_input_tokens != null) s.cacheCreationInputTokens = u.cache_creation_input_tokens;
-        if (u.output_tokens != null) s.outputTokens = u.output_tokens;
+        // message_delta reports running totals for the active call. Translate
+        // into deltas against the per-call snapshot so we add only what's new
+        // to the cumulative live counters.
+        if (u.input_tokens != null) {
+          const next = u.input_tokens;
+          const delta = Math.max(0, next - (s._callInput ?? 0));
+          if (delta) s.inputTokens = (s.inputTokens ?? 0) + delta;
+          s._callInput = next;
+        }
+        if (u.cache_read_input_tokens != null) {
+          const next = u.cache_read_input_tokens;
+          const delta = Math.max(0, next - (s._callCached ?? 0));
+          if (delta) s.cachedInputTokens = (s.cachedInputTokens ?? 0) + delta;
+          s._callCached = next;
+        }
+        if (u.cache_creation_input_tokens != null) {
+          const next = u.cache_creation_input_tokens;
+          const delta = Math.max(0, next - (s._callCacheCreation ?? 0));
+          if (delta) s.cacheCreationInputTokens = (s.cacheCreationInputTokens ?? 0) + delta;
+          s._callCacheCreation = next;
+        }
+        if (u.output_tokens != null) {
+          const next = u.output_tokens;
+          const delta = Math.max(0, next - (s._callOutput ?? 0));
+          if (delta) s.outputTokens = (s.outputTokens ?? 0) + delta;
+          s._callOutput = next;
+        }
       }
     }
     s.sessionId = ev.session_id ?? s.sessionId;
@@ -267,10 +371,18 @@ function claudeParse(ev: any, s: any) {
     s.stopReason = ev.stop_reason ?? s.stopReason;
     const u = ev.usage;
     if (u) {
-      s.inputTokens = u.input_tokens ?? s.inputTokens;
-      s.cachedInputTokens = (u.cache_read_input_tokens ?? u.cached_input_tokens) ?? s.cachedInputTokens;
-      s.cacheCreationInputTokens = u.cache_creation_input_tokens ?? s.cacheCreationInputTokens;
-      s.outputTokens = u.output_tokens ?? s.outputTokens;
+      // Prefer the larger of (our hand-summed live cumulative, result-event
+      // reported). The result event's `usage` is occasionally a single-call
+      // snapshot rather than the turn cumulative — picking the max keeps the
+      // live and final values consistent without throwing away whichever side
+      // observed more.
+      const cached = u.cache_read_input_tokens ?? u.cached_input_tokens;
+      if (u.input_tokens != null) s.inputTokens = Math.max(s.inputTokens ?? 0, u.input_tokens);
+      if (cached != null) s.cachedInputTokens = Math.max(s.cachedInputTokens ?? 0, cached);
+      if (u.cache_creation_input_tokens != null) {
+        s.cacheCreationInputTokens = Math.max(s.cacheCreationInputTokens ?? 0, u.cache_creation_input_tokens);
+      }
+      if (u.output_tokens != null) s.outputTokens = Math.max(s.outputTokens ?? 0, u.output_tokens);
     }
     const mu = ev.modelUsage;
     if (mu && typeof mu === 'object') {
@@ -297,6 +409,12 @@ function createClaudeStreamState(opts: StreamOpts) {
     cacheCreationInputTokens: null as number | null,
     contextWindow: null as number | null,
     contextUsedTokens: null as number | null,
+    // Per-call snapshots used to compute deltas across message_delta events.
+    // Reset on each message_start. Not surfaced outside the driver.
+    _callInput: 0,
+    _callCached: 0,
+    _callCacheCreation: 0,
+    _callOutput: 0,
     codexCumulative: null,
     stopReason: null as string | null,
     activity: '',
@@ -319,6 +437,10 @@ function resetClaudeTurnState(s: ReturnType<typeof createClaudeStreamState>, not
   s.cachedInputTokens = null;
   s.cacheCreationInputTokens = null;
   s.contextUsedTokens = null;
+  s._callInput = 0;
+  s._callCached = 0;
+  s._callCacheCreation = 0;
+  s._callOutput = 0;
   s.stopReason = null;
   s.activity = '';
   s.recentActivity = [];
@@ -716,6 +838,7 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
       } catch { /* ignore count errors */ }
 
       const tailQA = extractClaudeTailQA(filePath);
+      const isRunning = isClaudeNativeSessionRunning(filePath, stat.mtimeMs);
       sessions.push({
         sessionId,
         agent: 'claude',
@@ -724,8 +847,8 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
         model,
         createdAt: stat.birthtime.toISOString(),
         title,
-        running: Date.now() - stat.mtimeMs < SESSION_RUNNING_THRESHOLD_MS,
-        runState: Date.now() - stat.mtimeMs < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
+        running: isRunning,
+        runState: isRunning ? 'running' : 'completed',
         runDetail: null,
         runUpdatedAt: stat.mtime.toISOString(),
         classification: null,
@@ -945,6 +1068,10 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
     let pendingRole: 'user' | 'assistant' | null = null;
     let pendingTextParts: string[] = [];
     let pendingBlocks: MessageBlock[] = [];
+    /** Latest assistant-event usage snapshot — overwritten on each LLM call within a
+     *  turn so the flushed RichMessage carries the final call's context state, matching
+     *  the live `StreamPreviewMeta` semantics. */
+    let pendingUsage: { input: number | null; output: number | null; cacheRead: number | null; cacheCreation: number | null; model: string | null } | null = null;
     const todoWriteToolIds = new Set<string>();
     /**
      * Sub-agent blocks live in `pendingBlocks` like any other block but we keep
@@ -963,11 +1090,15 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
       const text = pendingTextParts.join('\n\n');
       if (text || pendingBlocks.length) {
         allMsgs.push({ role: pendingRole, text });
-        richMsgs.push({ role: pendingRole, text, blocks: [...pendingBlocks] });
+        const usage = pendingRole === 'assistant' && pendingUsage
+          ? buildClaudeTurnUsage(pendingUsage)
+          : null;
+        richMsgs.push({ role: pendingRole, text, blocks: [...pendingBlocks], usage });
       }
       pendingRole = null;
       pendingTextParts = [];
       pendingBlocks = [];
+      pendingUsage = null;
       subAgentBlocksById.clear();
       subAgentToolIds.clear();
     };
@@ -1063,6 +1194,18 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
         } else if (ev.type === 'assistant') {
           if (pendingRole === 'user') flush();
           pendingRole = 'assistant';
+          const u = ev.message?.usage;
+          if (u && typeof u === 'object') {
+            const numOrNull = (v: unknown) => typeof v === 'number' && Number.isFinite(v) ? v : null;
+            const prevModel: string | null = pendingUsage ? pendingUsage.model : null;
+            pendingUsage = {
+              input: numOrNull(u.input_tokens),
+              output: numOrNull(u.output_tokens),
+              cacheRead: numOrNull(u.cache_read_input_tokens),
+              cacheCreation: numOrNull(u.cache_creation_input_tokens),
+              model: typeof ev.message?.model === 'string' ? ev.message.model : prevModel,
+            };
+          }
           const text = extractClaudeText(ev.message?.content, true);
           if (text) pendingTextParts.push(text);
           const blocks = extractClaudeBlocks(ev.message?.content, true, todoWriteToolIds);
@@ -1318,6 +1461,7 @@ class ClaudeDriver implements AgentDriver {
   readonly id = 'claude';
   readonly cmd = 'claude';
   readonly thinkLabel = 'Thinking';
+  readonly capabilities = { fork: true, modelSwitch: true };
 
   async doStream(opts: StreamOpts): Promise<StreamResult> {
     return doClaudeStream(opts);

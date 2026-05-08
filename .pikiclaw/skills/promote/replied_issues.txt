@@ -50,3 +50,8 @@ https://github.com/RichardAtCT/claude-code-telegram/issues/174
 https://github.com/RichardAtCT/claude-code-telegram/issues/176
 https://github.com/chenhg5/cc-connect/issues/829
 https://github.com/anthropics/claude-code/issues/49826
+https://github.com/chenhg5/cc-connect/issues/810
+https://github.com/chenhg5/cc-connect/issues/807
+https://github.com/RichardAtCT/claude-code-telegram/issues/173
+https://github.com/a5c-ai/claude-code-telegram-bot/issues/4
+https://github.com/m1heng/clawdbot-feishu/issues/406

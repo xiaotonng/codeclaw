@@ -40,6 +40,18 @@ function hasGeminiFlag(args: string[] | undefined, names: string[]): boolean {
   });
 }
 
+// Gemini CLI's -p mode is text-only — there's no flag for binary inputs. The
+// CLI does, however, parse `@<path>` references in the prompt and inlines the
+// file's content (text or image) into the model's context. We splice those
+// references at the front of the prompt so attachments survive the trip.
+export function buildGeminiPromptText(prompt: string, attachments: string[]): string {
+  if (!attachments.length) return prompt;
+  // Quote paths that contain spaces — gemini's tokenizer reads `@"..."` as a
+  // single reference. Plain paths can be left bare for cleaner display.
+  const refs = attachments.map(p => /\s/.test(p) ? `@"${p}"` : `@${p}`).join(' ');
+  return prompt ? `${refs}\n\n${prompt}` : refs;
+}
+
 function geminiCmd(o: StreamOpts): string[] {
   const approvalMode = o.geminiApprovalMode || 'yolo';
   const sandbox = typeof o.geminiSandbox === 'boolean' ? o.geminiSandbox : false;
@@ -54,9 +66,10 @@ function geminiCmd(o: StreamOpts): string[] {
   }
   if (o.geminiExtraArgs?.length) args.push(...o.geminiExtraArgs);
   // gemini's -p requires the prompt as its value (not via stdin)
+  const userPrompt = buildGeminiPromptText(o.prompt, o.attachments || []);
   const promptText = o.geminiSystemInstruction
-    ? appendSystemPrompt(o.geminiSystemInstruction, o.prompt)
-    : o.prompt;
+    ? appendSystemPrompt(o.geminiSystemInstruction, userPrompt)
+    : userPrompt;
   args.push('-p', promptText);
   return args;
 }
@@ -235,6 +248,10 @@ function geminiParse(ev: any, s: any) {
       s.inputTokens = u.input_tokens ?? u.input ?? s.inputTokens;
       s.outputTokens = u.output_tokens ?? u.output ?? s.outputTokens;
       s.cachedInputTokens = u.cached ?? s.cachedInputTokens;
+      // Gemini's `input_tokens` is the full prompt size (cached portion is
+      // already a subset of it). Use it directly as the context-window
+      // occupancy — adding `cached` would double-count.
+      if (s.inputTokens != null) s.contextUsedTokens = s.inputTokens;
     }
     s.contextWindow = geminiContextWindowFromModel(s.model) ?? s.contextWindow;
   }

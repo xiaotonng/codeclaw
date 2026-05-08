@@ -15,6 +15,13 @@
   --th-panel-alt: rgba(15,23,42,0.34);
   --th-inset: rgba(255,255,255,0.05);
 
+  /* Form controls — distinct from --th-inset so inputs/selects read as
+     interactive instead of as a subtle inline highlight surface. */
+  --th-control-bg: rgba(255,255,255,0.06);
+  --th-control-bg-h: rgba(255,255,255,0.10);
+  --th-control-border: rgba(148,163,184,0.28);
+  --th-control-border-h: rgba(148,163,184,0.45);
+
   --th-edge: rgba(148,163,184,0.18);
   --th-edge-h: rgba(148,163,184,0.32);
 
@@ -87,6 +94,12 @@
 
   --th-edge: rgba(15,23,42,0.10);
   --th-edge-h: rgba(15,23,42,0.16);
+
+  /* Form controls — pure white in light theme so inputs read as fillable. */
+  --th-control-bg: #ffffff;
+  --th-control-bg-h: rgba(255,255,255,0.98);
+  --th-control-border: rgba(15,23,42,0.18);
+  --th-control-border-h: rgba(15,23,42,0.32);
 
   --th-primary: #0f172a;
   --th-primary-fg: #f8fafc;
@@ -161,6 +174,11 @@
 
   --color-edge: var(--th-edge);
   --color-edge-h: var(--th-edge-h);
+
+  --color-control: var(--th-control-bg);
+  --color-control-h: var(--th-control-bg-h);
+  --color-control-border: var(--th-control-border);
+  --color-control-border-h: var(--th-control-border-h);
 
   --color-primary: var(--th-primary);
   --color-primary-fg: var(--th-primary-fg);

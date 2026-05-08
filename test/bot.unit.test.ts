@@ -226,7 +226,7 @@ describe('Bot emitStream queue tracking', () => {
 });
 
 describe('Bot resetConversationForChat', () => {
-  it('aborts running and queued tasks on the previously selected session when starting a new one', () => {
+  it('clears the chat selection without interrupting running or queued tasks on the previous session', () => {
     const bot = new Bot() as any;
     const runtime = bot.upsertSessionRuntime({
       agent: 'claude',
@@ -259,16 +259,16 @@ describe('Bot resetConversationForChat', () => {
       sourceMessageId: 101,
     });
 
-    const result = bot.resetConversationForChat(1);
+    bot.resetConversationForChat(1);
 
-    expect(result).toEqual({ interruptedRunning: true, cancelledQueued: 1 });
-    expect(runningAbort).toHaveBeenCalledTimes(1);
-    expect(bot.activeTasks.get('queued-prev')?.cancelled).toBe(true);
+    expect(runningAbort).not.toHaveBeenCalled();
+    expect(bot.activeTasks.get('run-prev')?.status).toBe('running');
+    expect(bot.activeTasks.get('queued-prev')?.cancelled).toBeFalsy();
     expect(bot.chat(1).activeSessionKey).toBeNull();
     expect(bot.chat(1).sessionId).toBeNull();
   });
 
-  it('reports zero stopped tasks when the previous session is idle', () => {
+  it('clears chat selection when previous session is idle', () => {
     const bot = new Bot() as any;
     const runtime = bot.upsertSessionRuntime({
       agent: 'claude',
@@ -279,9 +279,47 @@ describe('Bot resetConversationForChat', () => {
     });
     bot.applySessionSelection(bot.chat(1), runtime);
 
-    const result = bot.resetConversationForChat(1);
+    bot.resetConversationForChat(1);
 
-    expect(result).toEqual({ interruptedRunning: false, cancelledQueued: 0 });
+    expect(bot.chat(1).activeSessionKey).toBeNull();
+  });
+});
+
+describe('Bot switchModelForChat', () => {
+  it('applies the new model to the active session inline without dropping it', () => {
+    const bot = new Bot() as any;
+    const runtime = bot.upsertSessionRuntime({
+      agent: 'claude',
+      sessionId: 'sess-active',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      workspacePath: null,
+      modelId: 'old-model',
+    });
+    bot.applySessionSelection(bot.chat(1), runtime);
+    bot.setModelForAgent('claude', 'old-model');
+
+    bot.switchModelForChat(1, 'new-model');
+
+    // Active selection preserved — user can keep talking to the same session
+    expect(bot.chat(1).activeSessionKey).toBe(runtime.key);
+    expect(bot.chat(1).sessionId).toBe('sess-active');
+    // Session + chat now both report the new model so the next runStream
+    // will pick it up regardless of which fallback layer wins
+    expect(bot.chat(1).modelId).toBe('new-model');
+    expect(runtime.modelId).toBe('new-model');
+    // Global agent default is updated too (so a brand-new session inherits)
+    expect(bot.modelForAgent('claude')).toBe('new-model');
+  });
+
+  it('updates global default even when no session is active', () => {
+    const bot = new Bot() as any;
+    bot.chat(1).agent = 'claude';
+    bot.setModelForAgent('claude', 'old-model');
+
+    bot.switchModelForChat(1, 'new-model');
+
+    expect(bot.modelForAgent('claude')).toBe('new-model');
+    expect(bot.chat(1).modelId).toBe('new-model');
     expect(bot.chat(1).activeSessionKey).toBeNull();
   });
 });

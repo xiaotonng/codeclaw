@@ -79,6 +79,8 @@ export interface UserConfig {
   codexReasoningEffort?: string;
   geminiModel?: string;
   geminiReasoningEffort?: string;
+  hermesModel?: string;
+  hermesReasoningEffort?: string;
   workdir?: string;
   workspaces?: WorkspaceEntry[];
   telegramBotToken?: string;
@@ -97,6 +99,15 @@ export interface UserConfig {
     mcp?: Record<string, McpServerConfig>;
     /** OAuth tokens keyed by MCP server id (same key as extensions.mcp). */
     mcpTokens?: Record<string, McpOAuthTokenRecord>;
+  };
+  /**
+   * Model layer — Provider+Profile abstraction for BYOK across all agents.
+   * Imported as a structural type so this file stays free of cross-layer deps.
+   */
+  models?: {
+    providers?: Record<string, unknown>;
+    profiles?: Record<string, unknown>;
+    activeProfileByAgent?: Record<string, string | null>;
   };
 }
 

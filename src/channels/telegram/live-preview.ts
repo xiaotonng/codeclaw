@@ -27,7 +27,7 @@ export interface PreviewChannel {
  */
 export interface LivePreviewRenderer {
   /** Render the initial placeholder text (e.g. "● codex · 0s"). */
-  renderInitial(agent: Agent): string;
+  renderInitial(agent: Agent, model?: string | null, effort?: string | null): string;
   /** Render the streaming preview with current state. */
   renderStream(input: StreamPreviewRenderInput): string;
 }
@@ -50,6 +50,10 @@ export interface LivePreviewOptions {
   /** Parse mode string passed to editMessage (e.g. 'HTML', 'MarkdownV2'). */
   parseMode?: string;
   keyboard?: any;
+  /** Resolved model id for the active turn — surfaced in initial + streaming footers. */
+  model?: string | null;
+  /** Resolved thinking-effort for the active turn — surfaced alongside the model. */
+  effort?: string | null;
   log?: (message: string) => void;
 }
 
@@ -72,6 +76,8 @@ export class LivePreview {
   private readonly messageThreadId?: number;
   private readonly parseMode: string;
   private readonly keyboard: any;
+  private readonly model: string | null;
+  private readonly effort: string | null;
   private readonly log: (message: string) => void;
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -102,9 +108,11 @@ export class LivePreview {
     this.messageThreadId = options.messageThreadId;
     this.parseMode = options.parseMode ?? 'HTML';
     this.keyboard = options.keyboard;
+    this.model = options.model ?? null;
+    this.effort = options.effort ?? null;
     this.log = options.log ?? (() => {});
 
-    this.initialText = this.renderer.renderInitial(this.agent);
+    this.initialText = this.renderer.renderInitial(this.agent, this.model, this.effort);
     this.lastPreview = this.initialText;
     this.lastProgressAt = this.startTimeMs;
   }
@@ -199,6 +207,8 @@ export class LivePreview {
       activity: this.latestActivity,
       meta: this.latestMeta,
       plan: this.latestPlan,
+      model: this.model,
+      effort: this.effort,
     });
   }
 

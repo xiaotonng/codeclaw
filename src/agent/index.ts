@@ -17,10 +17,12 @@
 import './drivers/claude.js';
 import './drivers/codex.js';
 import './drivers/gemini.js';
+import './drivers/hermes.js';
 
 // ── Re-export: types ────────────────────────────────────────────────────────
 export type {
   Agent, AgentDetectOptions, AgentInfo, AgentListResult,
+  AgentDriverCapabilities, SessionLineageRef,
   CodexCumulativeUsage, CodexTurnControl,
   AgentInteractionOption, AgentInteractionQuestion, AgentInteraction,
   StreamPreviewMeta, StreamPreviewPlanStep, StreamPreviewPlan, StreamSubAgent,
@@ -52,11 +54,12 @@ export {
   readTailLines, stripInjectedPrompts, sanitizeSessionUserPreviewText,
   SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE,
   isPendingSessionId,
+  sessionListDisplayTitle,
 } from './utils.js';
 
 // ── Re-export: session management ───────────────────────────────────────────
 export {
-  updateSessionMeta, promoteSessionId,
+  updateSessionMeta, promoteSessionId, recordFork,
   listPikiclawSessions, findPikiclawSession, getSessionStoredConfig,
   ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, stageSessionFiles,
   mergeManagedAndNativeSessions,
@@ -71,12 +74,12 @@ export {
 export {
   detectAgentBin, listAgents,
   run, doStream,
-  listModels, getUsage,
+  listModels, resolveAgentModels, getUsage, getAgentBoundModelId, setAgentBoundModelId,
 } from './stream.js';
 
 // ── Re-export: driver registry ──────────────────────────────────────────────
 export {
-  type AgentDriver, registerDriver, getDriver,
+  type AgentDriver, type AgentNativeConfig, registerDriver, getDriver, getDriverCapabilities,
   allDrivers, allDriverIds, hasDriver, shutdownAllDrivers,
 } from './driver.js';
 
@@ -136,3 +139,4 @@ export {
 export { doClaudeStream } from './drivers/claude.js';
 export { doCodexStream, buildCodexTurnInput, shutdownCodexServer, getCodexUsageLive } from './drivers/codex.js';
 export { doGeminiStream } from './drivers/gemini.js';
+export { doHermesStream } from './drivers/hermes.js';

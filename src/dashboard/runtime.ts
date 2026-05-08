@@ -138,7 +138,7 @@ class Runtime {
     channels: NonNullable<SetupState['channels']>;
   } | null = null;
 
-  readonly knownAgents = new Set<Agent>(['claude', 'codex', 'gemini']);
+  readonly knownAgents = new Set<Agent>(['claude', 'codex', 'gemini', 'hermes']);
 
   readonly defaultModels: Record<Agent, string> = DEFAULT_AGENT_MODELS;
 

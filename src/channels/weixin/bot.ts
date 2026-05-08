@@ -31,6 +31,7 @@ import {
   getModelsListData,
   getSessionsPageData,
   getStartData,
+  getWorkspacesData,
 } from '../../bot/commands.js';
 import { WeixinChannel, type WeixinContext, type WeixinMessagePayload } from './channel.js';
 import { getActiveUserConfig } from '../../core/config/user-config.js';
@@ -152,6 +153,7 @@ export class WeixinBot extends Bot {
           '/models [name|#] - Switch model',
           '/mode [plan|code] - Toggle plan mode (claude only)',
           '/switch [path] - Change workdir',
+          '/workspaces [#] - Pick saved workspace',
           '/sessions [new|#] - List/switch sessions',
           '/skills - List project skills',
           '/stop - Stop current task',
@@ -159,11 +161,8 @@ export class WeixinBot extends Bot {
         ].join('\n'));
         return true;
       case 'new': {
-        const stop = this.resetConversationForChat(ctx.chatId);
-        const note = stop.interruptedRunning || stop.cancelledQueued
-          ? ` (interrupted previous task${stop.cancelledQueued ? `, ${stop.cancelledQueued} queued cancelled` : ''})`
-          : '';
-        await ctx.reply(`Started a new session.${note}`);
+        this.resetConversationForChat(ctx.chatId);
+        await ctx.reply('Started a new session.');
         return true;
       }
       case 'status':
@@ -183,6 +182,9 @@ export class WeixinBot extends Bot {
         return true;
       case 'switch':
         await this.cmdSwitch(ctx, args);
+        return true;
+      case 'workspaces':
+        await this.cmdWorkspaces(ctx, args);
         return true;
       case 'sessions':
         await this.cmdSessions(ctx, args);
@@ -261,13 +263,21 @@ export class WeixinBot extends Bot {
   private async cmdAgent(ctx: WeixinContext, args: string) {
     if (!args) {
       const d = getAgentsListData(this, ctx.chatId);
-      const lines = [`Current: ${d.currentAgent}`, ''];
+      const current = d.agents.find(a => a.isCurrent);
+      const lines: string[] = [];
+      lines.push(`当前：${current ? current.label : d.currentAgent}`, '');
       for (const a of d.agents) {
-        const mark = a.isCurrent ? ' ←' : '';
-        const ver = a.version ? ` (${a.version})` : '';
-        lines.push(`${a.installed ? '✓' : '✗'} ${a.agent}${ver}${mark}`);
+        const tick = a.installed ? '✓' : '✗';
+        const head = a.versionShort
+          ? `${tick} ${a.label} · v${a.versionShort}`
+          : `${tick} ${a.label}`;
+        lines.push(a.isCurrent ? `${head}  ← 当前` : head);
+        if (a.boundProvider && a.boundModel) {
+          lines.push(`   └ ${a.boundProvider} / ${a.boundModel}`);
+        }
       }
-      lines.push('', 'Usage: /agent codex|claude|gemini');
+      const ids = d.agents.filter(a => a.installed).map(a => a.agent).join('|');
+      lines.push('', `切换：/agent ${ids || 'codex|claude|gemini|hermes'}`);
       await ctx.reply(lines.join('\n'));
       return;
     }
@@ -345,17 +355,56 @@ export class WeixinBot extends Bot {
       await ctx.reply(`Workdir switched:\n${oldPath}\n→ ${resolvedPath}`);
       return;
     }
-    await ctx.reply(`Current workdir: ${wd}\n\nUsage: /switch <path>`);
+    const savedCount = getWorkspacesData(this, ctx.chatId).workspaces.length;
+    const hint = savedCount > 0
+      ? `\n\nTip: ${savedCount} saved workspace${savedCount === 1 ? '' : 's'} — use /workspaces to pick one.`
+      : '';
+    await ctx.reply(`Current workdir: ${wd}\n\nUsage: /switch <path>${hint}`);
+  }
+
+  private async cmdWorkspaces(ctx: WeixinContext, args: string) {
+    const data = getWorkspacesData(this, ctx.chatId);
+    if (data.workspaces.length === 0) {
+      await ctx.reply(
+        'No saved workspaces yet.\n\n' +
+        'Add workspaces from the Dashboard (Sessions → Add Workspace), then use /workspaces to switch with one tap.\n\n' +
+        'You can still browse the file system with /switch <path>.',
+      );
+      return;
+    }
+
+    const trimmed = args.trim();
+    if (trimmed) {
+      const idx = parseInt(trimmed, 10);
+      if (Number.isNaN(idx) || idx < 1 || idx > data.workspaces.length) {
+        await ctx.reply(`Workspace #${trimmed} not found. Use /workspaces to list.`);
+        return;
+      }
+      const ws = data.workspaces[idx - 1];
+      if (!ws.exists) {
+        await ctx.reply(`Workspace path is missing on disk:\n${ws.path}`);
+        return;
+      }
+      const oldPath = this.switchWorkdir(ws.path);
+      await ctx.reply(`Workdir switched:\n${oldPath}\n→ ${ws.path}`);
+      return;
+    }
+
+    const lines = ['Saved workspaces:', `Current: ${data.currentWorkdir}`, ''];
+    data.workspaces.forEach((ws, i) => {
+      const marker = ws.isCurrent ? '✓' : ws.exists ? ' ' : '⚠';
+      lines.push(`${marker} ${i + 1}. ${ws.name}`);
+      lines.push(`     ${ws.path}`);
+    });
+    lines.push('', 'Usage: /workspaces <number> to switch.');
+    await ctx.reply(lines.join('\n'));
   }
 
   private async cmdSessions(ctx: WeixinContext, args: string) {
     const arg = args.trim().toLowerCase();
     if (arg === 'new') {
-      const stop = this.resetConversationForChat(ctx.chatId);
-      const note = stop.interruptedRunning || stop.cancelledQueued
-        ? ` (interrupted previous task${stop.cancelledQueued ? `, ${stop.cancelledQueued} queued cancelled` : ''})`
-        : '';
-      await ctx.reply(`Started a new session.${note}`);
+      this.resetConversationForChat(ctx.chatId);
+      await ctx.reply('Started a new session.');
       return;
     }
     const idx = parseInt(arg, 10);

@@ -23,6 +23,7 @@ import {
   mergeManagedAndNativeSessions,
   promoteSessionId,
   sanitizeSessionUserPreviewText,
+  sessionListDisplayTitle,
   shutdownCodexServer,
   stageSessionFiles,
   type StreamOpts,
@@ -976,7 +977,11 @@ process.stdout.write(JSON.stringify({ type: 'result', session_id: 'gemini-sessio
 
     expect(result.ok).toBe(true);
     expect(result.contextWindow).toBe(1_048_576);
-    expect(result.contextUsedTokens).toBe(9434);
+    // Gemini's `cached` is a subset of `input_tokens` (per Gemini API:
+    // `cached_content_token_count` is part of `prompt_token_count`), so the
+    // context occupancy is just `input_tokens` — adding `cached` would
+    // double-count the cached portion.
+    expect(result.contextUsedTokens).toBe(9302);
     expect(result.contextPercent).toBe(0.9);
   });
 
@@ -2073,5 +2078,54 @@ exit 0`;
         process.env.PATH = oldPath;
       }
     });
+  });
+});
+
+describe('sessionListDisplayTitle', () => {
+  it('prefers the session title (set from the original prompt) over lastQuestion', () => {
+    const text = sessionListDisplayTitle({
+      title: 'Refactor logger',
+      lastQuestion: 'Investigate auth bug',
+      sessionId: 'sess-1',
+    });
+    expect(text).toBe('Refactor logger');
+  });
+
+  it('does not surface sub-agent prompts that landed in lastQuestion', () => {
+    // Simulates the Task-tool case where a Claude sub-agent prompt
+    // overwrites lastQuestion mid-conversation. Title must still win.
+    const text = sessionListDisplayTitle({
+      title: 'Implement signup flow',
+      lastQuestion: 'You are a security review sub-agent. Audit auth/login.ts...',
+      sessionId: 'sess-2',
+    });
+    expect(text).toBe('Implement signup flow');
+  });
+
+  it('falls back to lastQuestion when title is missing', () => {
+    const text = sessionListDisplayTitle({
+      title: null,
+      lastQuestion: 'Fix flaky CI',
+      sessionId: 'sess-3',
+    });
+    expect(text).toBe('Fix flaky CI');
+  });
+
+  it('falls back to sessionId when both title and lastQuestion are empty', () => {
+    const text = sessionListDisplayTitle({
+      title: null,
+      lastQuestion: null,
+      sessionId: 'sess-4',
+    });
+    expect(text).toBe('sess-4');
+  });
+
+  it('skips "[Request interrupted by user]" placeholders', () => {
+    const text = sessionListDisplayTitle({
+      title: null,
+      lastQuestion: '[Request interrupted by user]',
+      sessionId: 'sess-5',
+    });
+    expect(text).toBe('sess-5');
   });
 });

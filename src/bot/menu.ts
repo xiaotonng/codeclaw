@@ -50,6 +50,7 @@ export function buildDefaultMenuCommands(agentCount: number, skills: SkillInfo[]
 
   commands.push(
     { command: 'switch', description: 'Change workdir' },
+    { command: 'workspaces', description: 'Pick saved workspace' },
     { command: 'models', description: 'Switch models' },
     { command: 'mode', description: 'Toggle plan mode' },
     { command: 'stop', description: 'Stop current session' },

@@ -12,6 +12,7 @@ import type {
   UsageResult,
   UsageWindowInfo,
   Agent,
+  SessionInfo,
 } from './types.js';
 import { writeScopedLog, type LogLevel } from '../core/logging.js';
 
@@ -192,9 +193,11 @@ export function buildStreamPreviewMeta(s: {
   contextWindow: number | null; contextUsedTokens?: number | null;
   subAgents?: ReadonlyMap<string, StreamSubAgent> | null;
 }): StreamPreviewMeta {
+  const ctx = computeContext(s);
   const meta: StreamPreviewMeta = {
     inputTokens: s.inputTokens, outputTokens: s.outputTokens,
-    cachedInputTokens: s.cachedInputTokens, contextPercent: computeContext(s).contextPercent,
+    cachedInputTokens: s.cachedInputTokens,
+    contextUsedTokens: ctx.contextUsedTokens, contextPercent: ctx.contextPercent,
   };
   if (s.subAgents && s.subAgents.size > 0) meta.subAgents = Array.from(s.subAgents.values());
   return meta;
@@ -213,6 +216,16 @@ export function summarizeClaudeToolUse(name: string, input: any): string {
     case 'WebFetch': { const u = shortValue(input?.url, 120); return u ? `Fetch ${u}` : 'Fetch web page'; }
     case 'WebSearch': { const q = shortValue(input?.query, 120); return q ? `Search web: ${q}` : 'Search web'; }
     case 'TodoWrite': return 'Update plan';
+    case 'AskUserQuestion': {
+      // Claude's built-in clarify tool. The CLI in `-p` mode self-resolves it
+      // with an error and degrades to a plain-text question in the same turn —
+      // we just surface the question text in the activity panel so users see
+      // what was asked.
+      const qs = Array.isArray(input?.questions) ? input.questions : [];
+      const first = qs[0];
+      const q = shortValue(first?.question || input?.question, 120);
+      return q ? `Ask user: ${q}` : 'Ask user';
+    }
     case 'Task': { const p = shortValue(input?.description || input?.prompt, 120); return p ? `Run task: ${p}` : 'Run task'; }
     case 'Bash': {
       if (description) return `Run shell: ${description}`;
@@ -223,10 +236,6 @@ export function summarizeClaudeToolUse(name: string, input: any): string {
       // MCP tools come through as `mcp__<server>__<tool>` — unwrap common pikiclaw tools
       const mcpMatch = tool.match(/^mcp__[^_]+__(.+)$/);
       const bare = mcpMatch ? mcpMatch[1] : tool;
-      if (bare === 'im_ask_user') {
-        const q = shortValue(input?.question, 120);
-        return q ? `Ask user: ${q}` : 'Ask user';
-      }
       if (bare === 'im_send_file') {
         const p = shortValue(input?.path, 120);
         return p ? `Send file: ${p}` : 'Send file';
@@ -385,4 +394,28 @@ export function sanitizeSessionUserPreviewText(text: string): string {
 
 export function isPendingSessionId(sessionId: string | null | undefined): boolean {
   return typeof sessionId === 'string' && sessionId.startsWith('pending_');
+}
+
+/**
+ * Canonical session-list display title used by *every* surface (IM channels
+ * + dashboard). The order is intentional:
+ *
+ *   1. `title` — set ONCE from the original user prompt that started the
+ *      session. Stable; never overwritten by sub-agent or tool prompts.
+ *   2. `lastQuestion` — most recent user message. Fallback only, because for
+ *      Claude this can be a Task-tool sub-agent prompt and we don't want
+ *      sub-agent text leaking into the title.
+ *   3. `sessionId` — last-resort identifier.
+ *
+ * The dashboard frontend (`dashboard/src/utils.ts`) mirrors this order — keep
+ * the two in sync.
+ */
+export function sessionListDisplayTitle(
+  session: Pick<SessionInfo, 'title' | 'lastQuestion' | 'sessionId'>,
+): string {
+  const title = sanitizeSessionUserPreviewText(String(session.title || ''));
+  if (title) return title;
+  const question = sanitizeSessionUserPreviewText(String(session.lastQuestion || ''));
+  if (question) return question;
+  return session.sessionId || '';
 }

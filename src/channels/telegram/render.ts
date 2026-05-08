@@ -302,12 +302,23 @@ export function renderSkillsListHtml(d: SkillsListData): string {
   return lines.join('\n');
 }
 
-export function formatPreviewFooterHtml(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null): string {
-  return escapeHtml(`${footerStatusSymbol('running')} ${formatFooterSummary(agent, elapsedMs, meta)}`);
+export function formatPreviewFooterHtml(
+  agent: Agent,
+  elapsedMs: number,
+  meta?: StreamPreviewMeta | null,
+  decorations?: { model?: string | null; effort?: string | null },
+): string {
+  return escapeHtml(`${footerStatusSymbol('running')} ${formatFooterSummary(agent, elapsedMs, meta, null, decorations)}`);
 }
 
-function formatFinalFooterHtml(status: FooterStatus, agent: Agent, elapsedMs: number, contextPercent?: number | null): string {
-  return escapeHtml(`${footerStatusSymbol(status)} ${formatFooterSummary(agent, elapsedMs, null, contextPercent ?? null)}`);
+function formatFinalFooterHtml(
+  status: FooterStatus,
+  agent: Agent,
+  elapsedMs: number,
+  contextPercent?: number | null,
+  decorations?: { model?: string | null; effort?: string | null },
+): string {
+  return escapeHtml(`${footerStatusSymbol(status)} ${formatFooterSummary(agent, elapsedMs, null, contextPercent ?? null, decorations)}`);
 }
 
 export function formatProviderUsageLines(usage: ProviderUsageSnapshot): string[] {
@@ -316,14 +327,35 @@ export function formatProviderUsageLines(usage: ProviderUsageSnapshot): string[]
   );
 }
 
-export function buildInitialPreviewHtml(agent: Agent, waiting = false, queuePosition = 0): string {
+export function buildInitialPreviewHtml(
+  agent: Agent,
+  modelOrWaiting?: string | boolean | null,
+  effortOrQueuePosition?: string | number | null,
+  waitingArg = false,
+  queuePositionArg = 0,
+): string {
+  // Backwards-compat shim: legacy calls pass `(agent, waiting, queuePosition)`,
+  // new calls pass `(agent, model, effort, waiting, queuePosition)`. Normalise
+  // both shapes here so existing tests + callsites keep working.
+  let model: string | null = null;
+  let effort: string | null = null;
+  let waiting = waitingArg;
+  let queuePosition = queuePositionArg;
+  if (typeof modelOrWaiting === 'boolean') {
+    waiting = modelOrWaiting;
+    queuePosition = typeof effortOrQueuePosition === 'number' ? effortOrQueuePosition : 0;
+  } else {
+    model = (typeof modelOrWaiting === 'string' && modelOrWaiting) ? modelOrWaiting : null;
+    effort = (typeof effortOrQueuePosition === 'string' && effortOrQueuePosition) ? effortOrQueuePosition : null;
+  }
+  const decorations = { model, effort };
   if (waiting) {
     const queueLabel = queuePosition > 0
       ? `Queued · ${queuePosition} ${queuePosition === 1 ? 'task' : 'tasks'} ahead`
       : 'Waiting in queue...';
-    return `<i>${escapeHtml(queueLabel)}</i>\n\n${formatPreviewFooterHtml(agent, 0)}`;
+    return `<i>${escapeHtml(queueLabel)}</i>\n\n${formatPreviewFooterHtml(agent, 0, null, decorations)}`;
   }
-  return formatPreviewFooterHtml(agent, 0);
+  return formatPreviewFooterHtml(agent, 0, null, decorations);
 }
 
 export function buildStreamPreviewHtml(input: StreamPreviewRenderInput): string {
@@ -347,13 +379,19 @@ export function buildStreamPreviewHtml(input: StreamPreviewRenderInput): string 
     parts.push(mdToTgHtml(data.preview));
   }
 
-  parts.push(formatPreviewFooterHtml(input.agent, input.elapsedMs, input.meta ?? null));
+  parts.push(formatPreviewFooterHtml(input.agent, input.elapsedMs, input.meta ?? null, {
+    model: input.model,
+    effort: input.effort,
+  }));
   return parts.join('\n\n');
 }
 
 export function buildFinalReplyRender(agent: Agent, result: StreamResult): FinalReplyRender {
   const data = extractFinalReplyData(agent, result);
-  const footerHtml = `\n\n${formatFinalFooterHtml(data.footerStatus, agent, data.elapsedMs, result.contextPercent ?? null)}`;
+  const footerHtml = `\n\n${formatFinalFooterHtml(data.footerStatus, agent, data.elapsedMs, result.contextPercent ?? null, {
+    model: result.model,
+    effort: result.thinkingEffort,
+  })}`;
 
   let activityHtml = '';
   let activityNoteHtml = '';

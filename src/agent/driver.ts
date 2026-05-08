@@ -11,7 +11,29 @@ import type {
   SessionMessagesOpts, SessionMessagesResult,
   ModelListOpts, ModelListResult,
   UsageOpts, UsageResult,
+  AgentDriverCapabilities,
 } from './index.js';
+
+/**
+ * Optional descriptor of an agent's *external* (non-pikiclaw) configuration.
+ *
+ * Some agents (e.g. Hermes) maintain their own provider/model state outside
+ * pikiclaw — in `~/.hermes/config.yaml` and `~/.hermes/.env`. When that's the
+ * case, `getNativeConfig()` returns a read-only snapshot so the dashboard can
+ * surface what the agent will actually run with even before the user has
+ * configured a pikiclaw-managed BYOK Provider.
+ *
+ * Pikiclaw never writes back to the source file; users edit native config via
+ * the agent's own CLI (e.g. `hermes config`).
+ */
+export interface AgentNativeConfig {
+  model: string;
+  provider: string;
+  baseURL: string | null;
+  effort: string | null;
+  configPath: string;
+  source: string;
+}
 
 export interface AgentDriver {
   readonly id: string;
@@ -19,6 +41,8 @@ export interface AgentDriver {
   readonly cmd: string;
   /** UI label for thinking/reasoning display */
   readonly thinkLabel: string;
+  /** Static capability flags. Drivers omit this to opt into all defaults (false). */
+  readonly capabilities?: AgentDriverCapabilities;
 
   doStream(opts: StreamOpts): Promise<StreamResult>;
   getSessions(workdir: string, limit?: number): Promise<SessionListResult>;
@@ -28,6 +52,8 @@ export interface AgentDriver {
   getUsage(opts: UsageOpts): UsageResult;
   /** Optional live/async usage (e.g. codex app-server). Falls back to getUsage. */
   getUsageLive?(opts: UsageOpts): Promise<UsageResult>;
+  /** Optional read-only snapshot of the agent's external config. */
+  getNativeConfig?(): AgentNativeConfig | null;
   shutdown(): void;
 }
 
@@ -51,4 +77,12 @@ export function allDriverIds(): string[] { return [...drivers.keys()]; }
 
 export function shutdownAllDrivers() {
   for (const d of drivers.values()) d.shutdown();
+}
+
+const DEFAULT_CAPABILITIES: AgentDriverCapabilities = { fork: false, modelSwitch: true };
+
+export function getDriverCapabilities(id: string): AgentDriverCapabilities {
+  const d = drivers.get(id);
+  if (!d?.capabilities) return DEFAULT_CAPABILITIES;
+  return { ...DEFAULT_CAPABILITIES, ...d.capabilities };
 }

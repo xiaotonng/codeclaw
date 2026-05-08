@@ -6,6 +6,7 @@ export { Badge, Dot, CountBadge } from './Badge';
 export { Button } from './Button';
 export { Input, Label } from './Input';
 export { Select, IconPicker } from './Select';
+export { ModelSelect } from './ModelSelect';
 export { Modal, ModalHeader } from './Modal';
 export { TabsList, TabsTrigger } from './Tabs';
 export { ChevronIcon, CollapsibleCard } from './Collapsible';
