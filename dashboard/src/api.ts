@@ -371,6 +371,33 @@ export const api = {
       { method: 'POST', body, timeoutMs: 30_000, ...opts },
     );
   },
+  /**
+   * Fork a session at `atTurn` and queue a new prompt against the freshly
+   * created child. Returns the queued task plus the child's pending sessionKey
+   * so the caller can navigate the UI into the new session immediately.
+   */
+  forkSession: (
+    workdir: string,
+    agent: string,
+    parentSessionId: string,
+    atTurn: number,
+    prompt: string,
+    options: { model?: string | null; effort?: string | null } = {},
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; queued?: boolean; taskId?: string; sessionKey?: string; error?: string }>(
+      '/api/session-hub/session/fork',
+      {
+        workdir,
+        agent,
+        sessionId: parentSessionId,
+        atTurn,
+        prompt,
+        ...(options.model ? { model: options.model } : {}),
+        ...(options.effort ? { effort: options.effort } : {}),
+      },
+      { timeoutMs: 30_000, ...opts },
+    ),
   recallSessionMessage: (taskId: string, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; recalled?: boolean; error?: string }>(
       '/api/session-hub/session/recall',

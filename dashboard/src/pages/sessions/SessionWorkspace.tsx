@@ -26,7 +26,10 @@ import { UserBubble } from './TurnView';
 import { ThinkingDots } from './LivePreview';
 import { WorkspaceExtensionsModal } from '../extensions/WorkspaceExtensionsModal';
 
-let sessionPanelModulePromise: Promise<typeof import('./SessionPanel')> | null = null;
+// Kick off SessionPanel import the moment this module loads so the lazy boundary
+// resolves before the user can compose & send a new message. The previous
+// "preload on active" effect was reactive to mount and could lose the race.
+let sessionPanelModulePromise: Promise<typeof import('./SessionPanel')> | null = import('./SessionPanel');
 
 function preloadSessionPanel() {
   sessionPanelModulePromise ??= import('./SessionPanel');
@@ -42,6 +45,57 @@ const HOVER_PREFETCH_DELAY_MS = 120;
 const SESSION_PREFETCH_TURNS = 12;
 const LIVE_SESSION_STATE_MAX_AGE_MS = 15 * 60 * 1000;
 const sKey = (agent: string, id: string) => `${agent}:${id}`;
+
+type SessionWithDepth = SessionInfo & { __forkDepth: number };
+
+/**
+ * Reorder a flat session list so fork descendants render right after their
+ * parent (with `__forkDepth` for indentation). Sessions without a `migratedFrom`
+ * fork link stay in their natural sort order; orphan forks (parent missing
+ * from the list) are demoted to top-level so they remain visible.
+ */
+function groupForkDescendants(sessions: SessionInfo[]): SessionWithDepth[] {
+  const byKey = new Map<string, SessionInfo>();
+  for (const s of sessions) byKey.set(sKey(s.agent || '', s.sessionId), s);
+
+  // Build child map: parentKey -> children that fork off it. Order children
+  // by their original index so the sidebar's most-recent-first ordering carries
+  // through within a fork family.
+  const childMap = new Map<string, SessionInfo[]>();
+  const isForkChild = new Set<string>();
+  for (const s of sessions) {
+    const from = s.migratedFrom;
+    if (!from || from.kind !== 'fork' || !from.sessionId) continue;
+    const parentKey = sKey(from.agent || s.agent || '', from.sessionId);
+    if (!byKey.has(parentKey)) continue; // orphan — fall through as top-level
+    isForkChild.add(sKey(s.agent || '', s.sessionId));
+    if (!childMap.has(parentKey)) childMap.set(parentKey, []);
+    childMap.get(parentKey)!.push(s);
+  }
+
+  const out: SessionWithDepth[] = [];
+  const seen = new Set<string>();
+  const visit = (s: SessionInfo, depth: number) => {
+    const key = sKey(s.agent || '', s.sessionId);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(Object.assign({}, s, { __forkDepth: depth }));
+    const kids = childMap.get(key);
+    if (!kids) return;
+    for (const k of kids) visit(k, depth + 1);
+  };
+  for (const s of sessions) {
+    const key = sKey(s.agent || '', s.sessionId);
+    if (isForkChild.has(key)) continue;
+    visit(s, 0);
+  }
+  // Catch any orphan children whose parent fell out of the filtered list:
+  // render them as top-level so they don't disappear.
+  for (const s of sessions) {
+    visit(s, 0);
+  }
+  return out;
+}
 
 let _slotKeySeq = 0;
 function nextMountKey() { return `mk-${Date.now().toString(36)}-${(++_slotKeySeq).toString(36)}`; }
@@ -600,7 +654,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         const prevKey = sKey(prev.agent || '', prev.sessionId);
         if (prevKey !== canonical && key === canonical) byCanonical.set(canonical, s);
       }
-      out[ws.path] = filterFn([...byCanonical.values()]);
+      const filtered = filterFn([...byCanonical.values()]);
+      // Group fork descendants under their parents: render parent first, then
+      // its fork children (recursively) right after, with `forkDepth` for the
+      // sidebar to render an indent. This relies on `migratedFrom.kind === 'fork'`
+      // — sessions without that link stay in their natural sort order.
+      out[ws.path] = groupForkDescendants(filtered);
     }
     return out;
   }, [workspaces, sessionsMap, liveSessionStates, filterFn, hydrateSession]);
@@ -869,16 +928,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                     </div>
                   </div>
                   <div className="flex-1 min-h-0">
-                    <Suspense
-                      fallback={
-                        <div className="flex h-full items-center justify-center">
-                          <div className="flex items-center gap-2 text-sm text-fg-4">
-                            <Spinner />
-                            Loading session...
-                          </div>
-                        </div>
-                      }
-                    >
+                    <Suspense fallback={<div className="h-full" />}>
                       <SessionPanel
                         key={slot.mountKey}
                         session={info}
@@ -1221,12 +1271,14 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
             <>
               {visible.map(session => {
                 const sk = sKey(session.agent || '', session.sessionId);
+                const depth = (session as SessionInfo & { __forkDepth?: number }).__forkDepth || 0;
                 return (
                   <SessionCard
                     key={sk}
                     session={session}
                     isSelected={selectedKey === sk}
                     isOpen={openSessionKeys?.has(sk) ?? false}
+                    forkDepth={depth}
                     onClick={() => onSelectSession(session, wsPath)}
                     onWarm={() => onWarmSession(session, wsPath)}
                     onCancelWarm={() => onCancelWarmSession(session, wsPath)}
@@ -1259,6 +1311,7 @@ const SessionCard = memo(function SessionCard({
   session,
   isSelected,
   isOpen,
+  forkDepth = 0,
   onClick,
   onWarm,
   onCancelWarm,
@@ -1266,6 +1319,8 @@ const SessionCard = memo(function SessionCard({
   session: SessionInfo;
   isSelected: boolean;
   isOpen?: boolean;
+  /** 0 = top-level. >0 = fork descendant; rendered with indent + connector. */
+  forkDepth?: number;
   onClick: () => void;
   onWarm: () => void;
   onCancelWarm: () => void;
@@ -1275,6 +1330,8 @@ const SessionCard = memo(function SessionCard({
   const displayText = sessionListDisplayText(session).slice(0, 500) || session.sessionId.slice(0, 16);
   const contextText = sessionListContextText(session, displayText).slice(0, 500);
   const modelShort = session.model ? shortenModel(session.model) : null;
+  const indentPx = forkDepth > 0 ? Math.min(forkDepth, 3) * 14 : 0;
+  const baseLeftPx = isOpen ? 10 : 12;
 
   return (
     <button
@@ -1284,17 +1341,26 @@ const SessionCard = memo(function SessionCard({
       onMouseLeave={onCancelWarm}
       onBlur={onCancelWarm}
       className={cn(
-        'w-full px-3 py-2 text-left transition-all duration-100',
+        'w-full pr-3 py-2 text-left transition-all duration-100',
         isSelected
           ? 'bg-selected hover:bg-selected-h'
           : isOpen
             ? 'bg-panel-h/30 hover:bg-panel-h/50'
             : 'hover:bg-panel-h/50',
       )}
-      style={isOpen ? { borderLeft: `2px solid ${isSelected ? meta.color : `${meta.color}30`}`, paddingLeft: 10 } : undefined}
+      style={{
+        paddingLeft: baseLeftPx + indentPx,
+        ...(isOpen ? { borderLeft: `2px solid ${isSelected ? meta.color : `${meta.color}30`}` } : {}),
+      }}
     >
       {/* Row 1: agent + model + turns + time */}
       <div className="flex items-center gap-1.5 text-[10px] text-fg-5">
+        {forkDepth > 0 && (
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-fg-5/60 shrink-0" aria-label="Fork">
+            <circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="12" cy="20" r="2" />
+            <path d="M6 8v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8" /><path d="M12 14v4" />
+          </svg>
+        )}
         <BrandIcon brand={session.agent || ''} size={10} />
         <span className="font-medium shrink-0" style={{ color: meta.color }}>{meta.shortLabel}</span>
         {modelShort && (

@@ -94,6 +94,16 @@ export const agentMeta: Record<string, AgentMeta> = {
     border: 'rgba(196,181,253,0.2)',
     advantageKey: 'config.agentAdvantageGemini',
   },
+  hermes: {
+    label: 'Hermes',
+    shortLabel: 'Hermes',
+    color: '#fbbf24',
+    bg: 'rgba(251,191,36,0.12)',
+    letter: 'H',
+    glow: 'rgba(251,191,36,0.2)',
+    border: 'rgba(251,191,36,0.2)',
+    advantageKey: 'config.agentAdvantageHermes',
+  },
 };
 
 export function getAgentMeta(agent: string): AgentMeta {
@@ -104,6 +114,10 @@ export const EFFORT_OPTIONS: Record<Agent, string[]> = {
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
   codex: ['low', 'medium', 'high', 'xhigh'],
   gemini: ['low', 'high'],
+  // The Hermes driver forwards the chosen value via ACP `session/set_mode`;
+  // upstream may or may not act on it depending on the bound model, but we
+  // surface the standard knob so users can change it from any picker.
+  hermes: ['low', 'medium', 'high', 'xhigh'],
 };
 
 /**
@@ -236,6 +250,17 @@ export function sanitizeSessionQuestionPreview(text?: string | null): string {
   return cleaned;
 }
 
+/**
+ * MUST stay in lock-step with `src/agent/utils.ts:sessionListDisplayTitle`
+ * (the canonical backend implementation). Same priority order, same
+ * filtering — dashboard and IM channels show identical titles for a session.
+ *
+ * Order:
+ *   1. `title`        — set ONCE from the original prompt; stable.
+ *   2. `lastQuestion` — fallback only (Claude's Task tool can overwrite this
+ *                       with sub-agent prompts; never use it as the primary).
+ *   3. `sessionId`    — last-resort identifier.
+ */
 export function sessionListDisplayText(session: Pick<SessionInfo, 'lastQuestion' | 'title' | 'sessionId'>): string {
   return cleanSessionPreviewText(session.title) || sanitizeSessionQuestionPreview(session.lastQuestion) || session.sessionId;
 }

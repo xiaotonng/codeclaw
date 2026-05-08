@@ -3,11 +3,11 @@
  */
 
 import path from 'node:path';
-import { getProjectSkillPaths, listSkills, stageSessionFiles, type Agent } from '../agent/index.js';
+import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, getDriverCapabilities, type Agent } from '../agent/index.js';
 import { loadUserConfig } from '../core/config/user-config.js';
 import { runtime } from './runtime.js';
 
-const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'gemini']);
+const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'gemini', 'hermes']);
 
 /**
  * Resolve a `/skill-name [args]` prompt into the full skill execution prompt.
@@ -96,6 +96,78 @@ export function queueDashboardSessionTask(request: QueueSessionTaskRequest) {
     sessionId,
     prompt: prompt || 'Please inspect the attached file(s).',
     attachments,
+    ...(modelId ? { modelId } : {}),
+    ...(thinkingEffort ? { thinkingEffort } : {}),
+  });
+}
+
+export interface ForkSessionTaskRequest {
+  workdir: string;
+  agent: Agent | string;
+  parentSessionId: string;
+  atTurn: number;
+  prompt: string;
+  model?: string | null;
+  effort?: string | null;
+  attachments?: string[];
+}
+
+export function forkDashboardSessionTask(request: ForkSessionTaskRequest) {
+  const bot = runtime.getBotRef();
+  if (!bot) return { ok: false as const, error: 'Bot is not running' };
+  if (!request.workdir || !request.parentSessionId || !request.prompt) {
+    return { ok: false as const, error: 'workdir, parentSessionId, and prompt are required' };
+  }
+
+  if (!KNOWN_AGENTS.has(request.agent as Agent)) {
+    return { ok: false as const, error: `Unknown agent: ${request.agent}` };
+  }
+  const agent = request.agent as Agent;
+  if (!getDriverCapabilities(agent).fork) {
+    return { ok: false as const, error: `Agent ${agent} does not support fork` };
+  }
+
+  const modelId = typeof request.model === 'string' ? request.model.trim() : '';
+  const thinkingEffort = agent === 'gemini'
+    ? ''
+    : (typeof request.effort === 'string' ? request.effort.trim().toLowerCase() : '');
+
+  // Resolve /skill-name shorthand the same way send/queue does, so a forked
+  // turn that starts with `/skill-name` runs the skill against the child.
+  let prompt = request.prompt;
+  const skillResult = prompt ? resolveSkillFromPrompt(request.workdir, prompt) : null;
+  if (skillResult) prompt = skillResult.resolvedPrompt;
+
+  // Make sure the parent has a managed record so `recordFork` (called after the
+  // child stream completes) can write the lineage on both sides. Native-only
+  // sessions (started outside pikiclaw) won't have a record yet.
+  ensureManagedSession({
+    agent,
+    workdir: request.workdir,
+    sessionId: request.parentSessionId,
+  });
+
+  // Always create a fresh pending session for the child. stageSessionFiles
+  // also handles attachment imports into the new workspace.
+  const staged = stageSessionFiles({
+    agent,
+    workdir: request.workdir,
+    files: request.attachments || [],
+    sessionId: null,
+    title: request.prompt || `Fork from ${request.parentSessionId.slice(0, 8)}`,
+    threadId: null,
+  });
+  const attachments = staged.importedFiles.length
+    ? staged.importedFiles.map(f => path.join(staged.workspacePath, f))
+    : [];
+
+  return bot.submitSessionTask({
+    workdir: request.workdir,
+    agent,
+    sessionId: staged.sessionId,
+    prompt: prompt || 'Please inspect the attached file(s).',
+    attachments,
+    forkOf: { parentSessionId: request.parentSessionId, atTurn: request.atTurn },
     ...(modelId ? { modelId } : {}),
     ...(thinkingEffort ? { thinkingEffort } : {}),
   });

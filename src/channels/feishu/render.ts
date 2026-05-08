@@ -16,7 +16,7 @@ import type {
 } from '../../bot/command-ui.js';
 import { encodeCommandAction } from '../../bot/command-ui.js';
 import { fmtUptime, fmtTokens, fmtBytes } from '../../bot/bot.js';
-import type { StartData, SessionsPageData, AgentsListData, ModelsListData, SkillsListData, StatusData, HostData } from '../../bot/commands.js';
+import type { StartData, SessionsPageData, AgentsListData, ModelsListData, SkillsListData, StatusData, HostData, WorkspacesData } from '../../bot/commands.js';
 import { summarizePromptForStatus } from '../../bot/commands.js';
 import type { LivePreviewRenderer } from '../telegram/live-preview.js';
 import type { StreamPreviewRenderInput } from '../../bot/render-shared.js';
@@ -43,12 +43,23 @@ import { listSubdirs } from '../../bot/bot.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatPreviewFooter(agent: Agent, elapsedMs: number, meta?: import('../../bot/bot.js').StreamPreviewMeta | null): string {
-  return `${footerStatusSymbol('running')} ${formatFooterSummary(agent, elapsedMs, meta)}`;
+function formatPreviewFooter(
+  agent: Agent,
+  elapsedMs: number,
+  meta?: import('../../bot/bot.js').StreamPreviewMeta | null,
+  decorations?: { model?: string | null; effort?: string | null },
+): string {
+  return `${footerStatusSymbol('running')} ${formatFooterSummary(agent, elapsedMs, meta, null, decorations)}`;
 }
 
-function formatFinalFooter(status: import('../../bot/render-shared.js').FooterStatus, agent: Agent, elapsedMs: number, contextPercent?: number | null): string {
-  return `${footerStatusSymbol(status)} ${formatFooterSummary(agent, elapsedMs, null, contextPercent ?? null)}`;
+function formatFinalFooter(
+  status: import('../../bot/render-shared.js').FooterStatus,
+  agent: Agent,
+  elapsedMs: number,
+  contextPercent?: number | null,
+  decorations?: { model?: string | null; effort?: string | null },
+): string {
+  return `${footerStatusSymbol(status)} ${formatFooterSummary(agent, elapsedMs, null, contextPercent ?? null, decorations)}`;
 }
 
 function truncateLabel(label: string, maxChars = 24): string {
@@ -257,7 +268,10 @@ function buildPreviewMarkdown(input: StreamPreviewRenderInput, options?: { inclu
   }
 
   if (options?.includeFooter !== false) {
-    parts.push(formatPreviewFooter(input.agent, input.elapsedMs, input.meta ?? null));
+    parts.push(formatPreviewFooter(input.agent, input.elapsedMs, input.meta ?? null, {
+      model: input.model,
+      effort: input.effort,
+    }));
   }
   return parts.join('\n\n');
 }
@@ -284,7 +298,10 @@ export interface FeishuFinalReplyRender {
 
 export function buildFinalReplyRender(agent: Agent, result: StreamResult): FeishuFinalReplyRender {
   const data = extractFinalReplyData(agent, result);
-  const footerText = `\n\n${formatFinalFooter(data.footerStatus, agent, data.elapsedMs, result.contextPercent ?? null)}`;
+  const footerText = `\n\n${formatFinalFooter(data.footerStatus, agent, data.elapsedMs, result.contextPercent ?? null, {
+    model: result.model,
+    effort: result.thinkingEffort,
+  })}`;
 
   let activityText = '';
   let activityNoteText = '';
@@ -542,7 +559,12 @@ export function resolveFeishuRegisteredPath(id: number): string | undefined {
   return feishuPathRegistry.resolve(id);
 }
 
-export function buildSwitchWorkdirCard(currentWorkdir: string, browsePath: string, page = 0): FeishuCardView {
+export function buildSwitchWorkdirCard(
+  currentWorkdir: string,
+  browsePath: string,
+  page = 0,
+  opts: { savedWorkspaceCount?: number } = {},
+): FeishuCardView {
   const dirs = listSubdirs(browsePath);
   const totalPages = Math.max(1, Math.ceil(dirs.length / DIR_PAGE_SIZE));
   const currentPage = Math.min(Math.max(0, page), totalPages - 1);
@@ -552,6 +574,9 @@ export function buildSwitchWorkdirCard(currentWorkdir: string, browsePath: strin
   const lines = ['**Workdir**'];
   lines.push(`● \`${currentWorkdir}\``);
   if (browsePath !== currentWorkdir) lines.push(`○ \`${browsePath}\``);
+  if (opts.savedWorkspaceCount && opts.savedWorkspaceCount > 0) {
+    lines.push('', `_Tip: ${opts.savedWorkspaceCount} saved workspace${opts.savedWorkspaceCount === 1 ? '' : 's'} — use /workspaces for one-tap switching._`);
+  }
 
   // Directory buttons (2 per row)
   const dirRows: FeishuCardActionRow[] = [];
@@ -587,6 +612,49 @@ export function buildSwitchWorkdirCard(currentWorkdir: string, browsePath: strin
     ...(navActions.length ? [{ actions: navActions }] : []),
     { actions: selectActions },
   ];
+
+  return { markdown: lines.join('\n'), rows };
+}
+
+const WORKSPACES_PAGE_SIZE = 10;
+
+export function buildWorkspacesCard(data: WorkspacesData, page = 0): FeishuCardView {
+  const { workspaces, currentWorkdir } = data;
+  const lines = ['**Workspaces**'];
+
+  if (workspaces.length === 0) {
+    lines.push(
+      '',
+      'No saved workspaces yet.',
+      '',
+      'Add workspaces from the Dashboard (Sessions → Add Workspace), then come back to switch with one tap.',
+      '',
+      'You can still browse the file system with /switch.',
+    );
+    return { markdown: lines.join('\n'), rows: [] };
+  }
+
+  lines.push(`● \`${currentWorkdir}\``);
+
+  const totalPages = Math.max(1, Math.ceil(workspaces.length / WORKSPACES_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(0, page), totalPages - 1);
+  const slice = workspaces.slice(currentPage * WORKSPACES_PAGE_SIZE, (currentPage + 1) * WORKSPACES_PAGE_SIZE);
+
+  const rows: FeishuCardActionRow[] = [];
+  for (const ws of slice) {
+    const marker = ws.isCurrent ? '✓ ' : ws.exists ? '' : '⚠ ';
+    const id = feishuPathRegistry.register(ws.path);
+    rows.push({ actions: [cardButton(`${marker}${ws.name}`, `wsp:s:${id}`, ws.isCurrent ? false : true)] });
+  }
+
+  if (totalPages > 1) {
+    const navActions: FeishuCardActionItem[] = [];
+    if (currentPage > 0) navActions.push(cardButton(`◀ ${currentPage}/${totalPages}`, `wsp:p:${currentPage - 1}`));
+    if (currentPage < totalPages - 1) navActions.push(cardButton(`${currentPage + 2}/${totalPages} ▶`, `wsp:p:${currentPage + 1}`));
+    if (navActions.length) rows.push({ actions: navActions });
+  }
+
+  lines.push('', `_Tap a workspace to switch. ${workspaces.length} saved._`);
 
   return { markdown: lines.join('\n'), rows };
 }

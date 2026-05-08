@@ -154,6 +154,28 @@ describe('Gemini session tail', () => {
   });
 });
 
+describe('Gemini prompt builder', () => {
+  it('embeds attachment paths as @-references so gemini -p can inline them', async () => {
+    const { buildGeminiPromptText } = await import('../src/agent/drivers/gemini.ts');
+    const prompt = buildGeminiPromptText('describe this image', ['/tmp/foo/shot.png']);
+    expect(prompt).toContain('@/tmp/foo/shot.png');
+    expect(prompt).toContain('describe this image');
+    // Reference precedes the question so gemini binds it as input context.
+    expect(prompt.indexOf('@/tmp/foo/shot.png')).toBeLessThan(prompt.indexOf('describe'));
+  });
+
+  it('quotes paths that contain whitespace', async () => {
+    const { buildGeminiPromptText } = await import('../src/agent/drivers/gemini.ts');
+    const prompt = buildGeminiPromptText('look', ['/tmp/has space/img.png']);
+    expect(prompt).toContain('@"/tmp/has space/img.png"');
+  });
+
+  it('passes the prompt through unchanged when there are no attachments', async () => {
+    const { buildGeminiPromptText } = await import('../src/agent/drivers/gemini.ts');
+    expect(buildGeminiPromptText('hello', [])).toBe('hello');
+  });
+});
+
 describe('Gemini session listing', () => {
   const originalHome = process.env.HOME;
 

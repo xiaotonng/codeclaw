@@ -37,6 +37,10 @@ export interface StreamPreviewRenderInput {
   activity: string;
   meta?: StreamPreviewMeta | null;
   plan?: StreamPreviewPlan | null;
+  /** Resolved model id for the active turn — surfaced in the running footer. */
+  model?: string | null;
+  /** Resolved thinking-effort for the active turn — surfaced in the running footer. */
+  effort?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,13 +87,34 @@ export function footerStatusSymbol(status: FooterStatus): string {
   }
 }
 
+export interface FooterDecorations {
+  model?: string | null;
+  effort?: string | null;
+}
+
+/**
+ * Drop a leading `provider/` segment from long model ids so the footer stays
+ * readable on narrow IM clients. `anthropic/claude-sonnet-4` → `claude-sonnet-4`,
+ * `deepseek/deepseek-v4-flash` → `deepseek-v4-flash`. Already-short ids are
+ * returned unchanged.
+ */
+function compactModelLabel(model: string): string {
+  const trimmed = model.trim();
+  if (trimmed.length <= 24) return trimmed;
+  const slashIdx = trimmed.indexOf('/');
+  return slashIdx > 0 ? trimmed.slice(slashIdx + 1) : trimmed;
+}
+
 export function formatFooterSummary(
   agent: Agent,
   elapsedMs: number,
   meta?: StreamPreviewMeta | null,
   contextPercent?: number | null,
+  decorations?: FooterDecorations,
 ): string {
   const parts: string[] = [agent];
+  if (decorations?.model) parts.push(compactModelLabel(decorations.model));
+  if (decorations?.effort) parts.push(decorations.effort);
   const ctx = contextPercent ?? meta?.contextPercent ?? null;
   if (ctx != null) parts.push(`${ctx}%`);
   parts.push(fmtCompactUptime(Math.max(0, Math.round(elapsedMs))));
@@ -192,7 +217,10 @@ export interface FinalReplyData {
 export function extractFinalReplyData(agent: Agent, result: StreamResult): FinalReplyData {
   const footerStatus: FooterStatus = result.incomplete || !result.ok ? 'failed' : 'done';
   const elapsedMs = result.elapsedS * 1000;
-  const footerSummary = formatFooterSummary(agent, elapsedMs, null, result.contextPercent ?? null);
+  const footerSummary = formatFooterSummary(agent, elapsedMs, null, result.contextPercent ?? null, {
+    model: result.model,
+    effort: result.thinkingEffort,
+  });
 
   let activityNarrative: string | null = null;
   let activityCommandSummary: string | null = null;

@@ -5,7 +5,7 @@ import { api } from '../../api';
 import { loadSessionMessages, peekSessionMessages } from '../../session-preload';
 import { useDashboardEvent, useDashboardReconnect, type DashboardEvent } from '../../ws';
 import { cn, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils';
-import { Spinner } from '../../components/ui';
+import { Spinner, Modal, ModalHeader, Button } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
 import type { SessionInfo, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 import { TurnView, UserBubble, TurnDivider } from './TurnView';
@@ -91,6 +91,11 @@ export const SessionPanel = memo(function SessionPanel({
   const pendingTaskIdRef = useRef<string | null>(null);
   pendingTaskIdRef.current = pendingTaskId;
   const [editDraft, setEditDraft] = useState<string | null>(null);
+  const [forkRequest, setForkRequest] = useState<{ atTurn: number } | null>(null);
+  const [forkPrompt, setForkPrompt] = useState('');
+  const [forkSubmitting, setForkSubmitting] = useState(false);
+  const canFork = !!agentRuntime?.capabilities?.fork;
+  const submitForkRef = useRef<(() => Promise<void>) | null>(null);
   const pendingImageUrlsRef = useRef<string[]>(initialPendingImageUrls || []);
   const liveStreamRef = useRef(liveStream);
   const streamingRef = useRef(streaming);
@@ -148,6 +153,36 @@ export const SessionPanel = memo(function SessionPanel({
   const handleSendTaskAssigned = useCallback((taskId: string) => {
     setPendingTaskId(taskId);
   }, []);
+
+  const submitFork = useCallback(async () => {
+    if (!forkRequest) return;
+    const trimmed = forkPrompt.trim();
+    if (!trimmed) return;
+    setForkSubmitting(true);
+    try {
+      const res = await api.forkSession(
+        workdir,
+        session.agent || '',
+        session.sessionId,
+        forkRequest.atTurn,
+        trimmed,
+        {},
+      );
+      if (!res.ok || !res.sessionKey) {
+        // Bubble the error inline by leaving the modal open; consumer can retry.
+        setForkSubmitting(false);
+        return;
+      }
+      const [agent, sessionId] = res.sessionKey.split(':');
+      setForkRequest(null);
+      setForkPrompt('');
+      // Hand off to the parent so the new child session opens in its own panel.
+      onSessionChange?.({ agent, sessionId, workdir });
+    } finally {
+      setForkSubmitting(false);
+    }
+  }, [forkRequest, forkPrompt, workdir, session.agent, session.sessionId, onSessionChange]);
+  submitForkRef.current = submitFork;
 
   const fetchTurnWindow = useCallback(async (
     query: { turnOffset?: number; turnLimit?: number; lastNTurns?: number },
@@ -506,15 +541,36 @@ export const SessionPanel = memo(function SessionPanel({
   // the same response twice (once in TurnView, once in LivePreview).
   // BUT: when there's a pending follow-up prompt whose turn hasn't appeared in history
   // yet, the liveStream is for the NEW turn — don't strip the previous turn's response.
-  const turns = useMemo(() => {
-    if (!liveStream || !rawTurns.length) return rawTurns;
+  // True when the server's last-turn user matches the optimistic pending message
+  // by text but lacks the images we're holding. Claude persists user image blocks
+  // only after the turn settles, so text matches mid-stream while images are still
+  // missing — without this guard, the dedup would hide the optimistic bubble (with
+  // images) and let the server-rendered turn (no images) take over until 'done'.
+  const optimisticBridgesImages = useMemo(() => {
+    if (!pendingImageUrls.length || !rawTurns.length) return false;
     const last = rawTurns[rawTurns.length - 1];
-    if (!last.assistant) return rawTurns;
+    if (!last.user) return false;
+    if ((last.user.text?.trim() || '') !== (pendingPrompt || '').trim()) return false;
+    const serverImages = last.user.blocks.filter(b => b.type === 'image').length;
+    return serverImages < pendingImageUrls.length;
+  }, [rawTurns, pendingPrompt, pendingImageUrls.length]);
+
+  const turns = useMemo(() => {
+    let result = rawTurns;
+    // Drop the duplicate user from history while the optimistic bubble is bridging
+    // missing server-side images. We keep the assistant — only the user is doubled.
+    if (optimisticBridgesImages) {
+      const last = result[result.length - 1];
+      result = [...result.slice(0, -1), { ...last, user: null }];
+    }
+    if (!liveStream || !result.length) return result;
+    const last = result[result.length - 1];
+    if (!last.assistant) return result;
     // If a pending prompt exists and doesn't match the last turn's user message,
     // the live stream is for a new follow-up turn, not the last one in history.
-    if (pendingPrompt && last.user?.text?.trim() !== pendingPrompt.trim()) return rawTurns;
-    return [...rawTurns.slice(0, -1), { ...last, assistant: null }];
-  }, [rawTurns, liveStream, pendingPrompt]);
+    if (pendingPrompt && last.user?.text?.trim() !== pendingPrompt.trim()) return result;
+    return [...result.slice(0, -1), { ...last, assistant: null }];
+  }, [rawTurns, liveStream, pendingPrompt, optimisticBridgesImages]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -532,22 +588,60 @@ export const SessionPanel = memo(function SessionPanel({
                 <span>{loadingOlder ? t('hub.loadingOlderTurns') : t('hub.loadOlderTurnsHint')}</span>
               </div>
             )}
-            {turns.map((turn, i) => (
-              <TurnView key={`${history?.startTurn || 0}:${i}`} turn={turn} agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} t={t}
-                onResend={(txt) => {
-                  scrollToBottomRef.current = true;
-                  handleSendStart(txt);
-                  api.sendSessionMessage(workdir, session.agent || '', session.sessionId, txt)
-                    .then((res) => { if (res.ok) requestStreamPolling(); })
-                    .catch(() => { clearPending(); });
-                }}
-                onEdit={(txt) => setEditDraft(txt)} />
-            ))}
+            {session.migratedFrom?.kind === 'fork' && session.migratedFrom.sessionId && (
+              <button
+                type="button"
+                onClick={() => onSessionChange?.({
+                  agent: session.migratedFrom!.agent || session.agent || '',
+                  sessionId: session.migratedFrom!.sessionId,
+                  workdir,
+                })}
+                className="mb-4 inline-flex items-center gap-1.5 rounded-md border border-edge bg-panel-alt px-2.5 py-1 text-[11px] text-fg-5 transition hover:border-edge-h hover:text-fg-2"
+                title={`#${session.migratedFrom.sessionId.slice(0, 8)}`}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="12" cy="20" r="2" />
+                  <path d="M6 8v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8" /><path d="M12 14v4" />
+                </svg>
+                <span>{t('hub.forkBadge')}</span>
+                <span className="font-mono">#{session.migratedFrom.sessionId.slice(0, 8)}</span>
+                {typeof session.migratedFrom.forkedAtTurn === 'number' && (
+                  <span className="text-fg-5/70">· {t('hub.forkBadgeAt').replace('{turn}', String(session.migratedFrom.forkedAtTurn + 1))}</span>
+                )}
+              </button>
+            )}
+            {turns.map((turn, i) => {
+              const absoluteTurnIndex = (history?.startTurn || 0) + i;
+              return (
+                <TurnView key={`${history?.startTurn || 0}:${i}`}
+                  turn={turn}
+                  turnIndex={absoluteTurnIndex}
+                  agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} t={t}
+                  onResend={(txt) => {
+                    scrollToBottomRef.current = true;
+                    handleSendStart(txt);
+                    api.sendSessionMessage(workdir, session.agent || '', session.sessionId, txt)
+                      .then((res) => { if (res.ok) requestStreamPolling(); })
+                      .catch(() => { clearPending(); });
+                  }}
+                  onEdit={(txt) => setEditDraft(txt)}
+                  onFork={canFork ? (atTurn) => { setForkPrompt(''); setForkRequest({ atTurn }); } : undefined}
+                />
+              );
+            })}
             {/* Optimistic pending message — hidden while queued behind an active stream (pendingQueued),
-                and deduped against the last loaded user turn to avoid double-rendering after history refresh. */}
+                and deduped against the last loaded user turn to avoid double-rendering after history refresh.
+                When the server's matching turn lacks images we still hold, optimisticBridgesImages keeps
+                this rendered (the matching server user is also stripped from `turns` above).
+                Note: we deliberately do NOT gate on clearPendingOnLoadRef here. That ref signals an
+                in-flight history fetch triggered by 'done', and the actual pending clear is batched with
+                setHistory/setLiveStream(null) inside loadLatestTurns. Hiding here would create a gap
+                between 'done' and fetch completion where neither the optimistic bubble nor the server
+                turn is visible — the "loading flash" the user sees post-stream. */}
             {(pendingPrompt || pendingImageUrls.length > 0) && !pendingQueued
-              && !clearPendingOnLoadRef.current
-              && !(pendingPrompt && turns.length > 0 && turns[turns.length - 1]?.user?.text?.trim() === pendingPrompt.trim()) && (
+              && (optimisticBridgesImages
+                  || !(pendingPrompt && rawTurns.length > 0
+                       && rawTurns[rawTurns.length - 1]?.user?.text?.trim() === pendingPrompt.trim())) && (
               <div className="session-turn">
                 <UserBubble text={pendingPrompt || ''} blocks={pendingImageUrls.map(u => ({ type: 'image' as const, content: u }))} t={t} />
                 {!liveStream && (
@@ -588,6 +682,43 @@ export const SessionPanel = memo(function SessionPanel({
         editDraft={editDraft}
         onEditDraftConsumed={() => setEditDraft(null)}
       />
+
+      {/* ── Fork composer modal ── */}
+      {forkRequest && (
+        <Modal open onClose={() => { if (!forkSubmitting) setForkRequest(null); }}>
+          <ModalHeader
+            title={t('hub.forkPromptTitle')}
+            description={t('hub.forkPromptHint')}
+            onClose={() => { if (!forkSubmitting) setForkRequest(null); }}
+          />
+          <textarea
+            autoFocus
+            value={forkPrompt}
+            disabled={forkSubmitting}
+            onChange={(e) => setForkPrompt(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && forkPrompt.trim() && !forkSubmitting) {
+                e.preventDefault();
+                void submitForkRef.current?.();
+              }
+            }}
+            placeholder={t('hub.forkPromptPlaceholder')}
+            className="w-full min-h-[120px] resize-y rounded-md border border-edge bg-panel-alt px-3 py-2 text-[13px] leading-relaxed text-fg outline-none focus:border-edge-h"
+          />
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <Button variant="ghost" disabled={forkSubmitting} onClick={() => setForkRequest(null)}>
+              {t('modal.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              disabled={forkSubmitting || !forkPrompt.trim()}
+              onClick={() => void submitForkRef.current?.()}
+            >
+              {forkSubmitting ? t('hub.forkSubmitting') : t('hub.forkSubmit')}
+            </Button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 });

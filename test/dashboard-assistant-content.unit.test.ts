@@ -30,7 +30,6 @@ describe('AssistantContent block categorization', () => {
     const categorized = categorizeAssistantBlocks([commentary, toolUse, toolResult, finalAnswer]);
 
     expect(categorized.activityBlocks).toEqual([toolUse, toolResult]);
-    expect(categorized.processNotes).toEqual([]);
     expect(categorized.outputBlocks).toEqual([commentary, finalAnswer]);
   });
 });

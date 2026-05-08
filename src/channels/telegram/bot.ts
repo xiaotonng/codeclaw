@@ -36,6 +36,7 @@ import {
   getStatusDataAsync,
   getHostDataSync,
   getSessionTurnPreviewData,
+  getWorkspacesData,
   resolveSkillPrompt,
   summarizePromptForStatus,
 } from '../../bot/commands.js';
@@ -50,7 +51,7 @@ import {
   type CommandActionResult,
   type CommandSelectionView,
 } from '../../bot/command-ui.js';
-import { buildSwitchWorkdirView, resolveRegisteredPath } from './directory.js';
+import { buildSwitchWorkdirView, buildWorkspacesView, resolveRegisteredPath } from './directory.js';
 import { LivePreview, type LivePreviewRenderer } from './live-preview.js';
 import {
   registerProcessRuntime,
@@ -434,11 +435,18 @@ export class TelegramBot extends Bot {
   private async cmdSwitch(ctx: TgContext) {
     const wd = this.chatWorkdir(ctx.chatId);
     const browsePath = path.dirname(wd);
-    const view = buildSwitchWorkdirView(wd, browsePath);
+    const savedCount = getWorkspacesData(this, ctx.chatId).workspaces.length;
+    const view = buildSwitchWorkdirView(wd, browsePath, 0, { savedWorkspaceCount: savedCount });
     await ctx.reply(
       view.text,
       { parseMode: 'HTML', keyboard: view.keyboard },
     );
+  }
+
+  private async cmdWorkspaces(ctx: TgContext) {
+    const data = getWorkspacesData(this, ctx.chatId);
+    const view = buildWorkspacesView(data);
+    await ctx.reply(view.text, { parseMode: 'HTML', keyboard: view.keyboard });
   }
 
   private async cmdHost(ctx: TgContext) {
@@ -634,9 +642,10 @@ export class TelegramBot extends Bot {
     const waiting = this.sessionHasPendingWork(session);
     const queuePosition = waiting ? this.getQueuePosition(session.key, taskId) : 0;
     const placeholderKeyboard = this.buildStopKeyboard(this.actionIdForTask(taskId), { queued: waiting });
+    const startConfig = this.resolveSessionStreamConfig(session);
     let phId: number | null = null;
     if (canEditMessages) {
-      const placeholderId = await ctx.reply(buildInitialPreviewHtml(session.agent, waiting, queuePosition), { parseMode: 'HTML', messageThreadId, keyboard: placeholderKeyboard });
+      const placeholderId = await ctx.reply(buildInitialPreviewHtml(session.agent, startConfig.model, startConfig.effort, waiting, queuePosition), { parseMode: 'HTML', messageThreadId, keyboard: placeholderKeyboard });
       phId = typeof placeholderId === 'number' ? placeholderId : null;
       if (phId != null) {
         this.registerSessionMessage(ctx.chatId, phId, session);
@@ -665,7 +674,7 @@ export class TelegramBot extends Bot {
         // Task is now running — update keyboard from Recall/Steer to Stop
         const runningKeyboard = this.buildStopKeyboard(this.actionIdForTask(taskId));
         if (phId != null && waiting) {
-          try { await this.channel.editMessage(ctx.chatId, phId, buildInitialPreviewHtml(session.agent, false), { parseMode: 'HTML', keyboard: runningKeyboard }); } catch {}
+          try { await this.channel.editMessage(ctx.chatId, phId, buildInitialPreviewHtml(session.agent, startConfig.model, startConfig.effort, false), { parseMode: 'HTML', keyboard: runningKeyboard }); } catch {}
         }
         if (phId != null || canSendTyping) {
           livePreview = new LivePreview({
@@ -680,6 +689,8 @@ export class TelegramBot extends Bot {
             canSendTyping,
             messageThreadId,
             keyboard: runningKeyboard,
+            model: startConfig.model,
+            effort: startConfig.effort,
             log: (message: string) => this.debug(message),
           });
           livePreview.start();
@@ -903,6 +914,36 @@ export class TelegramBot extends Bot {
     return true;
   }
 
+  private async handleWorkspacesCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
+    if (data.startsWith('wsp:p:')) {
+      const page = parseInt(data.slice('wsp:p:'.length), 10) || 0;
+      const view = buildWorkspacesView(getWorkspacesData(this, ctx.chatId), page);
+      await ctx.editReply(ctx.messageId, view.text, { parseMode: 'HTML', keyboard: view.keyboard });
+      await ctx.answerCallback();
+      return true;
+    }
+    if (data.startsWith('wsp:s:')) {
+      const dirPath = resolveRegisteredPath(parseInt(data.slice('wsp:s:'.length), 10));
+      if (!dirPath) {
+        await ctx.answerCallback('Expired, use /workspaces again');
+        return true;
+      }
+      if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
+        await ctx.answerCallback('Workspace path is missing on disk');
+        return true;
+      }
+      const oldPath = this.switchWorkdir(dirPath);
+      await ctx.answerCallback('Switched!');
+      await ctx.editReply(
+        ctx.messageId,
+        `<b>Workdir</b>\n● <code>${escapeHtml(truncateMiddle(oldPath, 42))}</code>\n→ <code>${escapeHtml(truncateMiddle(dirPath, 42))}</code>`,
+        { parseMode: 'HTML' },
+      );
+      return true;
+    }
+    return false;
+  }
+
   private async handleSessionsPageCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
     const action = decodeCommandAction(data);
     if (!action) return false;
@@ -1013,6 +1054,7 @@ export class TelegramBot extends Bot {
     if (await this.handleTaskSteerCallback(data, ctx)) return;
     if (await this.handleSwitchNavigateCallback(data, ctx)) return;
     if (await this.handleSwitchSelectCallback(data, ctx)) return;
+    if (await this.handleWorkspacesCallback(data, ctx)) return;
     if (await this.handleSessionsPageCallback(data, ctx)) return;
     await ctx.answerCallback();
   }
@@ -1049,6 +1091,7 @@ export class TelegramBot extends Bot {
         case 'status':   await this.cmdStatus(ctx); return;
         case 'host':     await this.cmdHost(ctx); return;
         case 'switch':   await this.cmdSwitch(ctx); return;
+        case 'workspaces': await this.cmdWorkspaces(ctx); return;
         case 'restart':  await this.cmdRestart(ctx); return;
         default:
           // Intercept skill commands (sk_<name>) and route to agent

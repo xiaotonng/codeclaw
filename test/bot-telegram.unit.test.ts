@@ -78,7 +78,9 @@ describe('TelegramBot.sendFinalReply', () => {
     }, 99);
     expect(failed.finalEdit.text).toContain('Incomplete Response');
     expect(failed.finalEdit.text).toContain('Claude hit usage limit');
-    expect(failed.finalEdit.text).toContain('✗ claude · 17s');
+    // Footer carries model + effort decorations now, so just assert the agent /
+    // status / elapsed parts without locking in the exact decoration count.
+    expect(failed.finalEdit.text).toMatch(/✗ claude · .*17s/);
     expect(failed.finalEdit.opts?.keyboard).toEqual({ inline_keyboard: [] });
 
     const truncated = await renderFinalReply('claude', {
@@ -102,7 +104,7 @@ describe('TelegramBot.sendFinalReply', () => {
       contextPercent: 25.7,
       activity: 'Ran: /bin/zsh -lc npm run build\nRan: /bin/zsh -lc npm test',
     });
-    expect(summarized.finalEdit.text).toContain('✓ codex · 25.7% · 1m25s');
+    expect(summarized.finalEdit.text).toMatch(/✓ codex · .*25\.7% · 1m25s/);
     expect(summarized.finalEdit.text).toContain('<i>commands: 2 done</i>');
     expect(summarized.finalEdit.text).not.toContain('cached:');
     expect(summarized.finalEdit.text).not.toContain('npm run build');
@@ -298,9 +300,13 @@ describe('TelegramBot status and session previews', () => {
       expect(replies[0]?.text).not.toContain('Use the controls below to switch agents.');
       expect(replies[0]?.text).not.toContain('Path:');
       expect(replies[0]?.opts?.keyboard?.inline_keyboard).toEqual([
-        [{ text: 'claude 1.2.3', callback_data: 'ag:claude' }],
-        [{ text: '● codex 9.9.9', callback_data: 'ag:codex' }],
+        [{ text: 'Claude Code', callback_data: 'ag:claude' }],
+        [{ text: '● Codex', callback_data: 'ag:codex' }],
       ]);
+      // Version + provider details are rendered as items above the buttons,
+      // not in the button labels (which would truncate on narrow IM clients).
+      expect(replies[0]?.text).toContain('Claude Code · v1.2.3');
+      expect(replies[0]?.text).toContain('Codex · v9.9.9');
 
       replies.length = 0;
       vi.spyOn(bot, 'fetchModels').mockResolvedValue({
@@ -514,7 +520,9 @@ describe('TelegramBot.handleMessage streaming', () => {
 
         expect((channel as any).sendMessageDraft).toBeUndefined();
         expect(vi.mocked(ctx.reply)).toHaveBeenCalledWith(
-          expect.stringContaining('● codex · 0s'),
+          // Initial placeholder now includes resolved model + effort between the
+          // agent label and the elapsed counter.
+          expect.stringMatching(/● codex · .*0s/),
           expect.objectContaining({ messageThreadId: 42, parseMode: 'HTML' }),
         );
         expect(sends).toHaveLength(0);
@@ -523,9 +531,9 @@ describe('TelegramBot.handleMessage streaming', () => {
         expect(previews).toContain('改动已经落下去了，现在跑相关单测确认结果');
         expect(previews).toContain('最后确认只需要展示 reasoning 的尾段就够了');
         expect(previews).toContain('Plan 1/2');
-        expect(previews).toContain('● codex · 4.2% · ');
-        expect(previews).toContain('● codex · 5s');
-        expect(previews).toContain('● codex · 10s');
+        expect(previews).toMatch(/● codex · .*4\.2% · /);
+        expect(previews).toMatch(/● codex · .*5s/);
+        expect(previews).toMatch(/● codex · .*10s/);
         expect(previews).not.toContain('Ran:');
         expect(previews).not.toContain('npm run build');
         expect(previews).not.toContain('pwd');

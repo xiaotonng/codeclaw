@@ -199,21 +199,43 @@ export async function buildSessionsCommandView(
 
 export function buildAgentsCommandView(bot: Bot, chatId: ChatId): CommandSelectionView {
   const data = getAgentsListData(bot, chatId);
-  const actions = data.agents
-    .filter(agent => agent.installed)
-    .map(agent => ({
-      label: agent.version ? `${agent.agent} ${agent.version}` : agent.agent,
-      action: { kind: 'agent.switch', agent: agent.agent as Agent } as CommandAction,
+  const installed = data.agents.filter(a => a.installed);
+
+  // Buttons stay short — friendly label + optional ✓ marker — so they don't
+  // truncate on narrow IM clients.
+  const actions = installed.map(agent => ({
+    label: agent.label,
+    action: { kind: 'agent.switch', agent: agent.agent as Agent } as CommandAction,
+    state: buttonStateFromFlags({ isCurrent: agent.isCurrent }),
+    primary: agent.isCurrent,
+  }));
+
+  // Details (version + bound provider) live in the items list above the
+  // buttons, where the renderer can show them in full without truncation.
+  const items = installed.map(agent => {
+    const main = agent.versionShort
+      ? `${agent.label} · v${agent.versionShort}`
+      : agent.label;
+    const detail = agent.boundProvider && agent.boundModel
+      ? `${agent.boundProvider} / ${agent.boundModel}`
+      : null;
+    return {
+      label: main,
+      detail,
       state: buttonStateFromFlags({ isCurrent: agent.isCurrent }),
-      primary: agent.isCurrent,
-    }));
+    };
+  });
+
+  const current = installed.find(a => a.isCurrent);
 
   return {
     kind: 'agents',
     title: 'Agents',
-    metaLines: [],
-    items: [],
+    detail: current ? current.label : undefined,
+    metaLines: current ? [`Current: ${current.label}`] : [],
+    items,
     emptyText: actions.length ? undefined : 'No installed agents.',
+    helperText: actions.length ? 'Tap an agent to switch.' : undefined,
     rows: actions.map(action => [action]),
   };
 }
@@ -370,17 +392,11 @@ export async function executeCommandAction(
       };
 
     case 'session.new': {
-      const { interruptedRunning, cancelledQueued } = bot.resetConversationForChat(chatId);
-      const stoppedNotes: string[] = [];
-      if (interruptedRunning) stoppedNotes.push('previous task interrupted');
-      if (cancelledQueued) stoppedNotes.push(`${cancelledQueued} queued task${cancelledQueued === 1 ? '' : 's'} cancelled`);
-      const detail = stoppedNotes.length
-        ? `${stoppedNotes.join(' · ')}. Send a message to start.`
-        : 'Send a message to start.';
+      bot.resetConversationForChat(chatId);
       return {
         kind: 'notice',
-        callbackText: stoppedNotes.length ? 'New session (previous stopped)' : 'New session',
-        notice: { title: 'New Session', detail },
+        callbackText: 'New session',
+        notice: { title: 'New Session', detail: 'Send a message to start.' },
       };
     }
 

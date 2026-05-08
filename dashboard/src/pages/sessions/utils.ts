@@ -1,4 +1,4 @@
-import type { RichMessage, SessionMessagesResult } from '../../types';
+import type { MessageBlock, RichMessage, SessionMessagesResult } from '../../types';
 
 export interface Turn {
   user: RichMessage | null;
@@ -61,6 +61,7 @@ export function mergeRichMessages(lhs: RichMessage, rhs: RichMessage): RichMessa
     role: lhs.role,
     text: parts.join('\n\n'),
     blocks: [...lhs.blocks, ...rhs.blocks],
+    usage: rhs.usage ?? lhs.usage ?? null,
   };
 }
 
@@ -140,6 +141,69 @@ export async function copyImageFile(file: File): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function shortValue(value: unknown, max = 120): string {
+  if (value == null) return '';
+  const s = typeof value === 'string' ? value : String(value);
+  const trimmed = s.replace(/\s+/g, ' ').trim();
+  if (trimmed.length <= max) return trimmed;
+  return trimmed.slice(0, Math.max(0, max - 1)) + '…';
+}
+
+function parseToolInput(content: string): Record<string, unknown> | null {
+  if (!content) return null;
+  try {
+    const parsed = JSON.parse(content);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+export function summarizeToolUse(block: MessageBlock): string {
+  const tool = String(block.toolName || '').trim() || 'Tool';
+  const input = parseToolInput(block.content);
+  if (!input) return tool;
+  const description = shortValue(input.description, 120);
+  switch (tool) {
+    case 'Read': { const t = shortValue(input.file_path || input.path, 140); return t ? `Read ${t}` : 'Read'; }
+    case 'Edit': { const t = shortValue(input.file_path || input.path, 140); return t ? `Edit ${t}` : 'Edit'; }
+    case 'Write': { const t = shortValue(input.file_path || input.path, 140); return t ? `Write ${t}` : 'Write'; }
+    case 'Glob': { const p = shortValue(input.pattern || input.glob, 120); return p ? `Glob ${p}` : 'Glob'; }
+    case 'Grep': { const p = shortValue(input.pattern || input.query, 120); return p ? `Grep ${p}` : 'Grep'; }
+    case 'WebFetch': { const u = shortValue(input.url, 120); return u ? `WebFetch ${u}` : 'WebFetch'; }
+    case 'WebSearch': { const q = shortValue(input.query, 120); return q ? `WebSearch ${q}` : 'WebSearch'; }
+    case 'TodoWrite': return 'Update plan';
+    case 'AskUserQuestion': {
+      const qs = Array.isArray(input.questions) ? (input.questions as any[]) : [];
+      const first = qs[0];
+      const q = shortValue(first?.question || input.question, 120);
+      return q ? `Ask user: ${q}` : 'Ask user';
+    }
+    case 'Task': { const p = shortValue(input.description || input.prompt, 120); return p ? `Task: ${p}` : 'Task'; }
+    case 'Bash': {
+      if (description) return `Bash: ${description}`;
+      const c = shortValue(input.command, 120);
+      return c ? `Bash: ${c}` : 'Bash';
+    }
+    default: {
+      const mcp = tool.match(/^mcp__[^_]+__(.+)$/);
+      const bare = mcp ? mcp[1] : tool;
+      if (bare === 'im_send_file') { const p = shortValue(input.path, 120); return p ? `Send file: ${p}` : 'Send file'; }
+      if (bare === 'im_list_files') return 'List workspace files';
+      if (description) return `${tool}: ${description}`;
+      const d = shortValue(input.file_path || input.path || input.command || input.query || input.pattern || input.url, 120);
+      return d ? `${tool}: ${d}` : tool;
+    }
+  }
+}
+
+export function summarizeToolResult(block: MessageBlock): string {
+  const raw = (block.content || '').trim();
+  if (!raw) return 'result';
+  const firstLine = raw.split('\n').map(l => l.trim()).find(Boolean) || '';
+  return firstLine ? shortValue(firstLine, 140) : 'result';
 }
 
 export function parseSessionKey(sessionKey: string): { agent: string; sessionId: string } | null {

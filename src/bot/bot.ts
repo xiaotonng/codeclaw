@@ -9,8 +9,8 @@ import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
 import { getActiveUserConfig, loadWorkspaces, onUserConfigChange, resolveUserWorkdir, setUserWorkdir, updateUserConfig } from '../core/config/user-config.js';
 import {
-  doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
-  reconcileOrphanedRunningSessions,
+  doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, resolveAgentModels, listSkills, stageSessionFiles,
+  reconcileOrphanedRunningSessions, getAgentBoundModelId, setAgentBoundModelId,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type SessionInfo, type UsageResult,
   type AgentInteraction, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
@@ -116,8 +116,8 @@ function appendExtraPrompt(base: string | undefined, extra: string): string {
 function buildMcpDeliveryPrompt(): string {
   return [
     '[Artifact Return]',
-    'This is an IM conversation, so pay attention to the IM tools.',
-    'When you need clarification, a decision, or approval from the user before continuing, call im_ask_user. It blocks until the user replies and returns their answer as text. Prefer it over printing a question and stopping — printed questions are never answered because the turn ends.',
+    'This is an IM/chat conversation, so pay attention to the IM tools.',
+    'When you need clarification, a decision, or approval from the user before continuing, just ask the question in your reply and end the turn. The user is in a live chat with you and will answer in their next message — that next message resumes this thread automatically. Do not invent or look for a blocking "ask user" tool; multi-turn conversation is the answer channel.',
   ].join('\n');
 }
 
@@ -272,6 +272,14 @@ export interface SubmitSessionTaskOpts {
   thinkingEffort?: string | null;
   sourceMessageId?: number | string;
   chatId?: ChatId;
+  /**
+   * Fork descriptor — when set, the spawned stream creates a brand-new child
+   * session that branches off `parentSessionId`. The child gets its own ID
+   * (assigned by the agent CLI) and `recordFork` writes lineage metadata.
+   * `sessionId` should be a fresh pending ID — the runtime resolves it after
+   * the agent emits its native session ID.
+   */
+  forkOf?: { parentSessionId: string; atTurn: number };
   onText?: (
     text: string,
     thinking: string,
@@ -556,6 +564,17 @@ export class Bot {
         approvalMode: envString('GEMINI_APPROVAL_MODE', 'yolo'),
         sandbox: envBool('GEMINI_SANDBOX', false),
         extraArgs: shellSplit(process.env.GEMINI_EXTRA_ARGS || ''),
+      },
+      // Hermes was missing from this map for a long time. Without an entry,
+      // `modelForAgent('hermes')` returned '' and `setModelForAgent('hermes',
+      // ...)` silently no-op'd because `if (config)` short-circuited — so any
+      // /models switch in IM looked successful in the log but never reached
+      // the hermes driver. Adding the entry lets the same machinery the other
+      // three agents already rely on apply to hermes too.
+      hermes: {
+        model: resolveAgentModel(config, 'hermes'),
+        reasoningEffort: resolveAgentEffort(config, 'hermes') || 'medium',
+        extraArgs: shellSplit(process.env.HERMES_EXTRA_ARGS || ''),
       },
     };
 
@@ -1390,6 +1409,9 @@ export class Bot {
           undefined,
           abortController.signal,
           this.createInteractionHandler(opts.chatId ?? 'dashboard', taskId, currentSessionKey()),
+          undefined,
+          undefined,
+          opts.forkOf ? { forkOf: opts.forkOf } : undefined,
         );
         this.emitStream(currentSessionKey(), {
           type: 'done',
@@ -1444,27 +1466,15 @@ export class Bot {
 
   /**
    * Public "start a fresh session" entry point — wired to the "+ New" button
-   * and the `/new` command. If a task is still running on the previously
-   * selected session, abort it. Otherwise the runaway task keeps editing a
-   * scrolled-away preview message in the chat history while the user (who
-   * just asked for a new session) assumes it was abandoned. Returns the
-   * counts so the IM channel can surface them in its confirmation notice.
+   * and the `/new` command. Only clears the chat's session selection so the
+   * next user message lands in a fresh session; the previously selected
+   * session keeps running independently (matching dashboard behaviour, where
+   * each session is its own card and is never aborted by creating another).
+   * Use `cancelTask` / `/stop` to actually interrupt a running task.
    */
-  resetConversationForChat(chatId: ChatId): { interruptedRunning: boolean; cancelledQueued: number } {
+  resetConversationForChat(chatId: ChatId): void {
     const cs = this.chat(chatId);
-    let interruptedRunning = false;
-    let cancelledQueued = 0;
-    const previousSessionKey = cs.activeSessionKey ?? null;
-    if (previousSessionKey) {
-      const result = this.stopTasksForSession(previousSessionKey);
-      interruptedRunning = result.interrupted;
-      cancelledQueued = result.cancelledQueued;
-      if (interruptedRunning || cancelledQueued) {
-        this.log(`reset conversation interrupted previous tasks: chat=${chatId} session=${previousSessionKey} interrupted=${interruptedRunning} cancelledQueued=${cancelledQueued}`);
-      }
-    }
     this.resetChatConversation(cs);
-    return { interruptedRunning, cancelledQueued };
   }
 
   adoptExistingSessionForChat(
@@ -1494,9 +1504,16 @@ export class Bot {
   switchModelForChat(chatId: ChatId, modelId: string) {
     const cs = this.chat(chatId);
     this.setModelForAgent(cs.agent, modelId);
-    this.resetChatConversation(cs);
+    // Apply the switch to the *currently selected* session so the very next
+    // turn uses the new model — without dropping the session. We used to call
+    // `resetChatConversation` here, which forced the user to start a fresh
+    // session every time they re-picked a model; that defeated the purpose
+    // of switching mid-conversation. Mirrors `switchEffortForChat`.
+    cs.modelId = modelId;
+    const session = this.getSelectedSession(cs);
+    if (session) session.modelId = modelId;
     this.persistAgentPreference(cs.agent, 'model', modelId);
-    this.log(`model switched to ${modelId} for ${cs.agent} chat=${chatId}`);
+    this.log(`model switched to ${modelId} for ${cs.agent} chat=${chatId} session=${cs.activeSessionKey || '(none)'}`);
   }
 
   switchEffortForChat(chatId: ChatId, effort: string) {
@@ -1518,6 +1535,16 @@ export class Bot {
   }
 
   modelForAgent(agent: Agent): string {
+    // For agents whose CLIs cannot switch model via flags (Hermes uses ACP
+    // session/set_model, which only fires when a BYOK Profile is bound), the
+    // active Profile is the only meaningful source of truth — falling back to
+    // `agentConfigs[agent].model` would surface a stale value the runtime
+    // never actually uses. For agents with native model selectors
+    // (Claude/Codex/Gemini), the user-config field is still authoritative.
+    if (agent === 'hermes') {
+      const bound = getAgentBoundModelId('hermes');
+      if (bound) return bound;
+    }
     return this.agentConfigs[agent]?.model || '';
   }
 
@@ -1564,7 +1591,10 @@ export class Bot {
 
   fetchModels(agent: Agent, workdir?: string) {
     const wd = workdir || this.workdir;
-    return listModels(agent, { workdir: wd, currentModel: this.modelForAgent(agent) });
+    // Provider-aware: when the agent is bound to a BYOK Profile, the
+    // returned model list is the provider's enumerable models. This keeps
+    // IM /models consistent with the dashboard agent card.
+    return resolveAgentModels(agent, { workdir: wd, currentModel: this.modelForAgent(agent) });
   }
 
   setDefaultAgent(agent: Agent) {
@@ -1596,15 +1626,22 @@ export class Bot {
 
   private persistAgentPreference(agent: Agent, kind: 'model' | 'effort', value: string) {
     try {
+      // Hermes model writes go to the active BYOK Profile (the runtime's only
+      // model-switching surface). Falls through to the legacy `hermesModel`
+      // user-config field when no Profile is bound.
+      if (kind === 'model' && agent === 'hermes' && setAgentBoundModelId('hermes', value)) return;
+
       const patch: Record<string, string> = {};
       if (kind === 'model') {
         if (agent === 'claude') patch.claudeModel = value;
         else if (agent === 'codex') patch.codexModel = value;
         else if (agent === 'gemini') patch.geminiModel = value;
+        else if (agent === 'hermes') patch.hermesModel = value;
       } else {
         if (agent === 'claude') patch.claudeReasoningEffort = value;
         else if (agent === 'codex') patch.codexReasoningEffort = value;
         else if (agent === 'gemini') patch.geminiReasoningEffort = value;
+        else if (agent === 'hermes') patch.hermesReasoningEffort = value;
       }
       if (Object.keys(patch).length) updateUserConfig(patch);
     } catch (e: any) {
@@ -1740,7 +1777,7 @@ export class Bot {
     if (opts.initial) this.defaultAgent = nextDefaultAgent;
     else if (nextDefaultAgent !== this.defaultAgent) this.setDefaultAgent(nextDefaultAgent);
 
-    for (const agent of ['claude', 'codex', 'gemini'] as Agent[]) {
+    for (const agent of ['claude', 'codex', 'gemini', 'hermes'] as Agent[]) {
       const nextModel = resolveAgentModel(config, agent);
       if (nextModel && this.modelForAgent(agent) !== nextModel) {
         if (opts.initial) this.agentConfigs[agent].model = nextModel;
@@ -1766,6 +1803,7 @@ export class Bot {
     onInteraction?: (request: AgentInteraction) => Promise<Record<string, any> | null>,
     onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void,
     onCodexTurnReady?: (control: CodexTurnControl) => void,
+    extras?: { forkOf?: { parentSessionId: string; atTurn: number } },
   ): Promise<StreamResult> {
     const agentConfig = this.agentConfigs[cs.agent] || {};
     // Session-level config stored on disk — used as fallback between explicit override and global defaults
@@ -1857,12 +1895,19 @@ export class Bot {
       geminiSandbox: this.geminiSandbox,
       geminiSystemInstruction: effectiveSystemPrompt || undefined,
       geminiExtraArgs: this.geminiExtraArgs.length ? this.geminiExtraArgs : undefined,
+      // hermes-specific. Wire the chat's current model so /models switching in
+      // IM takes effect even without a BYOK Profile (the BYOK injector in
+      // stream.ts overrides this with the ACP-encoded `provider:model` when
+      // a Profile is bound).
+      hermesModel: cs.agent === 'hermes' && resolvedModel ? resolvedModel : undefined,
       // MCP bridge
       mcpSendFile,
       abortSignal,
       onInteraction,
       onSteerReady,
       onCodexTurnReady,
+      // Fork lineage — when set, the driver branches off the parent session.
+      forkOf: extras?.forkOf,
     };
     const result = await doStream(opts);
     this.stats.totalTurns++;

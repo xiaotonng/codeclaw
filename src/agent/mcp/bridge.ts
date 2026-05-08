@@ -46,32 +46,16 @@ export type McpSendFileCallback = (
   opts: McpSendFileOpts,
 ) => Promise<McpSendFileResult>;
 
-export interface McpAskUserOption {
-  label: string;
-  description?: string;
-}
-
-export interface McpAskUserOpts {
-  question: string;
-  header?: string;
-  hint?: string;
-  options?: McpAskUserOption[];
-  allowFreeform?: boolean;
-}
-
-export interface McpAskUserResult {
-  ok: boolean;
-  answer?: string;
-  error?: string;
-}
-
-export type McpAskUserCallback = (opts: McpAskUserOpts) => Promise<McpAskUserResult>;
-
 export interface McpBridgeHandle {
   /** Path to the generated MCP config JSON — pass to agent CLI via --mcp-config. */
   configPath: string;
   /** Extra environment variables required by the target agent to load the config. */
   extraEnv?: Record<string, string>;
+  /**
+   * Resolved MCP server map (keyed by server name) for drivers that consume
+   * a structured list rather than a config-file path (e.g. Hermes ACP).
+   */
+  mcpServers?: Record<string, any>;
   /** Whether the MCP server emitted any tool-related activity during the stream. */
   hadActivity: () => boolean;
   /** Gracefully stop the callback server and clean up config file. */
@@ -89,8 +73,6 @@ export interface McpBridgeOpts {
   stagedFiles: string[];
   /** Callback invoked when the agent calls the send_file MCP tool. Optional for dashboard sessions. */
   sendFile?: McpSendFileCallback;
-  /** Callback invoked when the agent calls the ask_user MCP tool.  Routes the question to the IM channel and/or dashboard. */
-  askUser?: McpAskUserCallback;
   /** Agent type — determines how MCP server is registered. */
   agent?: string;
   /** Optional log sink for MCP tool activity. */
@@ -390,7 +372,7 @@ export function resolveSendFilePath(
 }
 
 export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHandle | null> {
-  const { sessionDir, workspacePath, stagedFiles, sendFile, askUser } = opts;
+  const { sessionDir, workspacePath, stagedFiles, sendFile } = opts;
   let hadActivity = false;
   const gui = resolveGuiIntegrationConfig();
   // Browser preparation is no longer eager. The supervisor singleton in
@@ -407,19 +389,18 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
 
   // ── HTTP callback server ──
   // Started whenever any in-process tool needs a localhost endpoint:
-  //   - IM tools (`im_send_file`, `im_ask_user`) → /send-file, /ask-user, /log
+  //   - IM tools (`im_send_file`, `im_list_files`) → /send-file, /log
   //   - Managed browser supervisor (called by the playwright proxy)
   //     → /managed-browser/probe, /managed-browser/ensure, /managed-browser/invalidate
   let callbackServer: http.Server | null = null;
   let port = 0;
-  const needsCallbackServer = !!sendFile || !!askUser || gui.browserEnabled;
+  const needsCallbackServer = !!sendFile || gui.browserEnabled;
 
   if (needsCallbackServer) {
     callbackServer = http.createServer((req, res) => {
       const endpoint = req.url || '';
       const known = endpoint === '/send-file'
         || endpoint === '/log'
-        || endpoint === '/ask-user'
         || endpoint === '/managed-browser/probe'
         || endpoint === '/managed-browser/ensure'
         || endpoint === '/managed-browser/invalidate';
@@ -427,13 +408,6 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
         res.writeHead(404);
         res.end();
         return;
-      }
-
-      // User-input responses may take minutes — disable per-request/socket timeouts
-      // for the ask-user endpoint so the connection stays open until the user replies.
-      if (endpoint === '/ask-user') {
-        req.setTimeout(0);
-        res.setTimeout(0);
       }
 
       let body = '';
@@ -506,39 +480,6 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
             return;
           }
 
-          if (endpoint === '/ask-user') {
-            if (!askUser) {
-              res.writeHead(503, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ ok: false, error: 'ask-user is not available for this session' }));
-              return;
-            }
-            const data = JSON.parse(body || '{}');
-            const question = typeof data.question === 'string' ? data.question.trim() : '';
-            if (!question) {
-              res.writeHead(400, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ ok: false, error: 'question is required' }));
-              return;
-            }
-            const rawOptions = Array.isArray(data.options) ? data.options : [];
-            const options: McpAskUserOption[] = rawOptions
-              .map((o: any) => ({
-                label: typeof o?.label === 'string' ? o.label.trim() : '',
-                description: typeof o?.description === 'string' ? o.description.trim() : '',
-              }))
-              .filter((o: McpAskUserOption) => o.label);
-            hadActivity = true;
-            const result = await askUser({
-              question,
-              header: typeof data.header === 'string' ? data.header.trim() : undefined,
-              hint: typeof data.hint === 'string' ? data.hint.trim() : undefined,
-              options: options.length ? options : undefined,
-              allowFreeform: data.allowFreeform == null ? true : !!data.allowFreeform,
-            });
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(result));
-            return;
-          }
-
           // endpoint === '/send-file'
           if (!sendFile) {
             res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -606,10 +547,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       });
     });
 
-    // User input has no bound — disable the server-level request timeout so the
-    // /ask-user endpoint can wait indefinitely.  Per-request body timers above
-    // still guard against partial uploads.
-    callbackServer.requestTimeout = 0;
+    // Per-request body timers above guard against partial uploads.
     callbackServer.headersTimeout = MCP_TIMEOUTS.serverHeaders;
 
     await new Promise<void>((resolve, reject) => {
@@ -625,10 +563,10 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   const servers: RegisteredMcpServer[] = [...supplementalServers];
 
   // Register the pikiclaw IM tools server only when an IM-side callback is wired
-  // up (sendFile / askUser).  The callback server may also be running purely to
-  // serve the managed-browser supervisor, in which case the IM tools server is
-  // not needed.
-  if (port && (sendFile || askUser)) {
+  // up (sendFile).  The callback server may also be running purely to serve
+  // the managed-browser supervisor, in which case the IM tools server is not
+  // needed.
+  if (port && sendFile) {
     const { command, args } = resolveMcpServerCommand();
     const envVars = {
       MCP_WORKSPACE_PATH: workspacePath,
@@ -650,6 +588,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
 
   let configPath = '';
   let extraEnv: Record<string, string> | undefined;
+  let mcpServers: Record<string, any> | undefined;
   const codexRegisteredNames: string[] = [];
 
   if (opts.agent === 'codex') {
@@ -680,19 +619,25 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     fs.mkdirSync(sessionDir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
     extraEnv = { GEMINI_CLI_SYSTEM_SETTINGS_PATH: configPath };
+  } else if (opts.agent === 'hermes') {
+    // Hermes consumes structured MCP server objects via ACP `session/new`,
+    // not a config file path. Resolve the merged server list and expose it
+    // on the bridge handle so the driver can translate to ACP's wire format.
+    mcpServers = mergeExtensionsForSession(servers, opts.workdir);
   } else {
     // Claude: write MCP config JSON for --mcp-config
     // Uses centralized merge: global extensions → .mcp.json files → built-in servers
     configPath = path.join(sessionDir, 'mcp-config.json');
-    const mergedServers = mergeExtensionsForSession(servers, opts.workdir);
+    mcpServers = mergeExtensionsForSession(servers, opts.workdir);
 
     fs.mkdirSync(sessionDir, { recursive: true });
-    fs.writeFileSync(configPath, JSON.stringify({ mcpServers: mergedServers }, null, 2));
+    fs.writeFileSync(configPath, JSON.stringify({ mcpServers }, null, 2));
   }
 
   return {
     configPath,
     extraEnv,
+    mcpServers,
     hadActivity: () => hadActivity,
     stop: async () => {
       if (callbackServer) await new Promise<void>(resolve => callbackServer!.close(() => resolve()));

@@ -462,6 +462,50 @@ export function promoteSessionId(workdir: string, agent: Agent, pendingId: strin
 }
 
 // ---------------------------------------------------------------------------
+// Fork lineage
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a fork relationship between two pikiclaw-managed sessions.
+ *
+ * Sets `migratedFrom` (with kind='fork' + forkedAtTurn) on the child and
+ * appends the reverse link on the parent's `linkedSessions`. Both sides also
+ * get `migratedTo` set on the parent so the child is a discoverable twin.
+ *
+ * No-op if either record is missing — call sites are expected to ensure both
+ * managed records exist (the child is created via the fork stream completion).
+ */
+export function recordFork(workdir: string, opts: {
+  parent: { agent: Agent; sessionId: string };
+  child: { agent: Agent; sessionId: string };
+  atTurn: number;
+}): void {
+  const resolvedWorkdir = path.resolve(workdir);
+  const index = loadSessionIndex(resolvedWorkdir);
+  const parent = index.sessions.find(e => e.agent === opts.parent.agent && e.sessionId === opts.parent.sessionId);
+  const child = index.sessions.find(e => e.agent === opts.child.agent && e.sessionId === opts.child.sessionId);
+  if (!parent || !child) return;
+
+  child.migratedFrom = {
+    agent: parent.agent,
+    sessionId: parent.sessionId,
+    kind: 'fork',
+    forkedAtTurn: opts.atTurn,
+  };
+  if (!parent.linkedSessions) parent.linkedSessions = [];
+  const childRef = { agent: child.agent, sessionId: child.sessionId, kind: 'fork' as const, forkedAtTurn: opts.atTurn };
+  if (!parent.linkedSessions.some(l => l.agent === child.agent && l.sessionId === child.sessionId)) {
+    parent.linkedSessions.push(childRef);
+  }
+
+  child.updatedAt = new Date().toISOString();
+  parent.updatedAt = new Date().toISOString();
+  writeSessionIndex(resolvedWorkdir, index.sessions);
+  writeSessionMeta(parent);
+  writeSessionMeta(child);
+}
+
+// ---------------------------------------------------------------------------
 // Identity sync
 // ---------------------------------------------------------------------------
 

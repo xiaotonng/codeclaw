@@ -10,17 +10,20 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
 import type { Bot, ChatId, Agent, SessionInfo, SessionRuntime, ChatState, StreamResult } from './bot.js';
 import { fmtTokens, fmtUptime, fmtBytes } from './bot.js';
 import {
-  getProjectSkillPaths, normalizeClaudeModelId, sanitizeSessionUserPreviewText,
+  getProjectSkillPaths, normalizeClaudeModelId, sessionListDisplayTitle,
   listAllMcpExtensions, listSkills as listAllSkills,
 } from '../agent/index.js';
 import { getDriver } from '../agent/driver.js';
+import { getActiveProfile, getProvider } from '../model/index.js';
 import { buildWelcomeIntro, buildSkillCommandName, indexSkillsByCommand, SKILL_CMD_PREFIX } from './menu.js';
 import { buildBotMenuState } from './orchestration.js';
 import { summarizePromptForStatus } from './streaming.js';
 import { getSessionStatusForChat } from './session-status.js';
+import { loadWorkspaces } from '../core/config/user-config.js';
 import { VERSION } from '../core/version.js';
 
 // ---------------------------------------------------------------------------
@@ -65,13 +68,48 @@ export function getStartData(bot: Bot, chatId: ChatId): StartData {
 }
 
 // ---------------------------------------------------------------------------
+// Workspaces (Dashboard-curated quick-pick list)
+// ---------------------------------------------------------------------------
+
+export interface WorkspaceQuickPick {
+  path: string;
+  name: string;
+  isCurrent: boolean;
+  exists: boolean;
+}
+
+export interface WorkspacesData {
+  currentWorkdir: string;
+  workspaces: WorkspaceQuickPick[];
+}
+
+export function getWorkspacesData(bot: Bot, chatId: ChatId): WorkspacesData {
+  const currentWorkdir = path.resolve(bot.chatWorkdir(chatId));
+  const entries = loadWorkspaces();
+  const workspaces = entries
+    .slice()
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map<WorkspaceQuickPick>(w => {
+      const resolved = path.resolve(w.path);
+      let exists = false;
+      try { exists = fs.existsSync(resolved) && fs.statSync(resolved).isDirectory(); } catch { exists = false; }
+      return {
+        path: resolved,
+        name: w.name || path.basename(resolved),
+        isCurrent: resolved === currentWorkdir,
+        exists,
+      };
+    });
+  return { currentWorkdir, workspaces };
+}
+
+// ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 
-function sessionListDisplayText(session: Pick<SessionInfo, 'lastQuestion' | 'title' | 'sessionId'>): string {
-  const question = sanitizeSessionUserPreviewText(String(session.lastQuestion || ''));
-  return question || session.title || session.sessionId || '';
-}
+// Title resolution lives in `agent/utils.ts:sessionListDisplayTitle` so the IM
+// channels and the dashboard agree on which field wins (always the original
+// `title`, never a sub-agent's `lastQuestion`).
 
 export interface SessionEntry {
   key: string;
@@ -144,7 +182,7 @@ export async function getSessionsPageData(bot: Bot, chatId: ChatId, page: number
       runState: status.isRunning ? 'running' : s.runState,
       runDetail: s.runDetail,
     });
-    const displayText = sessionListDisplayText(s);
+    const displayText = sessionListDisplayTitle(s);
     const title = displayText ? displayText.replace(/\n/g, ' ').slice(0, 20) : sessionKey.slice(0, 20);
     const time = s.createdAt
       ? new Date(s.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
@@ -206,10 +244,19 @@ export async function getSessionTurnPreviewData(
 
 export interface AgentEntry {
   agent: string;
+  /** Short, human-readable display name (e.g. "Claude Code"). */
+  label: string;
   installed: boolean;
+  /** Raw `--version` output from the CLI (may include name + extra metadata). */
   version: string | null;
+  /** Just the semver if extractable, else equals `version`. */
+  versionShort: string | null;
   path: string | null;
   isCurrent: boolean;
+  /** Bound provider name (BYOK), null when running native CLI auth. */
+  boundProvider: string | null;
+  /** Bound model id (BYOK), null when not bound. */
+  boundModel: string | null;
 }
 
 export interface AgentsListData {
@@ -217,18 +264,52 @@ export interface AgentsListData {
   agents: AgentEntry[];
 }
 
+const AGENT_LABEL_OVERRIDES: Record<string, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+  gemini: 'Gemini CLI',
+  hermes: 'Hermes',
+};
+
+function agentDisplayLabel(agentId: string): string {
+  return AGENT_LABEL_OVERRIDES[agentId]
+    || agentId.charAt(0).toUpperCase() + agentId.slice(1);
+}
+
+/**
+ * Pull the first semver-ish token out of a CLI `--version` string. Falls back
+ * to the original string when no semver is present.
+ *
+ *   "2.1.132 (Claude Code v2.1.132)"  → "2.1.132"
+ *   "Hermes Agent v0.12.0 (2026.4.30)" → "0.12.0"
+ *   "codex-cli 0.128.0"                → "0.128.0"
+ */
+function shortVersion(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const m = raw.match(/\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?/);
+  return m ? m[0] : raw.trim();
+}
+
 export function getAgentsListData(bot: Bot, chatId: ChatId): AgentsListData {
   const cs = bot.chat(chatId);
   const res = bot.fetchAgents();
   return {
     currentAgent: cs.agent,
-    agents: res.agents.map(a => ({
-      agent: a.agent,
-      installed: a.installed,
-      version: a.version ?? null,
-      path: a.path ?? null,
-      isCurrent: a.agent === cs.agent,
-    })),
+    agents: res.agents.map(a => {
+      const profile = getActiveProfile(a.agent);
+      const provider = profile ? getProvider(profile.providerId) : null;
+      return {
+        agent: a.agent,
+        label: agentDisplayLabel(a.agent),
+        installed: a.installed,
+        version: a.version ?? null,
+        versionShort: shortVersion(a.version ?? null),
+        path: a.path ?? null,
+        isCurrent: a.agent === cs.agent,
+        boundProvider: provider?.name ?? null,
+        boundModel: profile?.modelId ?? null,
+      };
+    }),
   };
 }
 
@@ -326,6 +407,13 @@ const EFFORT_LEVELS: Record<string, { id: string; label: string }[]> = {
     { id: 'max', label: 'Max' },
   ],
   codex: [
+    { id: 'low', label: 'Low' },
+    { id: 'medium', label: 'Medium' },
+    { id: 'high', label: 'High' },
+    { id: 'xhigh', label: 'Very High' },
+  ],
+  hermes: [
+    { id: 'minimal', label: 'Minimal' },
     { id: 'low', label: 'Low' },
     { id: 'medium', label: 'Medium' },
     { id: 'high', label: 'High' },

@@ -95,6 +95,11 @@ export interface StreamPreviewMeta {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
+  /** Single-call context window occupancy (input + cache_read + cache_creation
+   *  for the latest LLM call). Use this for "% of context window used" displays
+   *  — not the cumulative `inputTokens` etc., which double-count the same
+   *  cached prefix on every tool roundtrip. */
+  contextUsedTokens?: number | null;
   contextPercent: number | null;
   /**
    * Active sub-agent invocations (Claude `Task` tool). Drivers without sub-agent
@@ -178,14 +183,31 @@ export interface StreamOpts {
   geminiSandbox?: boolean;
   geminiSystemInstruction?: string;
   geminiExtraArgs?: string[];
+  // hermes — `hermes acp` ignores -m / --provider on the CLI, so the model
+  // is bound per-session via the ACP `session/set_model` request after
+  // `session/new`. The expected format is the ACP wire encoding
+  // `<provider>:<model>` (e.g. `openrouter:gpt-5.4-mini`).
+  hermesModel?: string;
   /** Override stdin payload (used for stream-json multimodal input) */
   _stdinOverride?: string;
   /** MCP bridge: callback when agent requests file send via MCP tool. Enables MCP bridge when provided. */
   mcpSendFile?: import('./mcp/bridge.js').McpSendFileCallback;
   /** Path to MCP config JSON — set by prepareStreamOpts, consumed by drivers. */
   mcpConfigPath?: string;
+  /**
+   * Resolved MCP server map (keyed by server name) for drivers that need the
+   * structured list rather than a config file path. Populated by stream.ts
+   * from the MCP bridge for the hermes ACP path.
+   */
+  mcpServers?: Record<string, any>;
   /** Extra environment variables for the spawned agent process. */
   extraEnv?: Record<string, string>;
+  /**
+   * BYOK argv tokens contributed by the model layer (e.g. ['-m', 'anthropic/sonnet-4'])
+   * — populated by stream.ts when an active Profile is bound. Drivers that build
+   * their own argv (Hermes via ACP) read this and append it after their own flags.
+   */
+  byokArgvAppend?: string[];
   /** Abort the in-flight stream. */
   abortSignal?: AbortSignal;
   /** Optional callback for agent human-in-the-loop interactions (all drivers). */
@@ -194,6 +216,32 @@ export interface StreamOpts {
   onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void;
   /** Optional callback when a Codex turn can be steered in place. */
   onCodexTurnReady?: (control: CodexTurnControl) => void;
+  /**
+   * Fork descriptor — when set, the driver creates a brand-new session that
+   * branches off `parentSessionId`. The driver chooses the native mechanism
+   * (e.g. Claude `--resume <id> --fork-session`). `atTurn` is recorded as
+   * lineage metadata; the actual agent context is whatever the native fork
+   * mechanism yields (typically the full parent history).
+   *
+   * `sessionId` MUST be null when forkOf is set — the fork creates its own ID.
+   */
+  forkOf?: {
+    parentSessionId: string;
+    atTurn: number;
+  };
+}
+
+/** Static capability flags advertised by an AgentDriver. */
+export interface AgentDriverCapabilities {
+  /** Driver supports forking a session into a new branch. */
+  fork: boolean;
+  /**
+   * Driver supports switching the model mid-session from the dashboard's
+   * cascade picker. When false, the dashboard shows the bound model in the
+   * chip but skips the "model" step (e.g. Hermes, whose model is locked at
+   * profile-binding time and is not switchable per-session via ACP today).
+   */
+  modelSwitch: boolean;
 }
 
 /** Result returned by a completed agent stream. */
@@ -251,10 +299,24 @@ export interface ManagedSessionRecord {
   lastMessageText: string | null;
   lastThinking: string | null;
   lastPlan: StreamPreviewPlan | null;
-  migratedFrom: { agent: Agent; sessionId: string } | null;
-  migratedTo: { agent: Agent; sessionId: string } | null;
-  linkedSessions: Array<{ agent: Agent; sessionId: string }>;
+  migratedFrom: SessionLineageRef | null;
+  migratedTo: SessionLineageRef | null;
+  linkedSessions: SessionLineageRef[];
   numTurns?: number | null;
+}
+
+/**
+ * Reference to a sibling/parent/child session, with optional fork metadata.
+ * `kind` defaults to 'migrate' (cross-agent migration) when absent so legacy
+ * records continue to round-trip cleanly. `forkedAtTurn` is set on
+ * `migratedFrom` when the child was forked AT a specific turn of its parent
+ * (0-based; the child inherits turns 0..forkedAtTurn).
+ */
+export interface SessionLineageRef {
+  agent: Agent;
+  sessionId: string;
+  kind?: 'migrate' | 'fork';
+  forkedAtTurn?: number;
 }
 
 /** The run-state of a session: running, completed, or incomplete. */
@@ -294,9 +356,9 @@ export interface SessionInfo {
   lastQuestion: string | null;
   lastAnswer: string | null;
   lastMessageText: string | null;
-  migratedFrom: { agent: Agent; sessionId: string } | null;
-  migratedTo: { agent: Agent; sessionId: string } | null;
-  linkedSessions: Array<{ agent: Agent; sessionId: string }>;
+  migratedFrom: SessionLineageRef | null;
+  migratedTo: SessionLineageRef | null;
+  linkedSessions: SessionLineageRef[];
   numTurns: number | null;
 }
 
@@ -338,6 +400,13 @@ export interface RichMessage {
   role: 'user' | 'assistant';
   text: string;
   blocks: MessageBlock[];
+  /**
+   * Per-turn token usage snapshot for assistant messages. Mirrors the live
+   * `StreamPreviewMeta` shape so the dashboard can render the same chip on
+   * historical turns. Drivers that don't expose per-message usage (Codex,
+   * Gemini) leave this null and the chip is omitted.
+   */
+  usage?: StreamPreviewMeta | null;
 }
 
 /** Result of a session tail request. */
