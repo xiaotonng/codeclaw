@@ -17,7 +17,6 @@ import type { CSSProperties, ReactNode } from 'react';
 import { api } from '../../api';
 import { useStore } from '../../store';
 import type {
-  BrowserStatusResponse,
   CliCatalogItem,
   McpAuthSpec,
   McpCatalogItem,
@@ -180,7 +179,7 @@ const AlertIcon = ({ size = 12 }: { size?: number }) => (
  */
 const LOCAL_BRAND_SLUGS = new Set([
   'claude', 'codex', 'gemini', 'telegram', 'feishu', 'weixin',
-  'playwright', 'appium', 'vscode', 'cursor', 'windsurf', 'finder',
+  'playwright', 'vscode', 'cursor', 'windsurf', 'finder',
 ]);
 
 /**
@@ -691,7 +690,7 @@ function ConnectedCard({
   busy: boolean;
   index: number;
   onPrimary: () => void;
-  onRemove: () => void;
+  onRemove?: () => void;
   onReauth?: () => void;
   onReconfigure?: () => void;
 }) {
@@ -771,7 +770,7 @@ function ConnectedCard({
           >
             {busy ? <Spinner /> : primaryLabel}
           </Button>
-          {item.installed && (
+          {item.installed && onRemove && (
             <Button variant="ghost" size="sm" onClick={onRemove} disabled={busy} className="hover:!text-err">
               {L(locale, '移除', 'Remove')}
             </Button>
@@ -795,11 +794,12 @@ function AvailableCard({
   index: number;
   onPrimary: () => void;
 }) {
-  const primaryLabel = (() => {
-    if (item.auth.type === 'mcp-oauth') return L(locale, '授权并启用', 'Authorize');
-    if (item.auth.type === 'credentials') return L(locale, '配置并启用', 'Configure');
-    return L(locale, '启用', 'Install');
-  })();
+  // Two-state button: needs setup vs zero-config. The OAuth/API-Key/none
+  // distinction shows up in the auth-kind label at the card's bottom-left;
+  // here we only signal "extra step" vs "one click".
+  const primaryLabel = item.auth.type === 'none'
+    ? L(locale, '一键启用', 'One-click enable')
+    : L(locale, '授权并启用', 'Authorize & enable');
 
   return (
     <div
@@ -982,11 +982,12 @@ function groupByCategory(items: McpCatalogItem[]): Array<{ key: string; items: M
 // ---------------------------------------------------------------------------
 
 function McpCatalogSection({
-  scope, workdir, locale,
+  scope, workdir, locale, onOpenBrowserSetup,
 }: {
   scope: 'global' | 'workspace';
   workdir?: string;
   locale: string;
+  onOpenBrowserSetup?: () => void;
 }) {
   const toast = useStore(s => s.toast);
   const cacheKey = `pikiclaw.mcp.catalog.${scope}.${workdir || ''}`;
@@ -1019,12 +1020,19 @@ function McpCatalogSection({
     );
   }, [scopedItems, search]);
 
-  const connectedItems = useMemo(
-    () => filtered.filter(i => i.installed),
+  const builtinItems = useMemo(
+    () => filtered.filter(i => i.isBuiltin),
+    [filtered],
+  );
+  // "在用" = currently active (state ready/unhealthy). "可添加" = everything
+  // else: pure recommended, plus installed-but-disabled and needs-auth items
+  // (those keep their saved creds so re-enable / re-auth is one click).
+  const activeItems = useMemo(
+    () => filtered.filter(i => !i.isBuiltin && (i.state === 'ready' || i.state === 'unhealthy')),
     [filtered],
   );
   const availableGroups = useMemo(
-    () => groupByCategory(filtered.filter(i => !i.installed)),
+    () => groupByCategory(filtered.filter(i => !i.isBuiltin && i.state !== 'ready' && i.state !== 'unhealthy')),
     [filtered],
   );
 
@@ -1100,10 +1108,18 @@ function McpCatalogSection({
   }, [runToggle, runOAuth]);
 
   const handleAvailablePrimary = useCallback((item: McpCatalogItem) => {
+    // Already-installed item that's just paused — flip the toggle, reuse creds.
+    if (item.state === 'disabled') { void runToggle(item, true); return; }
+    // Already-installed but missing creds/token — go straight to auth flow.
+    if (item.state === 'needs_auth') {
+      if (item.auth.type === 'mcp-oauth') { void runOAuth(item); return; }
+      if (item.auth.type === 'credentials') { setCredsTarget(item); return; }
+    }
+    // Pure recommended (not installed yet).
     if (item.auth.type === 'mcp-oauth') { void runOAuth(item); return; }
     if (item.auth.type === 'credentials') { setCredsTarget(item); return; }
     void runInstall(item);
-  }, [runOAuth, runInstall]);
+  }, [runOAuth, runInstall, runToggle]);
 
   const showSpinner = loading && !data;
 
@@ -1114,7 +1130,7 @@ function McpCatalogSection({
           <SectionLabel>MCP Servers</SectionLabel>
           {!loading && (
             <span className="text-[11px] text-fg-5">
-              {connectedItems.length} {L(locale, '已连接', 'connected')} · {scopedItems.length - connectedItems.length} {L(locale, '可添加', 'available')}
+              {activeItems.length} {L(locale, '在用', 'in use')} · {scopedItems.length - activeItems.length - builtinItems.length} {L(locale, '可添加', 'available')}
             </span>
           )}
           {loading && <Spinner className="h-3 w-3" />}
@@ -1139,15 +1155,49 @@ function McpCatalogSection({
         <div className="flex items-center justify-center py-10"><Spinner /></div>
       ) : (
         <div className="space-y-5">
-          {/* Connected */}
-          {connectedItems.length > 0 && (
+          {/* Built-in (pikiclaw-managed) */}
+          {builtinItems.length > 0 && (
+            <div>
+              <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-fg-5">
+                <span className="h-1.5 w-1.5 rounded-full bg-[var(--th-accent,#7c3aed)]"></span>
+                {L(locale, '内置（pikiclaw 优化）', 'Built-in (optimized by pikiclaw)')}
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {builtinItems.map((item, i) => (
+                  item.installed ? (
+                    <ConnectedCard
+                      key={item.id}
+                      item={item}
+                      locale={locale}
+                      busy={busy === item.id}
+                      index={i}
+                      onPrimary={() => handleConnectedPrimary(item)}
+                      onReconfigure={onOpenBrowserSetup}
+                    />
+                  ) : (
+                    <AvailableCard
+                      key={item.id}
+                      item={item}
+                      locale={locale}
+                      busy={busy === item.id}
+                      index={i}
+                      onPrimary={() => handleAvailablePrimary(item)}
+                    />
+                  )
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* In use */}
+          {activeItems.length > 0 && (
             <div>
               <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-fg-5">
                 <span className="h-1.5 w-1.5 rounded-full bg-[var(--th-ok)]"></span>
-                {L(locale, '已连接', 'Connected')}
+                {L(locale, '在用', 'In use')}
               </div>
               <div className="grid gap-2 sm:grid-cols-2">
-                {connectedItems.map((item, i) => (
+                {activeItems.map((item, i) => (
                   <ConnectedCard
                     key={item.id}
                     item={item}
@@ -1164,12 +1214,12 @@ function McpCatalogSection({
             </div>
           )}
 
-          {/* Available */}
+          {/* Available — recommended + previously-configured (disabled / needs_auth) */}
           {availableGroups.length > 0 && (
             <div>
               <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-fg-5">
                 <span className="h-1.5 w-1.5 rounded-full bg-fg-5"></span>
-                {connectedItems.length === 0
+                {activeItems.length === 0
                   ? L(locale, '推荐的服务', 'Recommended services')
                   : L(locale, '更多可选', 'More options')}
               </div>
@@ -1194,7 +1244,7 @@ function McpCatalogSection({
             </div>
           )}
 
-          {connectedItems.length === 0 && availableGroups.length === 0 && (
+          {builtinItems.length === 0 && activeItems.length === 0 && availableGroups.length === 0 && (
             <EmptyState
               title={L(locale, '没有匹配的服务', 'No matching services')}
               subtitle={L(locale, '试试别的关键词', 'Try a different search term')}
@@ -2063,38 +2113,6 @@ function CliCatalogSection({
 }
 
 // ---------------------------------------------------------------------------
-// Built-in automation row
-// ---------------------------------------------------------------------------
-
-function BuiltinRow({
-  brand,
-  title,
-  badge,
-  onClick,
-  buttonLabel,
-}: {
-  brand: string;
-  title: string;
-  badge: { label: string; variant: 'ok' | 'warn' | 'muted' | 'accent' };
-  onClick: () => void;
-  buttonLabel: string;
-}) {
-  return (
-    <SettingRowCard>
-      <SettingRowLead
-        icon={<BrandIcon brand={brand} size={14} />}
-        title={title}
-        badge={<Badge variant={badge.variant}>{badge.label}</Badge>}
-      />
-      <div className="min-w-0 xl:col-span-2" />
-      <SettingRowAction>
-        <Button variant="outline" size="sm" onClick={onClick}>{buttonLabel}</Button>
-      </SettingRowAction>
-    </SettingRowCard>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Public: tab (global scope) and modal body (workspace scope)
 // ---------------------------------------------------------------------------
 
@@ -2177,10 +2195,8 @@ function ExtensionTabNav({
 
 export function ExtensionsTab({
   onOpenBrowserSetup,
-  onOpenDesktopSetup,
 }: {
-  onOpenBrowserSetup: () => void;
-  onOpenDesktopSetup: () => void;
+  onOpenBrowserSetup?: () => void;
 }) {
   const locale = useStore(s => s.locale);
   const state = useStore(s => s.state);
@@ -2195,26 +2211,6 @@ export function ExtensionsTab({
     setTab(next);
     try { localStorage.setItem('pikiclaw:extensions:tab', next); } catch { /* quota */ }
   }, []);
-
-  const [snapshot, setSnapshot] = useState<BrowserStatusResponse | null>(null);
-  const refreshAutomation = useCallback(async () => {
-    try { setSnapshot(await api.getBrowser()); } catch { /* ignore */ }
-  }, []);
-  useEffect(() => { void refreshAutomation(); }, [refreshAutomation, state]);
-
-  const browser = snapshot?.browser;
-  const desktop = snapshot?.desktop;
-  const browserBadge: { label: string; variant: 'ok' | 'warn' | 'muted' | 'accent' } = !browser
-    ? { label: '...', variant: 'muted' }
-    : !browser.enabled ? { label: L(locale, '已关闭', 'Disabled'), variant: 'muted' }
-    : browser.running ? { label: L(locale, '运行中', 'Running'), variant: 'ok' }
-    : browser.status === 'ready' ? { label: L(locale, '就绪', 'Ready'), variant: 'ok' }
-    : { label: L(locale, '需配置', 'Needs setup'), variant: 'warn' };
-  const desktopBadge: { label: string; variant: 'ok' | 'warn' | 'muted' | 'accent' } = !desktop
-    ? { label: '...', variant: 'muted' }
-    : !desktop.installed ? { label: L(locale, '未安装', 'Not installed'), variant: 'muted' }
-    : desktop.running ? { label: L(locale, '运行中', 'Running'), variant: 'ok' }
-    : { label: L(locale, '已安装', 'Installed'), variant: 'accent' };
 
   return (
     <div className="animate-in space-y-6">
@@ -2233,26 +2229,7 @@ export function ExtensionsTab({
       <div key={tab} className="animate-in-fade">
         {tab === 'mcp' && (
           <div className="space-y-7">
-            <McpCatalogSection scope="global" workdir={workdir} locale={locale} />
-            <section>
-              <div className="mb-3"><SectionLabel>{L(locale, '内置自动化', 'Built-in Automation')}</SectionLabel></div>
-              <div className="space-y-1.5">
-                <BuiltinRow
-                  brand="playwright"
-                  title={L(locale, '浏览器自动化', 'Browser Automation')}
-                  badge={browserBadge}
-                  onClick={onOpenBrowserSetup}
-                  buttonLabel={browser?.enabled ? L(locale, '管理', 'Manage') : L(locale, '配置', 'Setup')}
-                />
-                <BuiltinRow
-                  brand="appium"
-                  title={L(locale, '桌面自动化', 'Desktop Automation')}
-                  badge={desktopBadge}
-                  onClick={onOpenDesktopSetup}
-                  buttonLabel={desktop?.running ? L(locale, '管理', 'Manage') : L(locale, '配置', 'Setup')}
-                />
-              </div>
-            </section>
+            <McpCatalogSection scope="global" workdir={workdir} locale={locale} onOpenBrowserSetup={onOpenBrowserSetup} />
           </div>
         )}
         {tab === 'cli' && <CliCatalogSection locale={locale} scope="global" />}

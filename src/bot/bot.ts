@@ -1743,6 +1743,30 @@ export class Bot {
   protected onManagedConfigChange(_config: Record<string, any>, _opts: { initial?: boolean } = {}) {}
 
   /**
+   * Subclass entry point — connect to the channel and block on its
+   * listen loop. Each channel implementation overrides this; calling it
+   * on the base class is a programming error.
+   */
+  public run(): Promise<void> {
+    throw new Error('Bot.run() must be implemented by a channel subclass');
+  }
+
+  /**
+   * Subclass hook: tear down the channel transport so `run()` can resolve.
+   * Subclasses override to disconnect their specific channel — the base
+   * implementation only cleans up the bot-level subscriptions that don't
+   * belong to any one channel.
+   *
+   * Used by ChannelSupervisor when a channel must be stopped or replaced
+   * in-process (channel removal, credential rotation) without restarting
+   * the entire pikiclaw runtime.
+   */
+  public requestStop(): void {
+    this.userConfigUnsubscribe?.();
+    this.userConfigUnsubscribe = null;
+  }
+
+  /**
    * Scan registered workspaces + the active workdir for sessions stuck in
    * 'running' state after a crash/restart and downgrade them to 'incomplete'.
    * Safe to call at any time — only touches records whose owning process is

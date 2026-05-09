@@ -53,7 +53,6 @@ src/
       registry.ts                    Recommended MCP server registry — types, transport / auth specs
       extensions.ts                  MCP extension management: CRUD, catalog merge, session merge
       oauth.ts                       MCP OAuth 2.1 + Dynamic Client Registration flow
-      playwright-proxy.ts            Playwright MCP proxy for browser automation integration
       tools/
         types.ts                     MCP tool result types and helper utilities
         workspace.ts                 im_list_files / im_send_file workspace tools
@@ -208,7 +207,6 @@ Everything related to agent CLI interaction: spawning, streaming, session manage
 | `mcp/registry.ts` | Recommended MCP server registry — types, transport specs, auth specs |
 | `mcp/extensions.ts` | MCP extension CRUD, catalog merge, session merge |
 | `mcp/oauth.ts` | MCP OAuth 2.1 + Dynamic Client Registration |
-| `mcp/playwright-proxy.ts` | Playwright MCP proxy with managed browser profile |
 | `mcp/tools/types.ts` | MCP tool result types and logging helpers |
 | `mcp/tools/workspace.ts` | `im_list_files` and `im_send_file` |
 | `mcp/tools/desktop.ts` | Desktop GUI automation tools via Appium Mac2 |

@@ -17,12 +17,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { getManagedBrowserProfileDir } from '../../browser-profile.js';
 import {
-  ensureManagedBrowser,
-  invalidateManagedBrowser,
-  probeManagedBrowser,
-} from '../../browser-supervisor.js';
+  getManagedBrowserProfileDir,
+  resolveManagedBrowserMcpCommand,
+} from '../../browser-profile.js';
+import { ensureManagedBrowser } from '../../browser-supervisor.js';
 import { loadUserConfig } from '../../core/config/user-config.js';
 import { MCP_TIMEOUTS, MCP_ARTIFACT_MAX_BYTES } from '../../core/constants.js';
 import { mergeExtensionsForSession, getGlobalExtensionsAsServers } from './extensions.js';
@@ -105,8 +104,6 @@ export interface GuiIntegrationConfig {
   browserEnabled: boolean;
   browserProfileDir: string;
   browserHeadless: boolean;
-  desktopEnabled: boolean;
-  desktopAppiumUrl: string;
 }
 
 function sanitizeExecArgv(execArgv: string[]): string[] {
@@ -151,27 +148,6 @@ export function resolveMcpServerCommand(runtime: McpServerRuntimeInfo = {
   return { command: 'pikiclaw', args: ['--mcp-serve'] };
 }
 
-export function resolvePlaywrightMcpProxyCommand(runtime: McpServerRuntimeInfo = {
-  execPath: process.execPath,
-  execArgv: process.execArgv,
-  argv: process.argv,
-  moduleUrl: import.meta.url,
-}): { command: string; args: string[] } {
-  const currentProcess = resolveCurrentCliCommand(runtime, ['--playwright-mcp-proxy']);
-  if (currentProcess) return currentProcess;
-
-  const thisDir = path.dirname(fileURLToPath(runtime.moduleUrl));
-  const proxyScript = path.join(thisDir, 'playwright-proxy.js');
-  if (fs.existsSync(proxyScript)) {
-    return { command: 'node', args: [proxyScript] };
-  }
-  const cliScript = path.resolve(thisDir, '../../cli/main.js');
-  if (fs.existsSync(cliScript)) {
-    return { command: 'node', args: [cliScript, '--playwright-mcp-proxy'] };
-  }
-  return { command: 'pikiclaw', args: ['--playwright-mcp-proxy'] };
-}
-
 function parseOptionalBool(value: unknown): boolean | null {
   if (typeof value === 'boolean') return value;
   const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -202,14 +178,18 @@ export function resolveGuiIntegrationConfig(
     browserEnabled,
     browserProfileDir: getManagedBrowserProfileDir(),
     browserHeadless: boolFromConfigEnv(config.browserHeadless, env.PIKICLAW_BROWSER_HEADLESS, false),
-    desktopEnabled: boolFromConfigEnv(config.desktopGuiEnabled, env.PIKICLAW_DESKTOP_GUI, process.platform === 'darwin'),
-    desktopAppiumUrl: String(env.PIKICLAW_DESKTOP_APPIUM_URL || config.desktopAppiumUrl || 'http://127.0.0.1:4723').trim() || 'http://127.0.0.1:4723',
   };
 }
 
 export interface BrowserSupervisorEndpoints {
-  /** Base URL of the bridge callback server, e.g. `http://127.0.0.1:54321`. */
-  baseUrl?: string | null;
+  /**
+   * CDP endpoint of the managed Chrome (e.g. `http://127.0.0.1:39222`),
+   * resolved by the in-process `browser-supervisor`. When provided, the
+   * Playwright MCP server runs in attach mode and shares the long-lived
+   * managed Chrome across all streams. When null, the Playwright MCP server
+   * launches its own browser via `--user-data-dir` (cold-start fallback).
+   */
+  cdpEndpoint?: string | null;
 }
 
 export function buildSupplementalMcpServers(
@@ -218,17 +198,15 @@ export function buildSupplementalMcpServers(
 ): RegisteredMcpServer[] {
   if (!gui.browserEnabled) return [];
   const profileDir = gui.browserProfileDir || getManagedBrowserProfileDir();
-  const browserServer = resolvePlaywrightMcpProxyCommand();
-  const baseUrl = (endpoints.baseUrl || '').trim();
+  const cdpEndpoint = (endpoints.cdpEndpoint || '').trim() || null;
+  const browserServer = resolveManagedBrowserMcpCommand(profileDir, {
+    headless: gui.browserHeadless,
+    cdpEndpoint,
+  });
   return [{
     name: 'pikiclaw-browser',
     command: browserServer.command,
     args: browserServer.args,
-    env: {
-      PIKICLAW_PLAYWRIGHT_PROFILE_DIR: profileDir,
-      PIKICLAW_PLAYWRIGHT_HEADLESS: String(gui.browserHeadless),
-      ...(baseUrl ? { PIKICLAW_BROWSER_SUPERVISOR_URL: `${baseUrl}/managed-browser` } : {}),
-    },
   }];
 }
 
@@ -375,11 +353,27 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   const { sessionDir, workspacePath, stagedFiles, sendFile } = opts;
   let hadActivity = false;
   const gui = resolveGuiIntegrationConfig();
-  // Browser preparation is no longer eager. The supervisor singleton in
-  // `browser-supervisor.ts` lazily ensures (and caches) Chrome state on demand
-  // when the playwright proxy hits the supervisor endpoints below.
+  // Resolve the managed-browser CDP endpoint eagerly so the Playwright MCP
+  // server can be spawned in attach mode directly (no proxy required). The
+  // supervisor singleton in `browser-supervisor.ts` caches the result so
+  // concurrent streams reuse the same long-lived Chrome instance; if the
+  // managed Chrome is unreachable we fall back to upstream-managed launch.
+  let browserCdpEndpoint: string | null = null;
   if (gui.browserEnabled) {
     for (const hint of buildGuiSetupHints(gui)) opts.onLog?.(hint);
+    try {
+      const snapshot = await ensureManagedBrowser({ headless: gui.browserHeadless });
+      browserCdpEndpoint = snapshot.cdpEndpoint;
+      if (browserCdpEndpoint && snapshot.connectionMode === 'attach') {
+        opts.onLog?.(`reusing managed browser via CDP at ${browserCdpEndpoint}.`);
+      } else if (browserCdpEndpoint) {
+        opts.onLog?.(`managed browser ready (mode=${snapshot.connectionMode}) at ${browserCdpEndpoint}.`);
+      } else {
+        opts.onLog?.('managed browser unavailable; falling back to upstream-managed launch.');
+      }
+    } catch (err: any) {
+      opts.onLog?.(`managed browser ensure failed: ${err?.message || err}; falling back to upstream-managed launch.`);
+    }
   }
 
   // Build allowed roots: workspace + workdir + /tmp
@@ -388,22 +382,17 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   allowedRoots.push('/tmp', os.tmpdir());
 
   // ── HTTP callback server ──
-  // Started whenever any in-process tool needs a localhost endpoint:
-  //   - IM tools (`im_send_file`, `im_list_files`) → /send-file, /log
-  //   - Managed browser supervisor (called by the playwright proxy)
-  //     → /managed-browser/probe, /managed-browser/ensure, /managed-browser/invalidate
+  // Started only when an IM-side callback is wired up, to serve:
+  //   - `im_send_file` → /send-file
+  //   - structured tool-activity logging from the in-process MCP server → /log
   let callbackServer: http.Server | null = null;
   let port = 0;
-  const needsCallbackServer = !!sendFile || gui.browserEnabled;
+  const needsCallbackServer = !!sendFile;
 
   if (needsCallbackServer) {
     callbackServer = http.createServer((req, res) => {
       const endpoint = req.url || '';
-      const known = endpoint === '/send-file'
-        || endpoint === '/log'
-        || endpoint === '/managed-browser/probe'
-        || endpoint === '/managed-browser/ensure'
-        || endpoint === '/managed-browser/invalidate';
+      const known = endpoint === '/send-file' || endpoint === '/log';
       if (req.method !== 'POST' || !known) {
         res.writeHead(404);
         res.end();
@@ -428,53 +417,6 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
               hadActivity = true;
               opts.onLog?.(message);
             }
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true }));
-            return;
-          }
-
-          if (endpoint === '/managed-browser/probe') {
-            if (!gui.browserEnabled) {
-              res.writeHead(403, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ ok: false, error: 'browser automation is disabled' }));
-              return;
-            }
-            const snapshot = await probeManagedBrowser();
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, ...snapshot }));
-            return;
-          }
-
-          if (endpoint === '/managed-browser/ensure') {
-            if (!gui.browserEnabled) {
-              res.writeHead(403, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ ok: false, error: 'browser automation is disabled' }));
-              return;
-            }
-            const data = body ? JSON.parse(body) : {};
-            const requestedHeadless = typeof data.headless === 'boolean' ? data.headless : gui.browserHeadless;
-            const force = !!data.force;
-            const snapshot = await ensureManagedBrowser({ headless: requestedHeadless, force });
-            if (snapshot.cdpEndpoint && snapshot.connectionMode === 'attach') {
-              opts.onLog?.(`reusing managed browser via CDP at ${snapshot.cdpEndpoint}.`);
-            } else if (snapshot.cdpEndpoint) {
-              opts.onLog?.(`managed browser ready (mode=${snapshot.connectionMode}) at ${snapshot.cdpEndpoint}.`);
-            } else {
-              opts.onLog?.('managed browser unavailable; falling back to upstream-managed launch.');
-            }
-            hadActivity = true;
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, ...snapshot }));
-            return;
-          }
-
-          if (endpoint === '/managed-browser/invalidate') {
-            if (!gui.browserEnabled) {
-              res.writeHead(403, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ ok: false, error: 'browser automation is disabled' }));
-              return;
-            }
-            invalidateManagedBrowser();
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
             return;
@@ -558,14 +500,12 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   }
 
   // ── Register MCP server with the agent ──
-  const baseUrl = port ? `http://127.0.0.1:${port}` : null;
-  const supplementalServers = buildSupplementalMcpServers(gui, { baseUrl });
+  const supplementalServers = buildSupplementalMcpServers(gui, { cdpEndpoint: browserCdpEndpoint });
   const servers: RegisteredMcpServer[] = [...supplementalServers];
 
-  // Register the pikiclaw IM tools server only when an IM-side callback is wired
-  // up (sendFile).  The callback server may also be running purely to serve
-  // the managed-browser supervisor, in which case the IM tools server is not
-  // needed.
+  // Register the pikiclaw IM tools server only when an IM-side callback is
+  // wired up (sendFile). The callback server (and its random port) only exists
+  // for that flow today.
   if (port && sendFile) {
     const { command, args } = resolveMcpServerCommand();
     const envVars = {
@@ -574,8 +514,6 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       MCP_STAGED_FILES: JSON.stringify(stagedFiles),
       MCP_CALLBACK_URL: `http://127.0.0.1:${port}`,
       MCP_LOG_URL: `http://127.0.0.1:${port}/log`,
-      PIKICLAW_DESKTOP_GUI: String(gui.desktopEnabled),
-      PIKICLAW_DESKTOP_APPIUM_URL: gui.desktopAppiumUrl,
     };
     servers.unshift({ name: 'pikiclaw', command, args, env: envVars });
   }

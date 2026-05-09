@@ -27,13 +27,8 @@ import {
 import {
   checkPermissions,
   detectHostTerminalApp,
-  installAppium,
-  isAppiumInstalled,
-  isManagedAppiumRunning,
   isValidPermissionKey,
   requestPermission,
-  startManagedAppium,
-  stopManagedAppium,
 } from '../platform.js';
 import { VERSION } from '../../core/version.js';
 import { runtime } from '../runtime.js';
@@ -45,7 +40,6 @@ import { writeScopedLog } from '../../core/logging.js';
 
 async function buildBrowserStatusResponse(config = loadUserConfig(), browserState = getManagedBrowserStatus()) {
   const gui = resolveGuiIntegrationConfig(config);
-  const installed = isAppiumInstalled();
   return {
     browser: {
       status: gui.browserEnabled ? browserState.status : 'disabled',
@@ -59,12 +53,6 @@ async function buildBrowserStatusResponse(config = loadUserConfig(), browserStat
       detail: gui.browserEnabled
         ? browserState.detail
         : 'Browser automation is disabled. No browser MCP server will be injected into agent sessions. On macOS, operate your main browser directly with open, osascript, and screencapture when needed.',
-    },
-    desktop: {
-      enabled: gui.desktopEnabled,
-      installed,
-      running: isManagedAppiumRunning(),
-      appiumUrl: gui.desktopAppiumUrl,
     },
   };
 }
@@ -206,7 +194,10 @@ app.get('/api/permissions', (c) => {
   return c.json(data);
 });
 
-// Save config (to ~/.pikiclaw/setting.json)
+// Save config (to ~/.pikiclaw/setting.json). Channel reconciliation is
+// handled by ChannelSupervisor via the onUserConfigChange listener — adding,
+// removing, or swapping credentials of an IM channel takes effect in-process
+// without restarting pikiclaw.
 app.post('/api/config', async (c) => {
   const body = await c.req.json();
   const merged = { ...loadUserConfig(), ...body };
@@ -361,50 +352,6 @@ app.post('/api/browser/setup', async (c) => {
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     runtime.log(`[browser] setup failed: ${detail}`);
-    return c.json({ ok: false, error: detail }, 500);
-  }
-});
-
-// Desktop: install Appium + Mac2 driver
-app.post('/api/desktop-install', async (c) => {
-  if (process.platform !== 'darwin') {
-    return c.json({ ok: false, error: 'Desktop automation is only supported on macOS' }, 400);
-  }
-  runtime.log('[desktop] install requested');
-  try {
-    await installAppium(msg => runtime.log(`[desktop] ${msg}`));
-    return c.json({ ok: true, installed: true });
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    runtime.log(`[desktop] install failed: ${detail}`);
-    return c.json({ ok: false, error: detail }, 500);
-  }
-});
-
-// Desktop: toggle enable/disable (start/stop Appium)
-app.post('/api/desktop-toggle', async (c) => {
-  const body = await c.req.json();
-  const enabled = !!body.enabled;
-  runtime.log(`[desktop] toggle enabled=${enabled}`);
-  try {
-    const config = loadUserConfig();
-    if (enabled) {
-      const gui = resolveGuiIntegrationConfig(config);
-      if (!isAppiumInstalled()) {
-        await installAppium(msg => runtime.log(`[desktop] ${msg}`));
-      }
-      await startManagedAppium(gui.desktopAppiumUrl, msg => runtime.log(`[desktop] ${msg}`));
-      saveUserConfig({ ...config, desktopGuiEnabled: true });
-      applyUserConfig(loadUserConfig());
-    } else {
-      stopManagedAppium();
-      saveUserConfig({ ...config, desktopGuiEnabled: false });
-      applyUserConfig(loadUserConfig());
-    }
-    return c.json({ ok: true, enabled });
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    runtime.log(`[desktop] toggle failed: ${detail}`);
     return c.json({ ok: false, error: detail }, 500);
   }
 });

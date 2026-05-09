@@ -1,13 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { getManagedBrowserProfileDir } from '../src/browser-profile.ts';
+import {
+  getManagedBrowserProfileDir,
+  resolveManagedBrowserMcpCommand,
+} from '../src/browser-profile.ts';
 import {
   buildGuiSetupHints,
   buildSupplementalMcpServers,
   resolveGuiIntegrationConfig,
   resolveMcpServerCommand,
-  resolvePlaywrightMcpProxyCommand,
   resolveSendFilePath,
 } from '../src/agent/mcp/bridge.ts';
 import { makeTmpDir } from './support/env.ts';
@@ -89,30 +91,22 @@ describe('resolveGuiIntegrationConfig', () => {
       browserEnabled: false,
       browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: false,
-      desktopEnabled: process.platform === 'darwin',
-      desktopAppiumUrl: 'http://127.0.0.1:4723',
     });
   });
 
   it('prefers env overrides over user config defaults', () => {
     const config = {
       browserEnabled: false,
-      desktopGuiEnabled: false,
-      desktopAppiumUrl: 'http://config-appium:4723',
     };
     const gui = resolveGuiIntegrationConfig(config as any, {
       PIKICLAW_BROWSER_ENABLED: 'true',
       PIKICLAW_BROWSER_HEADLESS: 'true',
-      PIKICLAW_DESKTOP_GUI: 'true',
-      PIKICLAW_DESKTOP_APPIUM_URL: 'http://env-appium:4723',
     });
 
     expect(gui).toEqual({
       browserEnabled: true,
       browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: true,
-      desktopEnabled: true,
-      desktopAppiumUrl: 'http://env-appium:4723',
     });
   });
 
@@ -131,21 +125,18 @@ describe('buildSupplementalMcpServers', () => {
       browserEnabled: false,
       browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: false,
-      desktopEnabled: true,
-      desktopAppiumUrl: 'http://127.0.0.1:4723',
     });
 
     expect(servers).toEqual([]);
   });
 
-  it('adds Playwright MCP with the managed browser profile args when enabled', () => {
-    const expected = resolvePlaywrightMcpProxyCommand();
+  it('spawns @playwright/mcp directly in user-data-dir mode when no CDP endpoint is supplied', () => {
+    const profileDir = getManagedBrowserProfileDir();
+    const expected = resolveManagedBrowserMcpCommand(profileDir, { headless: false });
     const servers = buildSupplementalMcpServers({
       browserEnabled: true,
-      browserProfileDir: getManagedBrowserProfileDir(),
+      browserProfileDir: profileDir,
       browserHeadless: false,
-      desktopEnabled: true,
-      desktopAppiumUrl: 'http://127.0.0.1:4723',
     });
 
     expect(servers).toEqual([
@@ -153,25 +144,20 @@ describe('buildSupplementalMcpServers', () => {
         name: 'pikiclaw-browser',
         command: expected.command,
         args: expected.args,
-        env: {
-          PIKICLAW_PLAYWRIGHT_PROFILE_DIR: getManagedBrowserProfileDir(),
-          PIKICLAW_PLAYWRIGHT_HEADLESS: 'false',
-        },
       },
     ]);
   });
 
-  it('exposes the supervisor base URL so the proxy can resolve the CDP endpoint on demand', () => {
+  it('spawns @playwright/mcp in attach mode when a managed-browser CDP endpoint is supplied', () => {
     const profileDir = path.join('/tmp', 'pikiclaw', 'browser', 'chrome-profile');
-    const expected = resolvePlaywrightMcpProxyCommand();
+    const cdpEndpoint = 'http://127.0.0.1:39222';
+    const expected = resolveManagedBrowserMcpCommand(profileDir, { headless: true, cdpEndpoint });
     const servers = buildSupplementalMcpServers({
       browserEnabled: true,
       browserProfileDir: profileDir,
       browserHeadless: true,
-      desktopEnabled: true,
-      desktopAppiumUrl: 'http://127.0.0.1:4723',
     }, {
-      baseUrl: 'http://127.0.0.1:54321',
+      cdpEndpoint,
     });
 
     expect(servers).toEqual([
@@ -179,13 +165,10 @@ describe('buildSupplementalMcpServers', () => {
         name: 'pikiclaw-browser',
         command: expected.command,
         args: expected.args,
-        env: {
-          PIKICLAW_PLAYWRIGHT_PROFILE_DIR: profileDir,
-          PIKICLAW_PLAYWRIGHT_HEADLESS: 'true',
-          PIKICLAW_BROWSER_SUPERVISOR_URL: 'http://127.0.0.1:54321/managed-browser',
-        },
       },
     ]);
+    expect(expected.args).toContain('--cdp-endpoint');
+    expect(expected.args).toContain(cdpEndpoint);
   });
 });
 
@@ -195,8 +178,6 @@ describe('buildGuiSetupHints', () => {
       browserEnabled: false,
       browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: false,
-      desktopEnabled: true,
-      desktopAppiumUrl: 'http://127.0.0.1:4723',
     });
 
     expect(hints).toEqual([]);
@@ -208,8 +189,6 @@ describe('buildGuiSetupHints', () => {
       browserEnabled: true,
       browserProfileDir: profileDir,
       browserHeadless: true,
-      desktopEnabled: true,
-      desktopAppiumUrl: 'http://127.0.0.1:4723',
     });
 
     expect(hints).toEqual([

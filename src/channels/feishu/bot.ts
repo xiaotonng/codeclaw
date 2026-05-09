@@ -177,6 +177,11 @@ export class FeishuBot extends Bot {
     }
   }
 
+  public override requestStop(): void {
+    super.requestStop();
+    try { this.channel?.disconnect(); } catch {}
+  }
+
   protected override onManagedConfigChange(config: Record<string, any>, opts: { initial?: boolean } = {}) {
     const nextAppId = String(config.feishuAppId || process.env.FEISHU_APP_ID || '').trim();
     const nextAppSecret = String(config.feishuAppSecret || process.env.FEISHU_APP_SECRET || '').trim();

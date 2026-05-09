@@ -50,10 +50,6 @@ export const DASHBOARD_TIMEOUTS = {
   agentInstall: 10 * 60_000,
   /** Default timeout for dashboard-spawned shell commands. */
   runCommand: 30_000,
-  /** Timeout for Appium reachability checks. */
-  appiumReachable: 3_000,
-  /** Delay between Appium server startup polls. */
-  appiumStartPoll: 1_000,
 };
 
 // ---------------------------------------------------------------------------
@@ -69,7 +65,7 @@ export const MANAGED_BROWSER_PROFILE_SUBPATH = path.join('.pikiclaw', 'browser',
 
 /** Base Playwright MCP args for the managed browser integration. */
 export const PLAYWRIGHT_MCP_PACKAGE_NAME = '@playwright/mcp';
-export const PLAYWRIGHT_MCP_PACKAGE_VERSION = '0.0.70';
+export const PLAYWRIGHT_MCP_PACKAGE_VERSION = '0.0.75';
 export const PLAYWRIGHT_MCP_PACKAGE_SPEC = `${PLAYWRIGHT_MCP_PACKAGE_NAME}@${PLAYWRIGHT_MCP_PACKAGE_VERSION}`;
 export const PLAYWRIGHT_MCP_BROWSER_ARGS = ['--browser', 'chrome', '--viewport-size', '1920x1080'] as const;
 
@@ -83,12 +79,6 @@ export const DASHBOARD_PAGINATION = {
 export const DASHBOARD_PERMISSION_TIMEOUTS = {
   /** Default timeout for osascript / JXA calls. */
   jxaDefault: 5_000,
-  /** Timeout for accessibility keystroke probe. */
-  accessibilityProbe: 4_000,
-  /** Timeout for CGPreflight accessibility check. */
-  accessibilityPreflight: 4_000,
-  /** Timeout for CGRequest accessibility request. */
-  accessibilityRequest: 6_000,
   /** Timeout for screencapture permission probe. */
   screenRecordingProbe: 5_000,
   /** Timeout for CGPreflight screen capture check. */
@@ -99,18 +89,6 @@ export const DASHBOARD_PERMISSION_TIMEOUTS = {
   openSystemPreferences: 3_000,
   /** Timeout for parent process tree detection. */
   detectTerminal: 3_000,
-};
-
-/** Timeouts for Appium installation steps (dashboard). */
-export const DASHBOARD_APPIUM_TIMEOUTS = {
-  /** Timeout for `which appium`. */
-  whichAppium: 5_000,
-  /** Timeout for `appium driver list`. */
-  driverList: 15_000,
-  /** Timeout for `npm install appium`. */
-  npmInstallAppium: 300_000,
-  /** Timeout for `appium driver install mac2`. */
-  driverInstallMac2: 120_000,
 };
 
 // ---------------------------------------------------------------------------

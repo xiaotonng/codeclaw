@@ -60,7 +60,6 @@ src/
       registry.ts                    Recommended MCP server registry — types, transport / auth specs
       extensions.ts                  MCP extension CRUD, catalog merge, session merge
       oauth.ts                       MCP OAuth 2.1 + Dynamic Client Registration flow
-      playwright-proxy.ts            Playwright MCP proxy for browser automation
       tools/
         workspace.ts                 im_list_files / im_send_file
         desktop.ts                   Desktop GUI automation via Appium

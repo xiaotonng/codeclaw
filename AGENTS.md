@@ -49,7 +49,6 @@ src/
       registry.ts             Recommended MCP server types
       extensions.ts           MCP extension CRUD + session merge
       oauth.ts                MCP OAuth 2.1 + Dynamic Client Registration
-      playwright-proxy.ts     Playwright MCP proxy
       tools/{workspace,desktop,ask-user,types}.ts
 
   bot/                        Channel-agnostic bot runtime

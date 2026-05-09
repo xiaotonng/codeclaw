@@ -1069,7 +1069,10 @@ describe('claude stream', () => {
     expect(parsed.inputTokens).toBe(150);
     expect(parsed.cachedInputTokens).toBe(30);
     expect(parsed.outputTokens).toBe(60);
-    expect(parsed.contextWindow).toBe(200000);
+    // contextWindow stores the *effective* usable window (advertised − 20K
+    // max-output reserve − 13K auto-compact buffer), matching cc 2.1.112's
+    // `Yn() − t_7` denominator. 200_000 − 33_000 = 167_000.
+    expect(parsed.contextWindow).toBe(167000);
     expect(parsed.activity).toContain('Read src/bot.ts');
     expect(activities.some(activity => activity.includes('Read src/bot.ts done'))).toBe(true);
 
@@ -1093,9 +1096,12 @@ describe('claude stream', () => {
       },
     }));
     expect(claudeFallback.ok).toBe(true);
-    expect(claudeFallback.contextWindow).toBe(1000000);
-    expect(claudeFallback.contextPercent).toBe(2.6);
-    expect(claudePreviewPercents).toContain(2.6);
+    // 1_000_000 advertised − 33_000 (20K maxOut + 13K autoCompact buffer) = 967_000
+    expect(claudeFallback.contextWindow).toBe(967000);
+    // contextUsedTokens = input(25000) + cached(1000) + cache_creation(0) + output(0)
+    //                   = 26000; 26000 / 967000 ≈ 2.689 → 2.7
+    expect(claudeFallback.contextPercent).toBe(2.7);
+    expect(claudePreviewPercents).toContain(2.7);
 
     writeFakeScript('claude', [
       { type: 'system', session_id: 's2' },

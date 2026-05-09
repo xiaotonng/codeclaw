@@ -89,6 +89,7 @@ export class WeixinChannel extends Channel {
   private readonly chatMeta = new Map<string, WeixinChatMeta>();
   private stopping = false;
   private updateBuf = '';
+  private listenAbort: AbortController | null = null;
 
   constructor(opts: WeixinOpts) {
     super();
@@ -121,34 +122,41 @@ export class WeixinChannel extends Channel {
 
   async listen(): Promise<void> {
     this.stopping = false;
+    this.listenAbort = new AbortController();
     let retryDelayMs = 1_000;
-    while (!this.stopping) {
-      try {
-        const response = await weixinGetUpdates({
-          baseUrl: this.baseUrl,
-          token: this.token,
-          getUpdatesBuf: this.updateBuf,
-          timeoutMs: this.pollTimeout,
-        });
-        retryDelayMs = 1_000;
-        if (response.get_updates_buf !== undefined) this.updateBuf = response.get_updates_buf || '';
-        if ((response.ret ?? 0) !== 0 || (response.errcode ?? 0) !== 0) {
-          throw new Error(`Weixin getupdates failed: ${response.errmsg || response.errcode || response.ret}`);
+    try {
+      while (!this.stopping) {
+        try {
+          const response = await weixinGetUpdates({
+            baseUrl: this.baseUrl,
+            token: this.token,
+            getUpdatesBuf: this.updateBuf,
+            timeoutMs: this.pollTimeout,
+            signal: this.listenAbort.signal,
+          });
+          retryDelayMs = 1_000;
+          if (response.get_updates_buf !== undefined) this.updateBuf = response.get_updates_buf || '';
+          if ((response.ret ?? 0) !== 0 || (response.errcode ?? 0) !== 0) {
+            throw new Error(`Weixin getupdates failed: ${response.errmsg || response.errcode || response.ret}`);
+          }
+          for (const message of response.msgs || []) {
+            await this.dispatchInboundMessage(message);
+          }
+        } catch (error) {
+          if (this.stopping || isAbortError(error)) break;
+          this.emitError(new Error(`Weixin polling failed: ${describeError(error)}`));
+          await sleep(retryDelayMs);
+          retryDelayMs = Math.min(retryDelayMs * 2, WEIXIN_MAX_RETRY_DELAY_MS);
         }
-        for (const message of response.msgs || []) {
-          await this.dispatchInboundMessage(message);
-        }
-      } catch (error) {
-        if (this.stopping || isAbortError(error)) break;
-        this.emitError(new Error(`Weixin polling failed: ${describeError(error)}`));
-        await sleep(retryDelayMs);
-        retryDelayMs = Math.min(retryDelayMs * 2, WEIXIN_MAX_RETRY_DELAY_MS);
       }
+    } finally {
+      this.listenAbort = null;
     }
   }
 
   disconnect(): void {
     this.stopping = true;
+    this.listenAbort?.abort();
   }
 
   async send(chatId: number | string, text: string, _opts?: SendOpts): Promise<string | null> {

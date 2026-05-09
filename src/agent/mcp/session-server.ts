@@ -19,7 +19,6 @@
 import path from 'node:path';
 import { createRetainedLogSink, writeScopedLog, type LogLevel } from '../../core/logging.js';
 import type { McpToolModule, ToolContext } from './tools/types.js';
-import { desktopTools } from './tools/desktop.js';
 import { workspaceTools } from './tools/workspace.js';
 
 // ---------------------------------------------------------------------------
@@ -70,15 +69,8 @@ log(`started workspace=${ctx.workspace} stagedFiles=${ctx.stagedFiles.length} ca
 // Tool registry — collect all tool modules
 // ---------------------------------------------------------------------------
 
-function desktopToolsEnabled(): boolean {
-  const raw = String(process.env.PIKICLAW_DESKTOP_GUI || '').trim().toLowerCase();
-  if (!raw) return process.platform === 'darwin';
-  return ['1', 'true', 'yes', 'on'].includes(raw);
-}
-
 const TOOL_MODULES: McpToolModule[] = [
   workspaceTools,
-  ...(desktopToolsEnabled() ? [desktopTools] : []),
 ];
 
 const ALL_TOOLS = TOOL_MODULES.flatMap(m => m.tools);

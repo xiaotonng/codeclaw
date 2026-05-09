@@ -12,8 +12,8 @@ import path from 'node:path';
 import { startAgentAutoUpdate } from '../agent/auto-update.js';
 import { envBool, DEFAULT_RUN_TIMEOUT_S } from '../bot/bot.js';
 import { DAEMON_TIMEOUTS } from '../core/constants.js';
-import { TelegramBot } from '../channels/telegram/bot.js';
 import { hasConfiguredChannelToken, resolveConfiguredChannels } from './channels.js';
+import { ChannelSupervisor } from './channel-supervisor.js';
 import { listAgents } from '../agent/index.js';
 import { startDashboard, type DashboardServer } from '../dashboard/server.js';
 import { buildSetupGuide, collectSetupState, hasReadyAgent, isSetupReady } from './onboarding.js';
@@ -196,10 +196,6 @@ const listVerboseAgents = () => listAgents({ includeVersion: true }).agents;
 async function handleMcpServeMode(): Promise<boolean> {
   if (process.argv.includes('--mcp-serve')) {
     await import('../agent/mcp/session-server.js');
-    return true;
-  }
-  if (process.argv.includes('--playwright-mcp-proxy')) {
-    await import('../agent/mcp/playwright-proxy.js');
     return true;
   }
   return false;
@@ -582,42 +578,25 @@ function applyRuntimeConfig(
 
 /* ── Phase: channel launch ────────────────────────────────────────── */
 
-/** Start bot(s) for each configured channel, attaching to dashboard if present. */
+/**
+ * Hand off channel lifecycle to ChannelSupervisor and block forever. The
+ * supervisor reconciles bots against the user config — adding, removing,
+ * or replacing channels in response to dashboard saves without restarting
+ * the pikiclaw process.
+ *
+ * Per-bot signal handlers (and the daemon supervisor when present) drive
+ * process exit; this promise is just a foreground keep-alive.
+ */
 async function launchChannels(
   channels: ChannelName[],
   dashboard: DashboardServer | null,
 ): Promise<void> {
-  async function launchChannel(ch: ChannelName): Promise<void> {
-    switch (ch) {
-      case 'telegram': {
-        const bot = new TelegramBot();
-        if (dashboard) dashboard.attachBot(bot);
-        await bot.run();
-        break;
-      }
-      case 'feishu': {
-        const { FeishuBot } = await import('../channels/feishu/bot.js');
-        const bot = new FeishuBot();
-        if (dashboard) dashboard.attachBot(bot);
-        await bot.run();
-        break;
-      }
-      case 'weixin': {
-        const { WeixinBot } = await import('../channels/weixin/bot.js');
-        const bot = new WeixinBot();
-        if (dashboard) dashboard.attachBot(bot);
-        await bot.run();
-        break;
-      }
-    }
-  }
-
-  if (channels.length === 1) {
-    await launchChannel(channels[0]);
-  } else {
-    processLog(`launching channels: ${channels.join(', ')}`);
-    await Promise.all(channels.map(ch => launchChannel(ch)));
-  }
+  processLog(`launching channels: ${channels.join(', ')}`);
+  const supervisor = new ChannelSupervisor({ dashboard, log: processLog });
+  await supervisor.start();
+  // Block forever — the dashboard HTTP listener and per-channel signal
+  // handlers keep the process alive and drive shutdown.
+  await new Promise<void>(() => {});
 }
 
 /* ── main() ───────────────────────────────────────────────────────── */

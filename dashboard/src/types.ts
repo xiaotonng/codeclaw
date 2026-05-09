@@ -363,12 +363,6 @@ export interface BrowserStatus {
 
 export interface BrowserStatusResponse {
   browser: BrowserStatus;
-  desktop: {
-    enabled: boolean;
-    installed: boolean;
-    running: boolean;
-    appiumUrl: string;
-  };
 }
 
 export interface BrowserSetupResponse {
@@ -460,6 +454,7 @@ export interface McpCatalogItem {
   config?: McpServerConfig;
   installedKey?: string;
   recommendedScope?: RecommendedScope;
+  isBuiltin?: boolean;
 }
 
 export interface RecommendedSkillRepo {

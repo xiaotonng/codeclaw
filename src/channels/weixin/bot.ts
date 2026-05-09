@@ -73,6 +73,11 @@ export class WeixinBot extends Bot {
     }
   }
 
+  public override requestStop(): void {
+    super.requestStop();
+    try { this.channel?.disconnect(); } catch {}
+  }
+
   protected override onManagedConfigChange(config: Record<string, any>, opts: { initial?: boolean } = {}) {
     const nextBaseUrl = String(config.weixinBaseUrl || process.env.WEIXIN_BASE_URL || '').trim();
     const nextBotToken = String(config.weixinBotToken || process.env.WEIXIN_BOT_TOKEN || '').trim();

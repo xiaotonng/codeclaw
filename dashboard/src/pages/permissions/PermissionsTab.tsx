@@ -5,7 +5,7 @@ import { useStore } from '../../store';
 import { Badge, Button } from '../../components/ui';
 import { SettingRowAction, SettingRowCard, SettingRowField, SettingRowLead } from '../shared';
 
-type PermissionKey = 'accessibility' | 'screenRecording' | 'fullDiskAccess';
+type PermissionKey = 'screenRecording' | 'fullDiskAccess';
 
 type PermissionMeta = {
   key: PermissionKey;
@@ -35,21 +35,6 @@ type CopyPack = {
 };
 
 const PERMISSIONS: PermissionMeta[] = [
-  {
-    key: 'accessibility',
-    labelKey: 'perm.accessibility',
-    reasonZh: '允许控制桌面应用、点击和输入。',
-    reasonEn: 'Allows controlling desktop apps with clicks and typing.',
-    guidePathKey: 'perm.pathAccessibility',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="5" r="1.8" />
-        <path d="M12 7.7v10.2" />
-        <path d="M8.4 10h7.2" />
-        <path d="M9.6 19.2 12 15.1l2.4 4.1" />
-      </svg>
-    ),
-  },
   {
     key: 'screenRecording',
     labelKey: 'perm.screenRecording',

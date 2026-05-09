@@ -151,7 +151,11 @@ describe('Claude context fallback', () => {
     ]);
 
     const result = await doClaudeStream(baseOpts);
-    expect(result.contextWindow).toBe(1_000_000);
-    expect(result.contextPercent).toBe(2.6);
+    // contextWindow stores the *effective* usable window: advertised 1M minus
+    // 20K max-output reserve and 13K auto-compact buffer (matches cc 2.1.112's
+    // `Yn() − t_7` denominator).
+    expect(result.contextWindow).toBe(967_000);
+    // 26000 used / 967000 = 2.689... → 2.7
+    expect(result.contextPercent).toBe(2.7);
   });
 });

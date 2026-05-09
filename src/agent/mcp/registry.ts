@@ -74,6 +74,13 @@ export interface RecommendedMcpServer {
   /** Optional override URL for the brand logo (SVG/PNG). Falls back to simpleicons CDN via iconSlug. */
   iconUrl?: string;
   homepage?: string;
+  /**
+   * Builtin entries are pikiclaw-managed: install/toggle/remove map to a config
+   * flag rather than `extensions.mcp`, and the runtime injects a custom command
+   * (with browser-supervisor lifecycle) instead of running `transport.command`.
+   * Surfaced in a dedicated "Built-in" section at the top of the catalog UI.
+   */
+  isBuiltin?: boolean;
 }
 
 export type SkillCategory = 'general' | 'dev' | 'productivity';

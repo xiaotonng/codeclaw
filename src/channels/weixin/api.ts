@@ -137,6 +137,36 @@ function withTimeoutSignal(timeoutMs: number): { signal: AbortSignal; dispose: (
   };
 }
 
+/**
+ * Combine a timeout signal with an optional external "stop" signal so that
+ * either source can abort the in-flight request. Used by long-poll callers
+ * to cut over immediately when the channel is being torn down (config change,
+ * channel removal) without waiting out the long-poll timeout.
+ */
+function combineAbortSignals(
+  timeoutMs: number,
+  external?: AbortSignal,
+): { signal: AbortSignal; dispose: () => void } {
+  const timeout = withTimeoutSignal(timeoutMs);
+  if (!external) return timeout;
+  if (external.aborted) {
+    timeout.dispose();
+    return { signal: external, dispose: () => {} };
+  }
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  timeout.signal.addEventListener('abort', onAbort, { once: true });
+  external.addEventListener('abort', onAbort, { once: true });
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      timeout.signal.removeEventListener('abort', onAbort);
+      external.removeEventListener('abort', onAbort);
+      timeout.dispose();
+    },
+  };
+}
+
 function buildWeixinHeaders(body: string, token?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -267,20 +297,21 @@ async function weixinPostJson<T>(params: {
   token?: string;
   timeoutMs: number;
   label: string;
+  signal?: AbortSignal;
 }): Promise<T> {
   const url = new URL(params.endpoint, `${normalizeFetchBaseUrl(params.baseUrl)}/`);
   const body = JSON.stringify(params.body);
-  const timeout = withTimeoutSignal(params.timeoutMs);
+  const combined = combineAbortSignals(params.timeoutMs, params.signal);
   try {
     const response = await fetch(url.toString(), {
       method: 'POST',
       headers: buildWeixinHeaders(body, params.token),
       body,
-      signal: timeout.signal,
+      signal: combined.signal,
     });
     return await parseJsonResponse<T>(response, params.label);
   } finally {
-    timeout.dispose();
+    combined.dispose();
   }
 }
 
@@ -332,6 +363,7 @@ export async function weixinGetUpdates(params: {
   token: string;
   getUpdatesBuf?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<WeixinGetUpdatesResp> {
   const timeoutMs = params.timeoutMs ?? WEIXIN_LIMITS.longPollTimeout;
   try {
@@ -345,6 +377,7 @@ export async function weixinGetUpdates(params: {
       token: params.token,
       timeoutMs,
       label: 'weixin getupdates',
+      signal: params.signal,
     });
   } catch (error) {
     if (isAbortError(error)) {

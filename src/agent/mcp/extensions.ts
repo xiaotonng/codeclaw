@@ -80,6 +80,12 @@ export interface McpCatalogItem {
   installedKey?: string;
   /** Intended scope from the recommended registry (undefined for custom). */
   recommendedScope?: RecommendedScope;
+  /**
+   * Builtin entries surface alongside catalog items but are managed by pikiclaw
+   * (state derived from a config flag, no `extensions.mcp` storage). Rendered
+   * in a dedicated "Built-in" section at the top of the catalog UI.
+   */
+  isBuiltin?: boolean;
 }
 
 interface RegisteredMcpServer {
@@ -324,14 +330,40 @@ export function getCatalogItems(opts: {
   };
 
   const items: McpCatalogItem[] = [];
+  // Builtin items derive their installed/state from a top-level config flag
+  // rather than `extensions.mcp`. Today the only builtin is `pikiclaw-browser`
+  // (driven by `browserEnabled`); add more cases here if other builtins land.
+  const userConfig = loadUserConfig();
+  const builtinInstalled = (catalogId: string): boolean => {
+    if (catalogId === 'pikiclaw-browser') return userConfig.browserEnabled === true;
+    return false;
+  };
 
   // 1. Registry entries — preserve registry ordering.
   for (const rec of recommended) {
     if (!scopeMatchesRec(rec)) continue;
     const entry = installedByCatalogId.get(rec.id);
-    const state: McpCatalogState = entry
-      ? computeStateForInstalled(entry.config, rec.auth, rec.id, opts.unhealthyIds)
-      : 'recommended';
+    let state: McpCatalogState;
+    let installed: boolean;
+    let installedKey: string | undefined;
+    let scope: ExtensionScope | undefined;
+    let config: McpServerConfig | undefined;
+    if (rec.isBuiltin) {
+      installed = builtinInstalled(rec.id);
+      state = installed ? 'ready' : 'recommended';
+      installedKey = installed ? rec.id : undefined;
+      // Leave scope undefined: builtins aren't tied to global/workspace
+      // storage, and the catalog UI's scope filter ignores items with no scope.
+      scope = undefined;
+    } else {
+      state = entry
+        ? computeStateForInstalled(entry.config, rec.auth, rec.id, opts.unhealthyIds)
+        : 'recommended';
+      installed = !!entry;
+      installedKey = entry?.name;
+      scope = entry?.scope;
+      config = entry?.config;
+    }
     items.push({
       id: rec.id,
       name: rec.name,
@@ -345,11 +377,12 @@ export function getCatalogItems(opts: {
       auth: rec.auth,
       state,
       isRecommended: true,
-      installed: !!entry,
-      scope: entry?.scope,
-      config: entry?.config,
-      installedKey: entry?.name,
+      installed,
+      scope,
+      config,
+      installedKey,
       recommendedScope: rec.recommendedScope,
+      isBuiltin: rec.isBuiltin,
     });
   }
 

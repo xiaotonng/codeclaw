@@ -31,6 +31,21 @@
 import type { RecommendedMcpServer } from '../agent/mcp/registry.js';
 
 export const MCP_SERVERS: RecommendedMcpServer[] = [
+  // ── Built-in (pikiclaw-managed) ────────────────────────────────────────────
+  {
+    id: 'pikiclaw-browser',
+    name: 'Browser Automation',
+    description: 'Optimized Playwright MCP — managed Chrome with shared profile, CDP attach, and supervisor lifecycle.',
+    descriptionZh: '基于 Playwright MCP 的定制版浏览器自动化：受管 Chrome、共享 profile、CDP 附着、进程级 supervisor。',
+    category: 'utility',
+    recommendedScope: 'global',
+    transport: { type: 'stdio', command: '@playwright/mcp', args: ['(managed by pikiclaw)'] },
+    auth: { type: 'none' },
+    iconSlug: 'playwright',
+    homepage: 'https://github.com/microsoft/playwright-mcp',
+    isBuiltin: true,
+  },
+
   // ── Local filesystems / databases (workspace scope) ────────────────────────
   {
     id: 'filesystem',
@@ -131,7 +146,7 @@ export const MCP_SERVERS: RecommendedMcpServer[] = [
     descriptionZh: '错误追踪 — 查询 Issue、查看堆栈',
     category: 'dev',
     recommendedScope: 'global',
-    transport: { type: 'http', url: 'https://mcp.sentry.dev/sse' },
+    transport: { type: 'http', url: 'https://mcp.sentry.dev/mcp' },
     auth: { type: 'mcp-oauth' },
     iconSlug: 'sentry',
     homepage: 'https://docs.sentry.io/product/sentry-mcp/',

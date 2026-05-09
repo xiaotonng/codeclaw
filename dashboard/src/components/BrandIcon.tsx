@@ -5,7 +5,6 @@ import geminiLogo from '../assets/brands/gemini.svg';
 import telegramLogo from '../assets/brands/telegram.svg';
 import weixinLogo from '../assets/brands/weixin.svg';
 import playwrightLogo from '../assets/brands/playwright.ico';
-import appiumLogo from '../assets/brands/appium.png';
 import vscodeLogo from '../assets/brands/vscode.svg';
 import cursorLogo from '../assets/brands/cursor.svg';
 import windsurfLogo from '../assets/brands/windsurf.svg';
@@ -29,7 +28,6 @@ const brandIcons: Record<string, string> = {
   feishu: feishuLogo,
   weixin: weixinLogo,
   playwright: playwrightLogo,
-  appium: appiumLogo,
   vscode: vscodeLogo,
   cursor: cursorLogo,
   windsurf: windsurfLogo,

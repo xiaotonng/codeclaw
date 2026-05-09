@@ -119,6 +119,11 @@ export class TelegramBot extends Bot {
     if (!this.token) throw new Error('Missing Telegram token. Configure via dashboard or set TELEGRAM_BOT_TOKEN');
   }
 
+  public override requestStop(): void {
+    super.requestStop();
+    try { this.channel?.disconnect(); } catch {}
+  }
+
   protected override onManagedConfigChange(config: Record<string, any>, opts: { initial?: boolean } = {}) {
     const nextToken = String(config.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || '').trim();
     if (nextToken && nextToken !== this.token) {

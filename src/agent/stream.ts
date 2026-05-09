@@ -171,7 +171,12 @@ export function listAgents(options: AgentDetectOptions = {}): AgentListResult {
 // Shared CLI spawn framework (used by driver-claude.ts, driver-gemini.ts)
 // ---------------------------------------------------------------------------
 
-export async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any) => void): Promise<StreamResult> {
+export async function run(
+  cmd: string[],
+  opts: StreamOpts,
+  parseLine: (ev: any, s: any) => void,
+  parseStderrLine?: (line: string, s: any) => void,
+): Promise<StreamResult> {
   const start = Date.now();
   const deadline = start + opts.timeout * 1000;
   let stderr = '';
@@ -219,7 +224,25 @@ export async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, 
   if (opts.abortSignal?.aborted) abortStream();
   opts.abortSignal?.addEventListener('abort', abortStream, { once: true });
   try { proc.stdin!.write(opts._stdinOverride ?? opts.prompt); proc.stdin!.end(); } catch {}
-  proc.stderr?.on('data', (c: Buffer) => { const chunk = c.toString(); stderr += chunk; agentLog(`[stderr] ${chunk.trim().slice(0, 200)}`); });
+  let stderrLineBuf = '';
+  proc.stderr?.on('data', (c: Buffer) => {
+    const chunk = c.toString();
+    stderr += chunk;
+    agentLog(`[stderr] ${chunk.trim().slice(0, 200)}`);
+    if (!parseStderrLine) return;
+    stderrLineBuf += chunk;
+    const lines = stderrLineBuf.split(/\r?\n/);
+    stderrLineBuf = lines.pop() || '';
+    let touched = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try { parseStderrLine(trimmed, s); touched = true; } catch {}
+    }
+    if (touched) {
+      try { opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), null); } catch {}
+    }
+  });
 
   const rl = createInterface({ input: proc.stdout!, crlfDelay: Infinity });
   rl.on('line', raw => {

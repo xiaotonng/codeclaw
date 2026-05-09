@@ -92,8 +92,6 @@ export interface UserConfig {
   weixinAccountId?: string;
   browserEnabled?: boolean;
   browserHeadless?: boolean;
-  desktopGuiEnabled?: boolean;
-  desktopAppiumUrl?: string;
   /** Extension configuration — global MCP servers, OAuth tokens, and skills. */
   extensions?: {
     mcp?: Record<string, McpServerConfig>;

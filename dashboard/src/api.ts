@@ -162,10 +162,6 @@ export const api = {
   getBrowser: () => json<BrowserStatusResponse>('/api/browser'),
   setupBrowser: (opts?: ApiRequestOptions) =>
     post<BrowserSetupResponse>('/api/browser/setup', {}, { timeoutMs: 120_000, ...opts }),
-  desktopInstall: (opts?: ApiRequestOptions) =>
-    post<{ ok: boolean; installed?: boolean; error?: string }>('/api/desktop-install', {}, { timeoutMs: 300_000, ...opts }),
-  desktopToggle: (enabled: boolean, opts?: ApiRequestOptions) =>
-    post<{ ok: boolean; enabled?: boolean; error?: string }>('/api/desktop-toggle', { enabled }, { timeoutMs: 60_000, ...opts }),
 
   // MCP Extensions — catalog-first surface
   getMcpCatalog: (workdir?: string, scope?: 'global' | 'workspace' | 'both') => {

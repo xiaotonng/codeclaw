@@ -24,9 +24,24 @@ import {
   startAuthorization, completeAuthorization, deleteMcpToken, getMcpToken,
 } from '../../agent/index.js';
 import type { McpServerConfig } from '../../core/config/user-config.js';
+import { loadUserConfig, saveUserConfig } from '../../core/config/user-config.js';
 import { runtime } from '../runtime.js';
 import path from 'node:path';
 import fs from 'node:fs';
+
+/**
+ * Builtin catalog entries don't live in `extensions.mcp` — they're toggled by
+ * a top-level config flag. Today the only builtin is `pikiclaw-browser`,
+ * driven by `browserEnabled`. This helper centralizes the install/toggle/
+ * remove routing so adding more builtins later is a one-line change.
+ */
+function setBuiltinEnabled(catalogId: string, enabled: boolean): boolean {
+  if (catalogId === 'pikiclaw-browser') {
+    saveUserConfig({ ...loadUserConfig(), browserEnabled: enabled });
+    return true;
+  }
+  return false;
+}
 
 const app = new Hono();
 
@@ -84,6 +99,10 @@ app.post('/api/extensions/mcp/install', async (c) => {
     if (!catalogId?.trim()) return c.json({ ok: false, error: 'catalogId is required' }, 400);
     const rec = getRecommendedMcpServer(catalogId.trim());
     if (!rec) return c.json({ ok: false, error: `unknown catalogId: ${catalogId}` }, 404);
+    if (rec.isBuiltin) {
+      const ok = setBuiltinEnabled(rec.id, enable !== false);
+      return c.json({ ok, enabled: ok && enable !== false });
+    }
 
     // Don't enable yet for mcp-oauth if no token exists — user still needs to authorize.
     let shouldEnable = enable;
@@ -126,6 +145,10 @@ app.post('/api/extensions/mcp/toggle', async (c) => {
       workdir?: string;
     };
     if (!name?.trim()) return c.json({ ok: false, error: 'name is required' }, 400);
+
+    if (setBuiltinEnabled(name.trim(), !!enabled)) {
+      return c.json({ ok: true, updated: true });
+    }
 
     const patch: Partial<McpServerConfig> = { enabled: !!enabled };
     let updated: boolean;
@@ -179,6 +202,10 @@ app.post('/api/extensions/mcp/remove', async (c) => {
       catalogId?: string;
     };
     if (!name?.trim()) return c.json({ ok: false, error: 'name is required' }, 400);
+
+    if (setBuiltinEnabled(name.trim(), false)) {
+      return c.json({ ok: true, removed: true });
+    }
 
     let removed: boolean;
     if (scope === 'workspace') {

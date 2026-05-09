@@ -19,7 +19,6 @@ const FeishuModal = lazy(async () => ({ default: (await import('./components/Mod
 const WeixinModal = lazy(async () => ({ default: (await import('./components/Modals')).WeixinModal }));
 const WorkdirModal = lazy(async () => ({ default: (await import('./components/Modals')).WorkdirModal }));
 const BrowserSetupModal = lazy(async () => ({ default: (await import('./components/Modals')).BrowserSetupModal }));
-const DesktopSetupModal = lazy(async () => ({ default: (await import('./components/Modals')).DesktopSetupModal }));
 
 type ModalState =
   | null
@@ -27,8 +26,7 @@ type ModalState =
   | { type: 'telegram' }
   | { type: 'feishu' }
   | { type: 'workdir' }
-  | { type: 'browser-setup' }
-  | { type: 'desktop-setup' };
+  | { type: 'browser-setup' };
 
 function locationToTab(pathname: string): DashboardTab {
   const map: Record<string, DashboardTab> = {
@@ -199,7 +197,7 @@ export function App() {
                 } />
                 <Route path="/extensions" element={
                   <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                    <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} onOpenDesktopSetup={() => setModal({ type: 'desktop-setup' })} />
+                    <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} />
                   </PageWrapper>
                 } />
                 <Route path="/system" element={
@@ -219,7 +217,6 @@ export function App() {
           {modal.type === 'telegram' && <TelegramModal open onClose={closeModal} />}
           {modal.type === 'feishu' && <FeishuModal open onClose={closeModal} />}
           {modal.type === 'browser-setup' && <BrowserSetupModal open onClose={closeModal} onSaved={() => reload()} />}
-          {modal.type === 'desktop-setup' && <DesktopSetupModal open onClose={closeModal} onSaved={() => reload()} />}
           {modal.type === 'workdir' && <WorkdirModal open onClose={closeModal} />}
         </Suspense>
       )}

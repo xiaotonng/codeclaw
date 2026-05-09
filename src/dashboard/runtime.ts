@@ -132,11 +132,18 @@ class Runtime {
   emitDashboardEvent(event: DashboardEvent): void {
     this.events.emit('dashboard-event', event);
   }
-  private channelStateCache: {
+  /**
+   * Per-channel validation cache. Keyed by channel name so that changing
+   * one channel's credentials (or the channels array) doesn't invalidate
+   * the cached validation result for unrelated channels — which would
+   * otherwise flicker their UI status to "Validating…" until the next
+   * poll completes.
+   */
+  private channelStateCache = new Map<NonNullable<SetupState['channels']>[number]['channel'], {
     key: string;
     expiresAt: number;
-    channels: NonNullable<SetupState['channels']>;
-  } | null = null;
+    state: NonNullable<SetupState['channels']>[number];
+  }>();
 
   readonly knownAgents = new Set<Agent>(['claude', 'codex', 'gemini', 'hermes']);
 
@@ -220,59 +227,113 @@ class Runtime {
 
   // -- Channel state cache --
 
-  private channelStateCacheKey(config: Partial<UserConfig>): string {
-    return JSON.stringify({
-      weixinBaseUrl: String(config.weixinBaseUrl || '').trim(),
-      weixinBotToken: String(config.weixinBotToken || '').trim(),
-      weixinAccountId: String(config.weixinAccountId || '').trim(),
-      telegramBotToken: String(config.telegramBotToken || '').trim(),
-      telegramAllowedChatIds: String(config.telegramAllowedChatIds || '').trim(),
-      feishuAppId: String(config.feishuAppId || '').trim(),
-      feishuAppSecret: String(config.feishuAppSecret || '').trim(),
-    });
+  private credKeyForChannel(
+    channel: NonNullable<SetupState['channels']>[number]['channel'],
+    config: Partial<UserConfig>,
+  ): string {
+    switch (channel) {
+      case 'weixin':
+        return JSON.stringify({
+          baseUrl: String(config.weixinBaseUrl || '').trim(),
+          token: String(config.weixinBotToken || '').trim(),
+          accountId: String(config.weixinAccountId || '').trim(),
+        });
+      case 'telegram':
+        return JSON.stringify({
+          token: String(config.telegramBotToken || '').trim(),
+          allowed: String(config.telegramAllowedChatIds || '').trim(),
+        });
+      case 'feishu':
+        return JSON.stringify({
+          appId: String(config.feishuAppId || '').trim(),
+          appSecret: String(config.feishuAppSecret || '').trim(),
+        });
+    }
+  }
+
+  private validateChannel(
+    channel: NonNullable<SetupState['channels']>[number]['channel'],
+    config: Partial<UserConfig>,
+  ): Promise<NonNullable<SetupState['channels']>[number]> {
+    switch (channel) {
+      case 'weixin':
+        // The Weixin getupdates endpoint is a long-poll that holds the
+        // connection open for ~8s by default. For dashboard validation we
+        // only care whether the credentials are accepted (bad creds return
+        // an errcode quickly; good creds simply hold the poll). Use a
+        // tight internal timeout so we resolve well within the dashboard's
+        // CHANNEL_STATUS_VALIDATION_TIMEOUT_MS window — the abort path
+        // returns ret=0 which is treated as "valid".
+        return validateWeixinConfig(
+          config.weixinBaseUrl,
+          config.weixinBotToken,
+          config.weixinAccountId,
+          { timeoutMs: 2_000 },
+        ).then(r => r.state);
+      case 'telegram':
+        return validateTelegramConfig(config.telegramBotToken, config.telegramAllowedChatIds).then(r => r.state);
+      case 'feishu':
+        return validateFeishuConfig(config.feishuAppId, config.feishuAppSecret).then(r => r.state);
+    }
   }
 
   async resolveChannelStates(config: Partial<UserConfig>): Promise<NonNullable<SetupState['channels']>> {
-    const key = this.channelStateCacheKey(config);
     const now = Date.now();
-    if (this.channelStateCache && this.channelStateCache.key === key && this.channelStateCache.expiresAt > now) {
-      return this.channelStateCache.channels;
-    }
-
     const fallback = buildLocalChannelStates(config);
-    const weixinPromise = validateWeixinConfig(config.weixinBaseUrl, config.weixinBotToken, config.weixinAccountId).then(result => result.state);
-    const telegramPromise = validateTelegramConfig(config.telegramBotToken, config.telegramAllowedChatIds).then(result => result.state);
-    const feishuPromise = validateFeishuConfig(config.feishuAppId, config.feishuAppSecret).then(result => result.state);
+    // Channels listed in the same order as buildLocalChannelStates().
+    const channelOrder = fallback.map(state => state.channel);
 
-    const [weixin, telegram, feishu] = await Promise.all([
-      withTimeoutFallback(weixinPromise, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, fallback[0]),
-      withTimeoutFallback(telegramPromise, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, fallback[1]),
-      withTimeoutFallback(feishuPromise, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, fallback[2]),
-    ]);
+    type Plan = {
+      channel: NonNullable<SetupState['channels']>[number]['channel'];
+      key: string;
+      cached: NonNullable<SetupState['channels']>[number] | null;
+      livePromise: Promise<NonNullable<SetupState['channels']>[number]> | null;
+      fallback: NonNullable<SetupState['channels']>[number];
+    };
 
-    const channels: NonNullable<SetupState['channels']> = [weixin, telegram, feishu];
-    if (shouldCacheChannelStates(channels)) {
-      this.channelStateCache = {
-        key,
-        expiresAt: now + CHANNEL_STATUS_CACHE_TTL_MS,
-        channels,
-      };
-    } else {
-      // Validation timed out — let it finish in the background and populate cache
-      // so the next frontend poll picks up the result instantly.
-      void Promise.all([weixinPromise, telegramPromise, feishuPromise]).then(([bgWeixin, bgTelegram, bgFeishu]) => {
-        const bgChannels: NonNullable<SetupState['channels']> = [bgWeixin, bgTelegram, bgFeishu];
-        if (!shouldCacheChannelStates(bgChannels)) return;
-        // Only update if no newer config has replaced the cache
-        if (this.channelStateCache && this.channelStateCache.key !== key) return;
-        this.channelStateCache = {
-          key,
+    const plans: Plan[] = channelOrder.map((channel, idx) => {
+      const key = this.credKeyForChannel(channel, config);
+      const cached = this.channelStateCache.get(channel);
+      if (cached && cached.key === key && cached.expiresAt > now) {
+        return { channel, key, cached: cached.state, livePromise: null, fallback: fallback[idx] };
+      }
+      return { channel, key, cached: null, livePromise: this.validateChannel(channel, config), fallback: fallback[idx] };
+    });
+
+    const resolved = await Promise.all(plans.map(plan => {
+      if (plan.cached) return Promise.resolve(plan.cached);
+      return withTimeoutFallback(plan.livePromise!, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, plan.fallback);
+    }));
+
+    // Persist freshly-validated channels into the per-channel cache. If a
+    // channel's validation timed out, keep the live promise alive in the
+    // background so the next dashboard poll can pick up the real result
+    // instantly instead of re-issuing the network call.
+    plans.forEach((plan, i) => {
+      if (!plan.livePromise) return;
+      const state = resolved[i];
+      if (shouldCacheChannelStates([state])) {
+        this.channelStateCache.set(plan.channel, {
+          key: plan.key,
+          expiresAt: now + CHANNEL_STATUS_CACHE_TTL_MS,
+          state,
+        });
+        return;
+      }
+      void plan.livePromise.then(bgState => {
+        if (!shouldCacheChannelStates([bgState])) return;
+        // Skip if newer credentials have replaced the cache for this channel.
+        const current = this.channelStateCache.get(plan.channel);
+        if (current && current.key !== plan.key) return;
+        this.channelStateCache.set(plan.channel, {
+          key: plan.key,
           expiresAt: Date.now() + CHANNEL_STATUS_CACHE_TTL_MS,
-          channels: bgChannels,
-        };
+          state: bgState,
+        });
       }).catch(() => {});
-    }
-    return channels;
+    });
+
+    return resolved;
   }
 
   // -- Setup state --

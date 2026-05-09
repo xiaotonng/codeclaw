@@ -128,25 +128,52 @@ async function fetchJson<T>(url: string, init?: RequestInit, timeoutMs = 8_000):
   }
 }
 
+interface DiscoveredResource {
+  /** Authorization server issuer URL. */
+  authorizationServer: string;
+  /**
+   * Canonical resource indicator (RFC 8707) — what the AS expects in the
+   * `resource` parameter. Often differs from the raw transport URL when the
+   * server publishes a normalized identifier (e.g. Sentry's PRM declares
+   * `https://mcp.sentry.dev/mcp` even when the client knows `/mcp/sse`).
+   * Per the MCP authorization spec, clients MUST use the value from PRM.
+   */
+  canonicalResource: string;
+}
+
 /**
- * Discover the authorization server for a remote MCP resource.
+ * Discover the authorization server for a remote MCP resource and the
+ * canonical `resource` indicator the AS will validate against.
  *
  * Strategy:
  *   1. Try GET {resourceBase}/.well-known/oauth-protected-resource (RFC 9728).
- *   2. Fall back to probing the MCP endpoint for a 401 with WWW-Authenticate.
+ *   2. Fall back to probing the MCP endpoint for a 401 with WWW-Authenticate
+ *      and follow the resource_metadata link.
+ *   3. Last resort: treat the origin as the AS and the input URL as the
+ *      canonical resource.
  */
-async function discoverAuthorizationServer(resourceUrl: string): Promise<string> {
+async function discoverAuthorizationServer(resourceUrl: string): Promise<DiscoveredResource> {
   const origin = new URL(resourceUrl).origin;
 
-  // Strategy 1: Protected Resource Metadata
+  const adopt = (meta: OAuthProtectedResourceMetadata): DiscoveredResource | null => {
+    const as = meta.authorization_servers?.[0];
+    if (!as) return null;
+    return {
+      authorizationServer: as,
+      canonicalResource: meta.resource || resourceUrl,
+    };
+  };
+
+  // Strategy 1: Protected Resource Metadata at the origin
   try {
     const meta = await fetchJson<OAuthProtectedResourceMetadata>(
       `${origin}/.well-known/oauth-protected-resource`,
     );
-    if (meta.authorization_servers?.[0]) return meta.authorization_servers[0];
+    const out = adopt(meta);
+    if (out) return out;
   } catch { /* try next */ }
 
-  // Strategy 2: probe resource for WWW-Authenticate
+  // Strategy 2: probe resource for WWW-Authenticate, follow resource_metadata
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8_000);
@@ -160,16 +187,21 @@ async function discoverAuthorizationServer(resourceUrl: string): Promise<string>
 
     if (res.status === 401) {
       const auth = res.headers.get('www-authenticate') || '';
-      const match = auth.match(/resource_metadata="([^"]+)"/i);
-      if (match) {
-        const meta = await fetchJson<OAuthProtectedResourceMetadata>(match[1]);
-        if (meta.authorization_servers?.[0]) return meta.authorization_servers[0];
+      // A header may declare resource_metadata twice; prefer the most specific
+      // (last) match since servers commonly emit both origin-level and
+      // per-resource paths in one header.
+      const matches = [...auth.matchAll(/resource_metadata="([^"]+)"/gi)];
+      const link = matches.length ? matches[matches.length - 1][1] : null;
+      if (link) {
+        const meta = await fetchJson<OAuthProtectedResourceMetadata>(link);
+        const out = adopt(meta);
+        if (out) return out;
       }
     }
   } catch { /* fall through */ }
 
   // Last resort: assume the resource origin is itself the authorization server
-  return origin;
+  return { authorizationServer: origin, canonicalResource: resourceUrl };
 }
 
 async function fetchAuthorizationServerMetadata(issuer: string): Promise<OAuthAuthorizationServerMetadata> {
@@ -230,6 +262,11 @@ interface ResolvedEndpoints {
   tokenEndpoint: string;
   registrationEndpoint?: string;
   issuer?: string;
+  /**
+   * Canonical resource indicator from PRM, falling back to the input URL when
+   * the spec entry hard-codes endpoints (no discovery happens in that path).
+   */
+  canonicalResource: string;
 }
 
 async function resolveEndpoints(auth: McpAuthSpec, resourceUrl: string): Promise<ResolvedEndpoints> {
@@ -240,17 +277,19 @@ async function resolveEndpoints(auth: McpAuthSpec, resourceUrl: string): Promise
       authorizationEndpoint: auth.authorizationEndpoint,
       tokenEndpoint: auth.tokenEndpoint,
       registrationEndpoint: auth.registrationEndpoint,
+      canonicalResource: resourceUrl,
     };
   }
 
-  const issuer = await discoverAuthorizationServer(resourceUrl);
-  const meta = await fetchAuthorizationServerMetadata(issuer);
+  const discovered = await discoverAuthorizationServer(resourceUrl);
+  const meta = await fetchAuthorizationServerMetadata(discovered.authorizationServer);
 
   return {
     authorizationEndpoint: meta.authorization_endpoint,
     tokenEndpoint: meta.token_endpoint,
     registrationEndpoint: meta.registration_endpoint,
     issuer: meta.issuer,
+    canonicalResource: discovered.canonicalResource,
   };
 }
 
@@ -293,6 +332,7 @@ export async function startAuthorization(opts: {
   if (auth.type !== 'mcp-oauth') throw new Error(`server ${serverId} is not mcp-oauth`);
 
   const endpoints = await resolveEndpoints(auth, resourceUrl);
+  const canonicalResource = endpoints.canonicalResource;
 
   let clientId = auth.clientId;
   let clientSecret: string | undefined;
@@ -317,7 +357,7 @@ export async function startAuthorization(opts: {
     state,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
-    resource: resourceUrl,
+    resource: canonicalResource,
   });
   if (auth.scopes?.length) params.set('scope', auth.scopes.join(' '));
 
@@ -327,7 +367,7 @@ export async function startAuthorization(opts: {
     state,
     codeVerifier,
     serverId,
-    resource: resourceUrl,
+    resource: canonicalResource,
     clientId,
     clientSecret,
     tokenEndpoint: endpoints.tokenEndpoint,

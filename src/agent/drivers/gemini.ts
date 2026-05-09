@@ -198,6 +198,13 @@ function geminiParse(ev: any, s: any) {
     s.sessionId = ev.session_id ?? s.sessionId;
     s.model = ev.model ?? s.model;
     s.contextWindow = geminiContextWindowFromModel(s.model) ?? s.contextWindow;
+    // Gemini's stream-json drops `thought` parts and every `agent_*`/`tool_update`
+    // event, so between init and the first tool_use/message there's nothing to
+    // surface — easily 10–30s on Gemini 3 Pro with HIGH thinking, longer when
+    // 429 backoffs kick in. Plant a sentinel so the IM/dashboard activity area
+    // shows progress instead of staying blank.
+    pushRecentActivity(s.recentActivity, 'Thinking...');
+    s.activity = s.recentActivity.join('\n');
   }
 
   // message delta: {"type":"message","role":"assistant","content":"...","delta":true}
@@ -255,6 +262,23 @@ function geminiParse(ev: any, s: any) {
     }
     s.contextWindow = geminiContextWindowFromModel(s.model) ?? s.contextWindow;
   }
+}
+
+// Gemini-cli does an exponential backoff on 429s and other transient errors
+// without emitting any stream-json event — only stderr gets a line like
+// `Attempt 1 failed with status 429. Retrying with backoff...`. Surface those
+// lines as activity so users don't see a frozen UI during MODEL_CAPACITY_EXHAUSTED.
+const GEMINI_RETRY_RE = /^Attempt\s+(\d+)\s+failed\s+with\s+status\s+(\d+)/i;
+function geminiParseStderrLine(line: string, s: any) {
+  const m = GEMINI_RETRY_RE.exec(line);
+  if (!m) return;
+  const attempt = m[1];
+  const status = m[2];
+  const reason = status === '429' ? 'rate limit / capacity exhausted'
+    : status === '503' ? 'service unavailable'
+    : `status ${status}`;
+  pushRecentActivity(s.recentActivity, `Retrying after ${reason} (attempt ${attempt})`);
+  s.activity = s.recentActivity.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +418,7 @@ export async function doGeminiStream(opts: StreamOpts): Promise<StreamResult> {
     : opts.extraEnv;
   const streamOpts = { ...opts, _stdinOverride: '', extraEnv };
   try {
-    return await run(geminiCmd(opts), streamOpts, geminiParse);
+    return await run(geminiCmd(opts), streamOpts, geminiParse, geminiParseStderrLine);
   } finally {
     overlay?.cleanup();
   }

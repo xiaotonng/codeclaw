@@ -1,19 +1,15 @@
 /**
- * Platform detection and desktop integration helpers.
+ * Platform detection helpers.
  *
- * macOS permission checks, terminal detection, Appium process management,
- * JXA scripts, and other OS-level utilities.
+ * macOS permission checks, terminal detection, JXA scripts, and other OS-level utilities.
  */
 
-import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFileSync, execSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import {
   DASHBOARD_PERMISSION_TIMEOUTS,
-  DASHBOARD_APPIUM_TIMEOUTS,
-  DASHBOARD_TIMEOUTS,
 } from '../core/constants.js';
 
 // ---------------------------------------------------------------------------
@@ -22,7 +18,7 @@ import {
 
 export interface PermissionStatus { granted: boolean; checkable: boolean; detail: string }
 
-export type DashboardPermissionKey = 'accessibility' | 'screenRecording' | 'fullDiskAccess';
+export type DashboardPermissionKey = 'screenRecording' | 'fullDiskAccess';
 export type PermissionRequestAction = 'already_granted' | 'prompted' | 'opened_settings' | 'unsupported';
 
 export interface PermissionRequestResult {
@@ -38,7 +34,6 @@ export interface PermissionRequestResult {
 // ---------------------------------------------------------------------------
 
 const permissionPaneUrls: Record<DashboardPermissionKey, string> = {
-  accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
   screenRecording: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
   fullDiskAccess: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
 };
@@ -53,26 +48,6 @@ function runJxa(script: string, timeout = DASHBOARD_PERMISSION_TIMEOUTS.jxaDefau
   } catch {
     return null;
   }
-}
-
-function checkAccessibilityPermission(): boolean | null {
-  try {
-    execFileSync('osascript', ['-e', 'tell application "System Events" to keystroke ""'], { stdio: 'ignore', timeout: DASHBOARD_PERMISSION_TIMEOUTS.accessibilityProbe });
-    return true;
-  } catch {}
-  const output = runJxa(
-    'ObjC.bindFunction("CGPreflightPostEventAccess", ["bool", []]); console.log($.CGPreflightPostEventAccess());',
-    DASHBOARD_PERMISSION_TIMEOUTS.accessibilityPreflight,
-  );
-  if (output == null) return null;
-  return output === 'true';
-}
-
-function requestAccessibilityPermission(): boolean {
-  return runJxa(
-    'ObjC.bindFunction("CGRequestPostEventAccess", ["bool", []]); console.log($.CGRequestPostEventAccess());',
-    DASHBOARD_PERMISSION_TIMEOUTS.accessibilityRequest,
-  ) !== null;
 }
 
 function checkScreenRecordingPermission(): boolean | null {
@@ -116,18 +91,10 @@ function openPermissionSettings(permission: DashboardPermissionKey): boolean {
 export function checkPermissions(): Record<string, PermissionStatus> {
   const r: Record<string, PermissionStatus> = {};
   if (process.platform !== 'darwin') {
-    r.accessibility = { granted: true, checkable: false, detail: 'N/A' };
     r.screenRecording = { granted: true, checkable: false, detail: 'N/A' };
     r.fullDiskAccess = { granted: true, checkable: false, detail: 'N/A' };
     return r;
   }
-  const accessibilityGranted = checkAccessibilityPermission();
-  r.accessibility = {
-    granted: accessibilityGranted === true,
-    checkable: true,
-    detail: accessibilityGranted === true ? '已授权' : '未授权',
-  };
-
   const screenRecordingGranted = checkScreenRecordingPermission();
   r.screenRecording = {
     granted: screenRecordingGranted === true,
@@ -160,22 +127,6 @@ export function requestPermission(permission: DashboardPermissionKey): Permissio
       action: 'already_granted',
       granted: true,
       requiresManualGrant: false,
-    };
-  }
-
-  if (permission === 'accessibility') {
-    const prompted = requestAccessibilityPermission();
-    if (!prompted) {
-      const openedSettings = openPermissionSettings(permission);
-      return openedSettings
-        ? { ok: true, action: 'opened_settings', granted: false, requiresManualGrant: true }
-        : { ok: false, action: 'unsupported', granted: false, requiresManualGrant: true, error: 'Failed to trigger Accessibility permission request.' };
-    }
-    return {
-      ok: true,
-      action: 'prompted',
-      granted: !!checkPermissions().accessibility?.granted,
-      requiresManualGrant: true,
     };
   }
 
@@ -273,105 +224,3 @@ export function detectHostTerminalApp(): string | null {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Appium lifecycle management
-// ---------------------------------------------------------------------------
-
-const APPIUM_INSTALL_DIR = path.join(os.homedir(), '.pikiclaw', 'appium');
-let managedAppiumProc: ChildProcess | null = null;
-
-export function findAppiumBin(): string | null {
-  const localBin = path.join(APPIUM_INSTALL_DIR, 'node_modules', '.bin', 'appium');
-  if (fs.existsSync(localBin)) return localBin;
-  try {
-    const result = execFileSync('which', ['appium'], { encoding: 'utf-8', timeout: DASHBOARD_APPIUM_TIMEOUTS.whichAppium });
-    return result.trim() || null;
-  } catch { return null; }
-}
-
-export function isAppiumInstalled(): boolean {
-  const bin = findAppiumBin();
-  if (!bin) return false;
-  try {
-    const out = execFileSync(bin, ['driver', 'list', '--installed', '--json'], { encoding: 'utf-8', timeout: DASHBOARD_APPIUM_TIMEOUTS.driverList });
-    return out.includes('mac2');
-  } catch { return false; }
-}
-
-export async function installAppium(log: (msg: string) => void): Promise<string> {
-  fs.mkdirSync(APPIUM_INSTALL_DIR, { recursive: true });
-  const pkgPath = path.join(APPIUM_INSTALL_DIR, 'package.json');
-  if (!fs.existsSync(pkgPath)) fs.writeFileSync(pkgPath, '{"private":true}');
-
-  const existingBin = findAppiumBin();
-  if (!existingBin) {
-    log('Installing Appium...');
-    execFileSync('npm', ['install', '--save', 'appium'], { cwd: APPIUM_INSTALL_DIR, stdio: 'pipe', timeout: DASHBOARD_APPIUM_TIMEOUTS.npmInstallAppium });
-  }
-  const bin = findAppiumBin();
-  if (!bin) throw new Error('Appium binary not found after install');
-
-  try {
-    const out = execFileSync(bin, ['driver', 'list', '--installed', '--json'], { encoding: 'utf-8', timeout: DASHBOARD_APPIUM_TIMEOUTS.driverList });
-    if (!out.includes('mac2')) {
-      log('Installing Mac2 driver...');
-      execFileSync(bin, ['driver', 'install', 'mac2'], { stdio: 'pipe', timeout: DASHBOARD_APPIUM_TIMEOUTS.driverInstallMac2 });
-    }
-  } catch {
-    log('Installing Mac2 driver...');
-    execFileSync(bin, ['driver', 'install', 'mac2'], { stdio: 'pipe', timeout: DASHBOARD_APPIUM_TIMEOUTS.driverInstallMac2 });
-  }
-
-  log('Appium installation complete.');
-  return bin;
-}
-
-function checkAppiumReachable(appiumUrl: string): Promise<boolean> {
-  return new Promise(resolve => {
-    const url = new URL('/status', appiumUrl);
-    const req = http.get(url, { timeout: DASHBOARD_TIMEOUTS.appiumReachable }, (res) => {
-      res.resume();
-      resolve(res.statusCode === 200);
-    });
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => { req.destroy(); resolve(false); });
-  });
-}
-
-export async function startManagedAppium(appiumUrl: string, log: (msg: string) => void): Promise<void> {
-  if (await checkAppiumReachable(appiumUrl)) {
-    log('Appium server is already running.');
-    return;
-  }
-  stopManagedAppium();
-
-  const bin = findAppiumBin();
-  if (!bin) throw new Error('Appium is not installed');
-
-  const port = new URL(appiumUrl).port || '4723';
-  log('Starting Appium server...');
-  managedAppiumProc = spawn(bin, ['--port', port, '--log-level', 'warn'], { stdio: 'ignore' });
-  managedAppiumProc.unref();
-  managedAppiumProc.on('exit', () => { managedAppiumProc = null; });
-
-  for (let i = 0; i < 30; i++) {
-    await new Promise(r => setTimeout(r, DASHBOARD_TIMEOUTS.appiumStartPoll));
-    if (await checkAppiumReachable(appiumUrl)) {
-      log('Appium server is ready.');
-      return;
-    }
-  }
-  stopManagedAppium();
-  throw new Error('Appium server failed to start within 30 seconds');
-}
-
-export function stopManagedAppium(): void {
-  if (managedAppiumProc && !managedAppiumProc.killed) {
-    managedAppiumProc.kill();
-    managedAppiumProc = null;
-  }
-}
-
-export function isManagedAppiumRunning(): boolean {
-  return managedAppiumProc != null && !managedAppiumProc.killed;
-}

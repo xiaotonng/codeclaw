@@ -130,8 +130,10 @@ function routeClaudeSubAgentEvent(ev: any, t: string, parentToolUseId: string, s
 
 function buildClaudeTurnUsage(u: { input: number | null; output: number | null; cacheRead: number | null; cacheCreation: number | null; model: string | null }): StreamPreviewMeta | null {
   if (u.input == null && u.output == null && u.cacheRead == null && u.cacheCreation == null) return null;
-  const ctxWindow = claudeContextWindowFromModel(u.model);
-  const used = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheCreation ?? 0);
+  const ctxWindow = claudeEffectiveContextWindow(claudeContextWindowFromModel(u.model));
+  const used = claudeContextUsedFromUsage({
+    input: u.input, cached: u.cacheRead, cacheCreation: u.cacheCreation, output: u.output,
+  });
   const contextPercent = ctxWindow && used > 0
     ? Math.min(99.9, Math.round(used / ctxWindow * 1000) / 10)
     : null;
@@ -189,6 +191,49 @@ function claudeContextWindowFromModel(model: unknown): number | null {
   return null;
 }
 
+// Mirrors Claude Code 2.1.112's `Yn()` + `v38()` denominator (and `pj()` display
+// formula) — verified by extracting cli.js from the last JS-source release.
+//   uDY = 20_000  // max output reservation cap
+//   t_7 = 13_000  // auto-compact buffer
+// Effective denominator with autoCompact enabled (cc's default) is
+// `window - 20K - 13K`. Without these subtractions the percent we display
+// drifts from the number cc itself reports (e.g. Opus 1M shows the user
+// `Context left until auto-compact: X%` against a 967_000 denominator, not
+// against a flat 1_000_000).
+const CLAUDE_MAX_OUTPUT_RESERVE = 20_000;
+const CLAUDE_AUTOCOMPACT_BUFFER = 13_000;
+const CLAUDE_USABLE_WINDOW_RESERVE = CLAUDE_MAX_OUTPUT_RESERVE + CLAUDE_AUTOCOMPACT_BUFFER;
+
+function claudeEffectiveContextWindow(advertised: number | null): number | null {
+  if (advertised == null) return null;
+  if (advertised <= CLAUDE_USABLE_WINDOW_RESERVE) return advertised;
+  return advertised - CLAUDE_USABLE_WINDOW_RESERVE;
+}
+
+// cc's `ey6` (was `hYB` pre-2.1.112) — context size of one assistant call. The
+// `output_tokens` slice matters: cc walks back to the latest assistant message
+// and adds its output to the input/cached/creation counters because that
+// generated content already exists in conversation history and would be
+// re-fed to the next call.
+function claudeContextUsedFromUsage(u: {
+  input?: number | null;
+  cached?: number | null;
+  cacheCreation?: number | null;
+  output?: number | null;
+}): number {
+  return (u.input ?? 0) + (u.cached ?? 0) + (u.cacheCreation ?? 0) + (u.output ?? 0);
+}
+
+function recomputeClaudeContextUsed(s: any): void {
+  const total = claudeContextUsedFromUsage({
+    input: s.inputTokens,
+    cached: s.cachedInputTokens,
+    cacheCreation: s.cacheCreationInputTokens,
+    output: s.outputTokens,
+  });
+  s.contextUsedTokens = total > 0 ? total : null;
+}
+
 function claudeParse(ev: any, s: any) {
   const t = ev.type || '';
   // Sub-agent events (Task tool spawns a child agent) carry parent_tool_use_id
@@ -206,34 +251,23 @@ function claudeParse(ev: any, s: any) {
     s.sessionId = ev.session_id ?? s.sessionId;
     s.model = ev.model ?? s.model;
     s.thinkingEffort = ev.thinking_level ?? s.thinkingEffort;
-    s.contextWindow = claudeContextWindowFromModel(s.model) ?? s.contextWindow;
+    const advertised = claudeContextWindowFromModel(s.model);
+    s.contextWindow = claudeEffectiveContextWindow(advertised) ?? s.contextWindow;
   }
 
   if (t === 'stream_event') {
     const inner = ev.event || {};
     if (inner.type === 'message_start') {
       const u = inner.message?.usage;
-      const callInput = u?.input_tokens ?? 0;
-      const callCached = u?.cache_read_input_tokens ?? 0;
-      const callCacheCreation = u?.cache_creation_input_tokens ?? 0;
-      // Per-call input snapshot drives the context-window % indicator (the
-      // size of THIS call's prompt, not summed across calls).
-      const callCtx = callInput + callCached + callCacheCreation;
-      if (callCtx > 0) s.contextUsedTokens = callCtx;
-      // Accumulate cumulative live counters across LLM calls within the turn
-      // so the running display matches the cumulative figure reported in the
-      // final `result` event. The previous behaviour reset on every call,
-      // making mid-stream values smaller than the final cumulative.
-      s.inputTokens = (s.inputTokens ?? 0) + callInput;
-      s.cachedInputTokens = (s.cachedInputTokens ?? 0) + callCached;
-      s.cacheCreationInputTokens = (s.cacheCreationInputTokens ?? 0) + callCacheCreation;
-      s.outputTokens = s.outputTokens ?? 0;
-      // Per-call running totals — message_delta reports running totals for
-      // the active call, which we translate into deltas against these.
-      s._callInput = callInput;
-      s._callCached = callCached;
-      s._callCacheCreation = callCacheCreation;
-      s._callOutput = 0;
+      // Per-call semantics: each LLM call inside a turn resets the counters,
+      // so the displayed In/Cached/Out and contextPercent describe the same
+      // call (matches cc's `LX(messages)` which returns the latest assistant
+      // usage, not a cumulative across calls).
+      s.inputTokens = u?.input_tokens ?? 0;
+      s.cachedInputTokens = u?.cache_read_input_tokens ?? 0;
+      s.cacheCreationInputTokens = u?.cache_creation_input_tokens ?? 0;
+      s.outputTokens = 0;
+      recomputeClaudeContextUsed(s);
     }
     // When a new text/thinking block starts after an earlier one (e.g. between
     // a text block and a tool_use and back to text), insert a paragraph break
@@ -257,38 +291,21 @@ function claudeParse(ev: any, s: any) {
       s.stopReason = d.stop_reason ?? s.stopReason;
       const u = inner.usage;
       if (u) {
-        // message_delta reports running totals for the active call. Translate
-        // into deltas against the per-call snapshot so we add only what's new
-        // to the cumulative live counters.
-        if (u.input_tokens != null) {
-          const next = u.input_tokens;
-          const delta = Math.max(0, next - (s._callInput ?? 0));
-          if (delta) s.inputTokens = (s.inputTokens ?? 0) + delta;
-          s._callInput = next;
-        }
-        if (u.cache_read_input_tokens != null) {
-          const next = u.cache_read_input_tokens;
-          const delta = Math.max(0, next - (s._callCached ?? 0));
-          if (delta) s.cachedInputTokens = (s.cachedInputTokens ?? 0) + delta;
-          s._callCached = next;
-        }
-        if (u.cache_creation_input_tokens != null) {
-          const next = u.cache_creation_input_tokens;
-          const delta = Math.max(0, next - (s._callCacheCreation ?? 0));
-          if (delta) s.cacheCreationInputTokens = (s.cacheCreationInputTokens ?? 0) + delta;
-          s._callCacheCreation = next;
-        }
-        if (u.output_tokens != null) {
-          const next = u.output_tokens;
-          const delta = Math.max(0, next - (s._callOutput ?? 0));
-          if (delta) s.outputTokens = (s.outputTokens ?? 0) + delta;
-          s._callOutput = next;
-        }
+        // message_delta reports running totals for the active call. Per-call
+        // semantics: just overwrite — last value wins.
+        if (u.input_tokens != null) s.inputTokens = u.input_tokens;
+        if (u.cache_read_input_tokens != null) s.cachedInputTokens = u.cache_read_input_tokens;
+        if (u.cache_creation_input_tokens != null) s.cacheCreationInputTokens = u.cache_creation_input_tokens;
+        if (u.output_tokens != null) s.outputTokens = u.output_tokens;
+        recomputeClaudeContextUsed(s);
       }
     }
     s.sessionId = ev.session_id ?? s.sessionId;
     s.model = ev.model ?? s.model;
-    s.contextWindow = claudeContextWindowFromModel(s.model) ?? s.contextWindow;
+    {
+      const advertised = claudeContextWindowFromModel(s.model);
+      s.contextWindow = claudeEffectiveContextWindow(advertised) ?? s.contextWindow;
+    }
   }
 
   if (t === 'assistant') {
@@ -371,23 +388,28 @@ function claudeParse(ev: any, s: any) {
     s.stopReason = ev.stop_reason ?? s.stopReason;
     const u = ev.usage;
     if (u) {
-      // Prefer the larger of (our hand-summed live cumulative, result-event
-      // reported). The result event's `usage` is occasionally a single-call
-      // snapshot rather than the turn cumulative — picking the max keeps the
-      // live and final values consistent without throwing away whichever side
-      // observed more.
+      // Per-call semantics: the last message_start/message_delta snapshot is
+      // authoritative. Only fall back to result.usage when nothing arrived via
+      // stream_event (e.g. an early-exit error before any message_start).
       const cached = u.cache_read_input_tokens ?? u.cached_input_tokens;
-      if (u.input_tokens != null) s.inputTokens = Math.max(s.inputTokens ?? 0, u.input_tokens);
-      if (cached != null) s.cachedInputTokens = Math.max(s.cachedInputTokens ?? 0, cached);
-      if (u.cache_creation_input_tokens != null) {
-        s.cacheCreationInputTokens = Math.max(s.cacheCreationInputTokens ?? 0, u.cache_creation_input_tokens);
+      if (s.inputTokens == null && u.input_tokens != null) s.inputTokens = u.input_tokens;
+      if (s.cachedInputTokens == null && cached != null) s.cachedInputTokens = cached;
+      if (s.cacheCreationInputTokens == null && u.cache_creation_input_tokens != null) {
+        s.cacheCreationInputTokens = u.cache_creation_input_tokens;
       }
-      if (u.output_tokens != null) s.outputTokens = Math.max(s.outputTokens ?? 0, u.output_tokens);
+      if (s.outputTokens == null && u.output_tokens != null) s.outputTokens = u.output_tokens;
+      recomputeClaudeContextUsed(s);
     }
     const mu = ev.modelUsage;
     if (mu && typeof mu === 'object') {
       for (const info of Object.values(mu) as any[]) {
-        if (info?.contextWindow > 0) { s.contextWindow = info.contextWindow; break; }
+        // cc reports the *advertised* contextWindow on result.modelUsage; we
+        // store the *effective* (post-reservation) window so the percent
+        // matches cc's UM6 display formula.
+        if (info?.contextWindow > 0) {
+          s.contextWindow = claudeEffectiveContextWindow(info.contextWindow) ?? info.contextWindow;
+          break;
+        }
       }
     }
   }
@@ -409,12 +431,6 @@ function createClaudeStreamState(opts: StreamOpts) {
     cacheCreationInputTokens: null as number | null,
     contextWindow: null as number | null,
     contextUsedTokens: null as number | null,
-    // Per-call snapshots used to compute deltas across message_delta events.
-    // Reset on each message_start. Not surfaced outside the driver.
-    _callInput: 0,
-    _callCached: 0,
-    _callCacheCreation: 0,
-    _callOutput: 0,
     codexCumulative: null,
     stopReason: null as string | null,
     activity: '',
@@ -437,10 +453,6 @@ function resetClaudeTurnState(s: ReturnType<typeof createClaudeStreamState>, not
   s.cachedInputTokens = null;
   s.cacheCreationInputTokens = null;
   s.contextUsedTokens = null;
-  s._callInput = 0;
-  s._callCached = 0;
-  s._callCacheCreation = 0;
-  s._callOutput = 0;
   s.stopReason = null;
   s.activity = '';
   s.recentActivity = [];
