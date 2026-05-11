@@ -146,6 +146,16 @@ export const SKILL_REPOS: RecommendedSkillRepo[] = [
     homepage: 'https://github.com/Manavarya09/design-extract',
   },
   {
+    id: 'opencli',
+    name: 'OpenCLI',
+    description: 'Universal CLI hub turning 100+ websites and local binaries into agent-callable commands (requires global `opencli` CLI + Chrome bridge extension)',
+    descriptionZh: '通用 CLI Hub，把 100+ 网站和本地二进制变成可调用命令（依赖全局 opencli CLI 与 Chrome 桥接扩展）',
+    source: 'jackwener/opencli',
+    category: 'dev',
+    recommendedScope: 'global',
+    homepage: 'https://github.com/jackwener/opencli',
+  },
+  {
     id: 'rocketsim-skills',
     name: 'RocketSim',
     description: '30+ tools for Xcode iOS Simulator — testing, debugging',

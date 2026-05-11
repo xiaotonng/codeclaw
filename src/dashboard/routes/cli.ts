@@ -7,7 +7,12 @@
  *   GET  /api/extensions/cli/auth/stream       — SSE stream of a running session
  *   POST /api/extensions/cli/auth/cancel       — { sessionId } kill the child
  *   POST /api/extensions/cli/auth/token        — { id, values } token auth
+ *   POST /api/extensions/cli/install           — { id } start auto-install (npm-only)
  *   POST /api/extensions/cli/logout            — { id } sign out
+ *
+ * Install sessions share the same SESSIONS map and event protocol as the
+ * oauth-web flow — the frontend connects to `/auth/stream` and cancels via
+ * `/auth/cancel` regardless of how the session was started.
  */
 
 import { Hono } from 'hono';
@@ -16,6 +21,7 @@ import {
   getCliCatalog, refreshCliStatus,
   startCliAuthSession, getAuthSession, cancelAuthSession,
   applyCliToken, logoutCli,
+  startCliInstallSession,
   type AuthSessionEvent,
 } from '../../agent/index.js';
 
@@ -115,6 +121,18 @@ app.get('/api/extensions/cli/auth/stream', (c) => {
       session.events.off('event', onEvent);
     });
   });
+});
+
+app.post('/api/extensions/cli/install', async (c) => {
+  try {
+    const { id } = await c.req.json() as { id: string };
+    if (!id?.trim()) return c.json({ ok: false, error: 'id is required' }, 400);
+    const result = await startCliInstallSession(id.trim());
+    if (!result.ok) return c.json(result, 400);
+    return c.json({ ok: true, sessionId: result.sessionId });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || 'install failed' }, 500);
+  }
 });
 
 app.post('/api/extensions/cli/auth/cancel', async (c) => {

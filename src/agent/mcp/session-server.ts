@@ -20,6 +20,7 @@ import path from 'node:path';
 import { createRetainedLogSink, writeScopedLog, type LogLevel } from '../../core/logging.js';
 import type { McpToolModule, ToolContext } from './tools/types.js';
 import { workspaceTools } from './tools/workspace.js';
+import { goalTools } from './tools/goal.js';
 
 // ---------------------------------------------------------------------------
 // Logging — writes to stderr + file so it doesn't interfere with stdio MCP transport
@@ -69,8 +70,12 @@ log(`started workspace=${ctx.workspace} stagedFiles=${ctx.stagedFiles.length} ca
 // Tool registry — collect all tool modules
 // ---------------------------------------------------------------------------
 
+// Codex CLI has native `/goal` (`create_goal`/`update_goal`/`get_goal`) and a
+// built-in continuation engine; pikiclaw delegates to it entirely for codex
+// sessions. Skip our wrapper tools to avoid double-engines and tool-name shadow.
 const TOOL_MODULES: McpToolModule[] = [
   workspaceTools,
+  ...(process.env.MCP_AGENT === 'codex' ? [] : [goalTools]),
 ];
 
 const ALL_TOOLS = TOOL_MODULES.flatMap(m => m.tools);

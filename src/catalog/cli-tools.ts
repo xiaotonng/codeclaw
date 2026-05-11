@@ -285,6 +285,25 @@ export const CLI_TOOLS: RecommendedCli[] = [
 
   // ── No-auth utilities (detect only) ────────────────────────────────────────
   {
+    id: 'opencli',
+    binary: 'opencli',
+    name: 'OpenCLI',
+    description: 'Universal CLI hub — call 100+ websites and local binaries as agent-friendly commands via a browser bridge',
+    descriptionZh: '通用 CLI Hub — 借助浏览器桥接，把 100+ 网站与本地二进制变成 Agent 可调用的命令',
+    category: 'dev',
+    iconUrl: 'https://github.com/jackwener.png?size=80',
+    homepage: 'https://github.com/jackwener/opencli',
+    recommendedScope: 'global',
+    versionArgv: ['opencli', '--version'],
+    install: {
+      docs: 'https://github.com/jackwener/opencli#installation',
+      darwin: [{ label: 'npm', cmd: 'npm i -g @jackwener/opencli' }],
+      linux:  [{ label: 'npm', cmd: 'npm i -g @jackwener/opencli' }],
+      win:    [{ label: 'npm', cmd: 'npm i -g @jackwener/opencli' }],
+    },
+    auth: { type: 'none' },
+  },
+  {
     id: 'docker',
     binary: 'docker',
     name: 'Docker',

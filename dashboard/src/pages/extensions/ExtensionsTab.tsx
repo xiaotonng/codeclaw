@@ -24,6 +24,7 @@ import type {
   McpServerConfig,
   SkillCatalogItem,
   SkillInfo,
+  RemoteSkillInfo,
 } from '../../types';
 import { cn } from '../../utils';
 import { BrandIcon } from '../../components/BrandIcon';
@@ -843,86 +844,431 @@ function AvailableCard({
 }
 
 // ---------------------------------------------------------------------------
-// Skill Card
+// Skill cards — CLI-style two-tier (installed vs available)
+//
+// A SkillCatalogItem represents a *collection* (one GitHub repo). The card is
+// a summary; the detail modal lists the repo's individual sub-skills with per-
+// skill install/remove. Mirrors CliConnectedCard / CliAvailableCard structure
+// so heights stay consistent across both tabs.
 // ---------------------------------------------------------------------------
 
-function SkillCard({
-  item, locale, busy, index, onInstall, onRemove,
+function skillCountSummary(item: SkillCatalogItem, locale: string): string {
+  const installed = item.installedNames.length;
+  if (typeof item.totalCount === 'number') {
+    const totalStr = item.partial ? `${item.totalCount}+` : String(item.totalCount);
+    return locale === 'zh-CN'
+      ? `${installed} / ${totalStr} 已安装`
+      : `${installed} / ${totalStr} installed`;
+  }
+  return installed > 0
+    ? (locale === 'zh-CN' ? `${installed} 已安装` : `${installed} installed`)
+    : L(locale, '未安装', 'Not installed');
+}
+
+function SkillConnectedCard({
+  item, locale, animationDelay, onClick,
 }: {
   item: SkillCatalogItem;
   locale: string;
-  busy: boolean;
-  index: number;
-  onInstall: () => void;
-  onRemove: () => void;
+  animationDelay?: string;
+  onClick: () => void;
 }) {
+  const { hex } = brandInfo(undefined, item.name);
   return (
-    <div
-      className={cn(
-        'group relative flex flex-col gap-3 rounded-xl border border-edge bg-panel-alt p-4',
-        'transition-[transform,box-shadow,border-color] duration-200',
-        'hover:-translate-y-0.5 hover:border-edge-h hover:shadow-[0_12px_28px_rgba(15,23,42,0.09)]',
-        'animate-in-up',
-      )}
-      style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}
+    <button
+      type="button"
+      onClick={onClick}
+      className="animate-in-up group relative flex min-h-[112px] w-full flex-col overflow-hidden rounded-2xl border border-edge/70 bg-panel p-4 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_12px_28px_rgba(15,23,42,0.09)] focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]"
+      style={{
+        background: `linear-gradient(135deg, ${withAlpha(hex, 0.06)} 0%, ${withAlpha(hex, 0.02)} 100%), var(--th-panel)`,
+        animationDelay,
+      }}
+    >
+      <div
+        aria-hidden
+        className="pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full opacity-60"
+        style={{ background: `radial-gradient(closest-side, ${withAlpha(hex, 0.18)}, transparent 70%)` }}
+      />
+      <div className="relative flex items-start gap-3">
+        <BrandAvatar iconUrl={item.iconUrl} name={item.name} size={36} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="truncate text-[13px] font-semibold text-fg">{item.name}</span>
+              {item.homepage && (
+                <a href={item.homepage} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} className="text-fg-5 transition-colors hover:text-primary">
+                  <ExternalLinkIcon />
+                </a>
+              )}
+            </div>
+            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold text-[var(--th-ok)] shrink-0"
+                  style={{ background: 'color-mix(in oklab, var(--th-ok) 12%, transparent)' }}>
+              <CheckCircleIcon size={10} />{skillCountSummary(item, locale)}
+            </span>
+          </div>
+          <div className="mt-0.5 truncate text-[11.5px] text-fg-5">{item.source}</div>
+          <div className="mt-1 line-clamp-2 text-[11.5px] text-fg-4">
+            {locale === 'zh-CN' ? item.descriptionZh : item.description}
+          </div>
+        </div>
+      </div>
+      <div className="relative mt-auto pt-3 flex items-center justify-between text-[10.5px] text-fg-5">
+        <span className="flex items-center gap-2">
+          {item.stars !== undefined && (
+            <span className="inline-flex items-center gap-0.5 font-medium text-fg-4">
+              <StarIcon size={10} />{formatStarCount(item.stars)}
+            </span>
+          )}
+          {item.pushedAt && <span>{formatRelativeTime(item.pushedAt, locale)}</span>}
+        </span>
+        <span className="text-fg-5 group-hover:text-primary transition-colors">
+          {L(locale, '管理 →', 'Manage →')}
+        </span>
+      </div>
+    </button>
+  );
+}
+
+function SkillAvailableCard({
+  item, locale, animationDelay, onClick,
+}: {
+  item: SkillCatalogItem;
+  locale: string;
+  animationDelay?: string;
+  onClick: () => void;
+}) {
+  const { hex } = brandInfo(undefined, item.name);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="animate-in-up group relative flex min-h-[112px] w-full flex-col overflow-hidden rounded-2xl border border-edge/60 bg-panel p-4 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-edge hover:shadow-[0_12px_28px_rgba(15,23,42,0.07)] focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]"
+      style={{ animationDelay }}
     >
       <div className="flex items-start gap-3">
-        <div
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-white"
-          style={{
-            background: 'linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%)',
-            boxShadow: '0 6px 16px rgba(245, 158, 11, 0.25)',
-          }}
-        >
-          <ZapIcon size={14} />
-        </div>
+        <BrandAvatar iconUrl={item.iconUrl} name={item.name} size={32} />
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <div className="truncate text-[13.5px] font-semibold text-fg">{item.name}</div>
+          <div className="flex items-center gap-2">
+            <span className="truncate text-[13px] font-semibold text-fg">{item.name}</span>
             {item.homepage && (
-              <a href={item.homepage} target="_blank" rel="noreferrer"
-                 className="text-fg-5 hover:text-fg-3 transition-colors">
+              <a href={item.homepage} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} className="text-fg-5 transition-colors hover:text-primary">
                 <ExternalLinkIcon />
               </a>
             )}
           </div>
-          <div className="mt-0.5 line-clamp-2 text-[12px] leading-snug text-fg-4">
+          <div className="mt-0.5 line-clamp-2 text-[11.5px] text-fg-4">
             {locale === 'zh-CN' ? item.descriptionZh : item.description}
           </div>
         </div>
-        {item.installed && (
-          <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold text-[var(--th-ok)]"
-                style={{ background: 'color-mix(in oklab, var(--th-ok) 12%, transparent)' }}>
-            <CheckCircleIcon size={10} />{L(locale, '已安装', 'Installed')}
-          </span>
-        )}
       </div>
+      <div className="mt-auto pt-3 flex items-center justify-between">
+        <span className="flex items-center gap-2 text-[11px] text-fg-5">
+          {item.stars !== undefined && (
+            <span className="inline-flex items-center gap-0.5 font-medium text-fg-4">
+              <StarIcon size={10} />{formatStarCount(item.stars)}
+            </span>
+          )}
+          {typeof item.totalCount === 'number' && (
+            <span>· {item.partial ? `${item.totalCount}+` : item.totalCount} skills</span>
+          )}
+        </span>
+        <span
+          className="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition-colors group-hover:text-primary"
+          style={{ background: `${withAlpha(hex, 0.08)}`, color: hex }}
+        >
+          {L(locale, '查看 →', 'Browse →')}
+        </span>
+      </div>
+    </button>
+  );
+}
 
-      <div className="mt-auto flex items-center justify-between gap-2">
-        <div className="min-w-0 flex flex-col gap-0.5">
-          <span className="truncate text-[11px] text-fg-5">{item.source}</span>
-          {(item.stars !== undefined || item.pushedAt) && (
-            <span className="flex items-center gap-2 text-[10.5px] text-fg-5">
+// ---------------------------------------------------------------------------
+// Skill Detail Modal — the per-collection management surface
+//
+// Lazy-loads the repo's full skill list when the modal opens. Cross-references
+// against locally installed skills (by name, case-insensitive) to render the
+// per-skill install/remove buttons.
+// ---------------------------------------------------------------------------
+
+function SkillDetailModal({
+  item, open, onClose, onChanged, locale, scope, workdir, installedSkills,
+}: {
+  item: SkillCatalogItem | null;
+  open: boolean;
+  onClose: () => void;
+  onChanged: () => void;
+  locale: string;
+  scope: 'global' | 'workspace';
+  workdir?: string;
+  installedSkills: SkillInfo[];
+}) {
+  const toast = useStore(s => s.toast);
+  const [remoteSkills, setRemoteSkills] = useState<RemoteSkillInfo[] | null>(null);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [remotePartial, setRemotePartial] = useState(false);
+  const [busyName, setBusyName] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState<'install' | 'remove' | null>(null);
+  const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    if (!open || !item) return;
+    let cancelled = false;
+    setRemoteLoading(true);
+    setRemoteError(null);
+    setQuery('');
+    void (async () => {
+      try {
+        const r = await api.listRepoSkills(item.source);
+        if (cancelled) return;
+        if (r.ok) {
+          setRemoteSkills(r.skills);
+          setRemotePartial(!!r.partial);
+        } else {
+          setRemoteError(r.error || 'failed to list');
+          setRemoteSkills([]);
+        }
+      } catch (e: any) {
+        if (cancelled) return;
+        setRemoteError(e?.message || 'failed');
+        setRemoteSkills([]);
+      } finally {
+        if (!cancelled) setRemoteLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, item?.source]);
+
+  const installedNamesLower = useMemo(() => {
+    const set = new Set<string>();
+    const targetScope = scope === 'global' ? 'global' : 'project';
+    for (const s of installedSkills) {
+      if (s.scope === targetScope) set.add(s.name.toLowerCase());
+    }
+    return set;
+  }, [installedSkills, scope]);
+
+  const filtered = useMemo(() => {
+    const list = remoteSkills || [];
+    const q = query.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(s => s.name.toLowerCase().includes(q));
+  }, [remoteSkills, query]);
+
+  const installedCount = useMemo(() => {
+    if (!remoteSkills) return 0;
+    return remoteSkills.filter(s => installedNamesLower.has(s.name.toLowerCase())).length;
+  }, [remoteSkills, installedNamesLower]);
+
+  const handleInstallOne = useCallback(async (name: string) => {
+    if (!item) return;
+    setBusyName(name);
+    try {
+      const r = await api.installSkill(item.source, scope === 'global', name, workdir);
+      if (r.ok) {
+        toast(L(locale, `${name} 已安装`, `${name} installed`), true);
+        onChanged();
+      } else toast(r.error || 'Failed', false);
+    } catch (e: any) { toast(e?.message || 'Failed', false); }
+    finally { setBusyName(null); }
+  }, [item, scope, workdir, locale, toast, onChanged]);
+
+  const handleRemoveOne = useCallback(async (name: string) => {
+    setBusyName(name);
+    try {
+      const r = await api.removeExtensionSkill(name, scope === 'global', workdir);
+      if (r.ok) {
+        toast(L(locale, `${name} 已移除`, `${name} removed`), true);
+        onChanged();
+      } else toast(r.error || 'Failed', false);
+    } catch (e: any) { toast(e?.message || 'Failed', false); }
+    finally { setBusyName(null); }
+  }, [scope, workdir, locale, toast, onChanged]);
+
+  const handleInstallAll = useCallback(async () => {
+    if (!item) return;
+    setBulkBusy('install');
+    try {
+      const r = await api.installSkill(item.source, scope === 'global', undefined, workdir);
+      if (r.ok) {
+        toast(L(locale, '全部安装完成', 'All skills installed'), true);
+        onChanged();
+      } else toast(r.error || 'Failed', false);
+    } catch (e: any) { toast(e?.message || 'Failed', false); }
+    finally { setBulkBusy(null); }
+  }, [item, scope, workdir, locale, toast, onChanged]);
+
+  const handleRemoveAll = useCallback(async () => {
+    if (!item || !remoteSkills) return;
+    setBulkBusy('remove');
+    try {
+      const targets = remoteSkills
+        .map(s => s.name)
+        .filter(name => installedNamesLower.has(name.toLowerCase()));
+      for (const name of targets) {
+        await api.removeExtensionSkill(name, scope === 'global', workdir);
+      }
+      toast(L(locale, '已移除该集合下的全部技能', 'Removed all skills from this collection'), true);
+      onChanged();
+    } catch (e: any) { toast(e?.message || 'Failed', false); }
+    finally { setBulkBusy(null); }
+  }, [item, remoteSkills, installedNamesLower, scope, workdir, locale, toast, onChanged]);
+
+  if (!item) return null;
+
+  return (
+    <Modal open={open} onClose={onClose} wide>
+      <ModalHeader
+        title={item.name}
+        description={locale === 'zh-CN' ? item.descriptionZh : item.description}
+        onClose={onClose}
+      />
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          <BrandAvatar iconUrl={item.iconUrl} name={item.name} size={44} />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 text-[13px] font-semibold text-fg">
+              {item.name}
+              {item.homepage && (
+                <a href={item.homepage} target="_blank" rel="noreferrer" className="text-fg-5 hover:text-primary">
+                  <ExternalLinkIcon />
+                </a>
+              )}
+            </div>
+            <div className="mt-0.5 flex items-center gap-2 text-[11.5px] text-fg-4">
+              <span className="truncate text-fg-5">{item.source}</span>
               {item.stars !== undefined && (
-                <span className="inline-flex items-center gap-0.5 font-medium text-fg-4">
+                <span className="inline-flex items-center gap-0.5 text-fg-5">
                   <StarIcon size={10} />{formatStarCount(item.stars)}
                 </span>
               )}
-              {item.pushedAt && <span>· {formatRelativeTime(item.pushedAt, locale)}</span>}
-            </span>
-          )}
+              {item.pushedAt && <span className="text-fg-5">· {formatRelativeTime(item.pushedAt, locale)}</span>}
+            </div>
+          </div>
         </div>
-        {item.installed ? (
-          <Button variant="ghost" size="sm" onClick={onRemove} disabled={busy} className="hover:!text-err">
-            {busy ? <Spinner /> : L(locale, '移除', 'Remove')}
-          </Button>
-        ) : (
-          <Button variant="outline" size="sm" onClick={onInstall} disabled={busy}>
-            {busy ? <Spinner /> : L(locale, '安装', 'Install')}
-          </Button>
-        )}
+
+        <section className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[12px] font-semibold text-fg-3">
+              {L(locale, '该集合下的技能', 'Skills in this collection')}
+              {remoteSkills && (
+                <span className="ml-2 text-[11px] font-normal text-fg-5">
+                  {installedCount} / {remotePartial ? `${remoteSkills.length}+` : remoteSkills.length}
+                  {' '}{L(locale, '已安装', 'installed')}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleInstallAll}
+                disabled={bulkBusy !== null || remoteLoading}
+              >
+                {bulkBusy === 'install' ? <Spinner /> : L(locale, '全部安装', 'Install all')}
+              </Button>
+              {installedCount > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleRemoveAll}
+                  disabled={bulkBusy !== null}
+                  className="hover:!text-err"
+                >
+                  {bulkBusy === 'remove' ? <Spinner /> : L(locale, '全部移除', 'Remove all')}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {(remoteSkills && remoteSkills.length > 6) && (
+            <Input
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder={L(locale, '搜索技能…', 'Search skills…')}
+              className="w-full"
+            />
+          )}
+
+          {remoteLoading ? (
+            <div className="flex items-center justify-center py-10"><Spinner /></div>
+          ) : remoteError ? (
+            <div className="rounded-lg border border-edge/70 bg-panel/60 p-3 text-[12px] text-fg-4">
+              {L(locale,
+                '无法从 GitHub 拉取技能列表（可能是网络或速率限制）。你仍可以使用上方的「全部安装」按钮一次性安装该集合。',
+                'Could not list skills from GitHub (network or rate-limit). You can still use "Install all" to grab the whole collection.')}
+              <div className="mt-1 truncate font-mono text-[11px] text-fg-5">{remoteError}</div>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="rounded-lg border border-edge/70 bg-panel/60 p-3 text-center text-[12px] text-fg-5">
+              {query
+                ? L(locale, '没有匹配的技能', 'No matching skills')
+                : L(locale, '该集合暂无可识别的技能', 'No discoverable skills in this collection')}
+            </div>
+          ) : (
+            <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-edge/70 bg-panel/40">
+              {filtered.map((skill, i) => {
+                const isInstalled = installedNamesLower.has(skill.name.toLowerCase());
+                const busy = busyName === skill.name;
+                return (
+                  <div
+                    key={skill.name}
+                    className={cn(
+                      'flex items-center justify-between gap-3 px-3 py-2 text-[12px]',
+                      i > 0 && 'border-t border-edge/40',
+                    )}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        {isInstalled && (
+                          <CheckCircleIcon size={12} />
+                        )}
+                        <span className={cn('truncate font-medium', isInstalled ? 'text-[var(--th-ok)]' : 'text-fg-2')}>
+                          {skill.name}
+                        </span>
+                      </div>
+                      {skill.description && (
+                        <div className="mt-0.5 line-clamp-1 text-[11px] text-fg-5">{skill.description}</div>
+                      )}
+                    </div>
+                    {isInstalled ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void handleRemoveOne(skill.name)}
+                        disabled={busy || bulkBusy !== null}
+                        className="hover:!text-err"
+                      >
+                        {busy ? <Spinner /> : L(locale, '移除', 'Remove')}
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleInstallOne(skill.name)}
+                        disabled={busy || bulkBusy !== null}
+                      >
+                        {busy ? <Spinner /> : L(locale, '安装', 'Install')}
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {remotePartial && (
+            <div className="text-[11px] text-fg-5">
+              {L(locale,
+                '仓库内技能数量较多，仅显示前 1000 个。可使用上方搜索或直接打开仓库浏览全部。',
+                'Showing the first 1000 skills. Use search or open the repo on GitHub for the full list.')}
+            </div>
+          )}
+        </section>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -1319,7 +1665,6 @@ function SkillsCatalogSection({
   workdir?: string;
   locale: string;
 }) {
-  const toast = useStore(s => s.toast);
   const cacheKey = `pikiclaw.skills.catalog.${scope}.${workdir || ''}`;
   const { data, loading, refresh } = useCachedResource<{ items: SkillCatalogItem[]; installed: SkillInfo[] }>(
     cacheKey,
@@ -1331,115 +1676,123 @@ function SkillsCatalogSection({
   );
 
   const [customOpen, setCustomOpen] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const items = data?.items || [];
+  const installedAll = data?.installed || [];
   const installedSkills = useMemo(() => {
-    const all = data?.installed || [];
     const targetScope = scope === 'global' ? 'global' : 'project';
-    return all.filter(s => s.scope === targetScope);
-  }, [data, scope]);
+    return installedAll.filter(s => s.scope === targetScope);
+  }, [installedAll, scope]);
 
-  // Separate installed (known repos) from installed custom skills
-  const orphanInstalled = useMemo(() => {
-    return installedSkills.filter(s => !items.some(i => i.installedNames.includes(s.name)));
-  }, [installedSkills, items]);
+  // Two-tier split — repos with at least one installed sub-skill float to the
+  // top, mirroring the CLI tab's "signed in / available" layout.
+  const connected = useMemo(() => items.filter(i => i.installedNames.length > 0), [items]);
+  const available = useMemo(() => items.filter(i => i.installedNames.length === 0), [items]);
+  const groupedAvailable = useMemo(() => {
+    const map = new Map<string, SkillCatalogItem[]>();
+    for (const it of available) {
+      const k = it.category;
+      if (!map.has(k)) map.set(k, []);
+      map.get(k)!.push(it);
+    }
+    return [...map.entries()].sort(([a], [b]) => (CATEGORY_META[a]?.order ?? 99) - (CATEGORY_META[b]?.order ?? 99));
+  }, [available]);
 
-  const installRepo = useCallback(async (item: SkillCatalogItem) => {
-    setBusy(item.id);
-    try {
-      const r = await api.installSkill(item.source, scope === 'global', undefined, workdir);
-      if (r.ok) {
-        toast(L(locale, `${item.name} 已安装`, `${item.name} installed`), true);
-        await refresh();
-      } else toast(r.error || 'Failed', false);
-    } catch (e: any) { toast(e?.message || 'Failed', false); }
-    finally { setBusy(null); }
-  }, [scope, workdir, locale, toast, refresh]);
-
-  const removeInstalled = useCallback(async (name: string) => {
-    setBusy(name);
-    try {
-      const r = await api.removeExtensionSkill(name, scope === 'global', workdir);
-      if (r.ok) {
-        toast(L(locale, `${name} 已移除`, `${name} removed`), true);
-        await refresh();
-      } else toast(r.error || 'Failed', false);
-    } catch (e: any) { toast(e?.message || 'Failed', false); }
-    finally { setBusy(null); }
-  }, [scope, workdir, locale, toast, refresh]);
-
+  const selected = selectedId ? items.find(i => i.id === selectedId) || null : null;
   const showSpinner = loading && !data;
+  const totalInstalled = installedSkills.length;
 
   return (
-    <section>
-      <div className="mb-3 flex items-center justify-between gap-2">
+    <section className="space-y-4">
+      <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5">
           <SectionLabel>Skills</SectionLabel>
           {!loading && (
             <span className="text-[11px] text-fg-5">
-              {installedSkills.length} {L(locale, '已安装', 'installed')}
+              {totalInstalled} {L(locale, '已安装', 'installed')} · {available.length} {L(locale, '可用', 'available')}
             </span>
           )}
           {loading && <Spinner className="h-3 w-3" />}
         </div>
-        <Button variant="outline" size="sm" onClick={() => setCustomOpen(true)}>
-          + {L(locale, '从 GitHub 安装', 'Install from GitHub')}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={() => void refresh()}>
+            {loading ? L(locale, '刷新中…', 'Refreshing…') : L(locale, '刷新', 'Refresh')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setCustomOpen(true)}>
+            + {L(locale, '从 GitHub 安装', 'Install from GitHub')}
+          </Button>
+        </div>
       </div>
 
       {showSpinner ? (
         <div className="flex items-center justify-center py-10"><Spinner /></div>
-      ) : items.length === 0 && orphanInstalled.length === 0 ? (
+      ) : items.length === 0 ? (
         <EmptyState
           title={L(locale, '暂无可用的技能包', 'No skill packs available')}
           subtitle={L(locale, '从 GitHub 导入一个开始使用', 'Import from GitHub to get started')}
         />
       ) : (
-        <div className="space-y-3">
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {items.map((item, i) => (
-              <SkillCard
-                key={item.id}
-                item={item}
-                locale={locale}
-                busy={busy === item.id}
-                index={i}
-                onInstall={() => void installRepo(item)}
-                onRemove={() => item.installedNames.forEach(n => void removeInstalled(n))}
-              />
-            ))}
-          </div>
-
-          {orphanInstalled.length > 0 && (
-            <div>
-              <div className="mb-1.5 text-[11px] font-medium text-fg-5">
-                {L(locale, '自定义技能', 'Custom skills')}
+        <>
+          {connected.length > 0 && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 text-[11px] font-semibold text-fg-3">
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--th-ok)]"></span>
+                {L(locale, '已安装', 'Installed')}
               </div>
-              <div className="space-y-1.5">
-                {orphanInstalled.map(skill => (
-                  <SettingRowCard key={skill.name}>
-                    <SettingRowLead
-                      icon={<ZapIcon size={14} />}
-                      title={skill.label || skill.name}
-                      subtitle={skill.description || undefined}
-                      badge={<Badge variant="ok">{L(locale, '已安装', 'Installed')}</Badge>}
-                    />
-                    <div className="min-w-0 xl:col-span-2">
-                      {skill.mcpRequires?.length ? <Badge variant="muted">MCP: {skill.mcpRequires.join(', ')}</Badge> : null}
-                    </div>
-                    <SettingRowAction>
-                      <Button variant="ghost" size="sm" onClick={() => void removeInstalled(skill.name)} disabled={busy === skill.name} className="hover:!text-err">
-                        {L(locale, '移除', 'Remove')}
-                      </Button>
-                    </SettingRowAction>
-                  </SettingRowCard>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {connected.map((c, i) => (
+                  <SkillConnectedCard
+                    key={c.id}
+                    item={c}
+                    locale={locale}
+                    animationDelay={`${Math.min(i, 12) * 30}ms`}
+                    onClick={() => setSelectedId(c.id)}
+                  />
                 ))}
               </div>
             </div>
           )}
-        </div>
+
+          {available.length > 0 && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 text-[11px] font-semibold text-fg-3">
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-fg-5/50"></span>
+                {L(locale, '推荐', 'Available')}
+              </div>
+              {groupedAvailable.map(([cat, list]) => (
+                <div key={cat} className="space-y-2">
+                  <div className="text-[10.5px] font-medium uppercase tracking-[0.06em] text-fg-5">
+                    {locale === 'zh-CN' ? (CATEGORY_META[cat]?.zh || cat) : (CATEGORY_META[cat]?.en || cat)}
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {list.map((item, i) => (
+                      <SkillAvailableCard
+                        key={item.id}
+                        item={item}
+                        locale={locale}
+                        animationDelay={`${Math.min(i, 12) * 30}ms`}
+                        onClick={() => setSelectedId(item.id)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
       )}
+
+      <SkillDetailModal
+        item={selected}
+        open={!!selected}
+        onClose={() => setSelectedId(null)}
+        onChanged={() => { void refresh(); }}
+        locale={locale}
+        scope={scope}
+        workdir={workdir}
+        installedSkills={installedAll}
+      />
 
       <CustomSkillDialog
         open={customOpen}
@@ -1525,6 +1878,127 @@ function StreamingTerminal({
         </div>
       ) : (
         <pre className="whitespace-pre-wrap break-words">{text}</pre>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Auto-install panel — spawns `npm install -g <pkg>` server-side and streams
+ * stdout/stderr over the same SSE channel the oauth-web flow uses. Surfaces a
+ * single "Install" button up front; runs the child, refreshes the catalog when
+ * it exits successfully, and stays in place with a retry on failure.
+ */
+function CliInstallPanel({
+  cli,
+  locale,
+  onInstalled,
+}: {
+  cli: CliCatalogItem;
+  locale: string;
+  onInstalled: () => void;
+}) {
+  const [chunks, setChunks] = useState<string[]>([]);
+  const [running, setRunning] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [doneOk, setDoneOk] = useState<boolean | null>(null);
+  const sourceRef = useRef<EventSource | null>(null);
+
+  const cleanup = useCallback(() => {
+    try { sourceRef.current?.close(); } catch { /* ignore */ }
+    sourceRef.current = null;
+  }, []);
+  useEffect(() => cleanup, [cleanup]);
+
+  const startInstall = useCallback(async () => {
+    setChunks([]);
+    setErrorMsg(null);
+    setDoneOk(null);
+    setRunning(true);
+    try {
+      const r = await api.startCliInstall(cli.id);
+      if (!r.ok || !r.sessionId) throw new Error(r.error || 'start failed');
+      setSessionId(r.sessionId);
+      const es = new EventSource(`/api/extensions/cli/auth/stream?sessionId=${encodeURIComponent(r.sessionId)}`);
+      sourceRef.current = es;
+      es.onmessage = (msg) => {
+        try {
+          const ev = JSON.parse(msg.data);
+          if (ev.type === 'output') {
+            setChunks(prev => prev.length > 400 ? [...prev.slice(-400), ev.chunk] : [...prev, ev.chunk]);
+          } else if (ev.type === 'error') {
+            setErrorMsg(ev.message || 'error');
+          } else if (ev.type === 'done') {
+            setRunning(false);
+            setDoneOk(!!ev.ok);
+            cleanup();
+            if (ev.ok) onInstalled();
+          }
+        } catch { /* malformed */ }
+      };
+      es.addEventListener('close', () => {
+        setRunning(false);
+        cleanup();
+      });
+      es.onerror = () => {
+        if (!running) return;
+        setErrorMsg(L(locale, '连接中断', 'Stream disconnected'));
+      };
+    } catch (e: any) {
+      setRunning(false);
+      setErrorMsg(e?.message || 'failed to start install');
+    }
+  }, [cli.id, cleanup, locale, onInstalled, running]);
+
+  const cancelInstall = useCallback(async () => {
+    if (sessionId) {
+      try { await api.cancelCliAuth(sessionId); } catch { /* ignore */ }
+    }
+    cleanup();
+    setRunning(false);
+  }, [sessionId, cleanup]);
+
+  if (!cli.autoInstall) return null;
+
+  const showTerminal = running || chunks.length > 0 || doneOk !== null;
+
+  return (
+    <div className="space-y-3 rounded-lg border border-edge/70 bg-panel/60 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[12px] text-fg-3">
+          {L(locale,
+            `通过 ${cli.autoInstall.label} 直接在本机自动安装，无需复制命令。`,
+            `Run the ${cli.autoInstall.label} install locally — no copy-paste needed.`)}
+        </div>
+        {!running ? (
+          <Button variant="primary" size="sm" onClick={startInstall} disabled={doneOk === true}>
+            {doneOk === true
+              ? L(locale, '已安装', 'Installed')
+              : doneOk === false
+                ? L(locale, '重试安装', 'Retry install')
+                : L(locale, '一键安装', 'Auto-install')}
+          </Button>
+        ) : (
+          <Button variant="outline" size="sm" onClick={cancelInstall}>
+            {L(locale, '中止', 'Abort')}
+          </Button>
+        )}
+      </div>
+      {showTerminal && (
+        <StreamingTerminal
+          chunks={chunks}
+          running={running}
+          emptyHint={L(locale, '安装进度将在此显示', 'Install output will appear here')}
+        />
+      )}
+      {errorMsg && (
+        <div className="text-[12px] text-[var(--th-err)]">{errorMsg}</div>
+      )}
+      {doneOk === false && !errorMsg && (
+        <div className="text-[12px] text-[var(--th-err)]">
+          {L(locale, '安装未成功，请查看上方输出排查。', 'Install did not complete — check the output above.')}
+        </div>
       )}
     </div>
   );
@@ -1814,14 +2288,21 @@ function CliDetailModal({
         </div>
 
         {!installed && (
-          <section className="space-y-2">
+          <section className="space-y-3">
             <div className="text-[12px] font-semibold text-fg-3">
               {L(locale, '安装', 'Install')}
             </div>
+            {cli.autoInstall && (
+              <CliInstallPanel cli={cli} locale={locale} onInstalled={onChanged} />
+            )}
             <div className="text-[11.5px] leading-relaxed text-fg-5">
-              {L(locale,
-                '复制下面的命令到终端运行。我们不自动代为安装 — 包管理器往往需要 sudo 或交互式确认。',
-                'Copy a command below and run it in your terminal. We don\'t auto-install — package managers often need sudo or interactive confirmation.')}
+              {cli.autoInstall
+                ? L(locale,
+                    '或手动复制命令到终端执行。',
+                    'Or copy a command below and run it in your terminal.')
+                : L(locale,
+                    '复制下面的命令到终端运行。我们不自动代为安装 — 包管理器往往需要 sudo 或交互式确认。',
+                    'Copy a command below and run it in your terminal. We don\'t auto-install — package managers often need sudo or interactive confirmation.')}
             </div>
             {platformCommands.length > 0 ? (
               <InstallCommandBlock commands={platformCommands} locale={locale} />
@@ -1903,7 +2384,7 @@ function CliConnectedCard({
     <button
       type="button"
       onClick={onClick}
-      className="animate-in-up group relative w-full overflow-hidden rounded-2xl border border-edge/70 bg-panel p-4 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_12px_28px_rgba(15,23,42,0.09)] focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]"
+      className="animate-in-up group relative flex min-h-[112px] w-full flex-col overflow-hidden rounded-2xl border border-edge/70 bg-panel p-4 text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_12px_28px_rgba(15,23,42,0.09)] focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]"
       style={{
         background: `linear-gradient(135deg, ${withAlpha(hex, 0.06)} 0%, ${withAlpha(hex, 0.02)} 100%), var(--th-panel)`,
         animationDelay,
@@ -1950,7 +2431,7 @@ function CliAvailableCard({
     <button
       type="button"
       onClick={onClick}
-      className="animate-in-up group relative w-full overflow-hidden rounded-2xl border border-edge/60 bg-panel p-4 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-edge hover:shadow-[0_12px_28px_rgba(15,23,42,0.07)] focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]"
+      className="animate-in-up group relative flex min-h-[112px] w-full flex-col overflow-hidden rounded-2xl border border-edge/60 bg-panel p-4 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-edge hover:shadow-[0_12px_28px_rgba(15,23,42,0.07)] focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]"
       style={{ animationDelay }}
     >
       <div className="flex items-start gap-3">
@@ -1969,7 +2450,7 @@ function CliAvailableCard({
           </div>
         </div>
       </div>
-      <div className="mt-3 flex items-center justify-between">
+      <div className="mt-auto pt-3 flex items-center justify-between">
         <span className="text-[11px] text-fg-5">
           {item.auth.type === 'oauth-web' ? L(locale, '浏览器授权', 'OAuth')
             : item.auth.type === 'token' ? L(locale, 'Token', 'Token')
@@ -2053,7 +2534,7 @@ function CliCatalogSection({
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--th-ok)]"></span>
             {L(locale, '已登录', 'Signed in')}
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {connected.map((c, i) => (
               <CliConnectedCard
                 key={c.id}

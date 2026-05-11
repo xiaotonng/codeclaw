@@ -53,8 +53,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const lastSentRef = useRef<{ prompt: string; files: File[] }>({ prompt: '', files: [] });
   const storeAgents = useStore(s => s.agentStatus?.agents ?? null);
   const [agents, setAgents] = useState<AgentRuntimeStatus[]>(storeAgents || []);
-  // User's applied cascade choice for this session. Empty = use runtime default.
-  // Reset on session change (see session-key effect below).
+  // User's applied cascade choice for this session. Empty = fall back to runtime
+  // default. These are intentionally per-session and never written back to the
+  // global runtime prefs — picking a model in the composer must NOT change other
+  // sessions' defaults. Reset on session change (see session-key effect below).
   const [selectedAgent, setSelectedAgent] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
   const [selectedEffort, setSelectedEffort] = useState('');
@@ -75,7 +77,6 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
   const [skillMenuIndex, setSkillMenuIndex] = useState(0);
   const skillMenuRef = useRef<HTMLDivElement>(null);
-  const reloadAppState = useStore(s => s.reload);
   const refreshAgentStatus = useStore(s => s.refreshAgentStatus);
 
   useEffect(() => { if (storeAgents?.length) setAgents(storeAgents); }, [storeAgents]);
@@ -239,10 +240,12 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       || '';
     if (!targetAgent) return;
     const targetStatus = agents.find(a => a.agent === targetAgent) || null;
-    const targetModel = (targetStatus?.selectedModel || selectedModel || '').trim() || null;
+    // Per-session pick wins over the global runtime default. selectedModel/Effort
+    // is set by applyCascade and only applies to this session's React state.
+    const targetModel = (selectedModel || targetStatus?.selectedModel || '').trim() || null;
     const targetEffort = targetAgent === 'gemini'
       ? null
-      : ((targetStatus?.selectedEffort || selectedEffort || '').trim() || null);
+      : ((selectedEffort || targetStatus?.selectedEffort || '').trim() || null);
     const targetSessionId = targetAgent === session.agent ? session.sessionId : '';
     setSending(true);
     // Stash content for potential recall restoration
@@ -426,50 +429,30 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const models = (cascadeAgent?.byokProviderName && cascadeAgent.byokModels?.length)
     ? cascadeAgent.byokModels
     : (cascadeAgent?.models || []);
-  // Runtime agent status is the source of truth; applied cascade choice is a fallback
-  // only for the brief window before agents loads.
-  const currentModel = currentAgent?.selectedModel || selectedModel || '';
+  // Per-session cascade choice wins over the global runtime default. Falling
+  // back to currentAgent fields means an unset session shows the user's global
+  // default; once they pick from the cascade, that pick scopes to this session.
+  const currentModel = selectedModel || currentAgent?.selectedModel || '';
   const currentEffort = effectiveAgent === 'gemini'
     ? ''
-    : (currentAgent?.selectedEffort || selectedEffort || '');
+    : (selectedEffort || currentAgent?.selectedEffort || '');
   const effortLevels = EFFORT_OPTIONS[cascadeAgentId as keyof typeof EFFORT_OPTIONS] || [];
   const activePreview = previewImageId ? imageAttachments.find(item => item.id === previewImageId) || null : null;
   const canSend = (!!input.trim() || imageAttachments.length > 0) && !sending && !!effectiveAgent;
 
   const resetCascade = () => { setPendingAgent(null); setPendingModel(null); setPendingEffort(null); };
 
-  const persistComposerDefaults = useCallback(async (agent: string, model: string, effort: string | null) => {
-    const patch: Record<string, unknown> = { defaultAgent: agent };
-    if (model) {
-      patch.agent = agent;
-      patch.model = model;
-    }
-    if (effort && agent !== 'gemini') {
-      patch.agent = agent;
-      patch.effort = effort;
-    }
-    try {
-      const res = await api.updateRuntimeAgent(patch);
-      if (res.ok && res.agents) setAgents(res.agents);
-      await reloadAppState();
-    } catch {}
-  }, [reloadAppState]);
-
   const applyCascade = useCallback((agent: string, model: string, effort: string | null) => {
     const nextEffort = agent === 'gemini' ? '' : (effort || '');
+    // Per-session only. We deliberately do NOT touch the shared `agents` array
+    // or POST to /api/runtime-agent — doing either would leak this session's
+    // choice into every other session's default.
     setSelectedAgent(agent);
     setSelectedModel(model);
     setSelectedEffort(nextEffort);
-    // Optimistically reflect the choice in runtime state so the button/dropdown update
-    // instantly without waiting for persistComposerDefaults to round-trip.
-    setAgents(prev => prev.map(a => a.agent === agent
-      ? { ...a, isDefault: true, selectedModel: model, selectedEffort: nextEffort }
-      : { ...a, isDefault: false }
-    ));
     resetCascade();
     setCascadeStep('closed');
-    void persistComposerDefaults(agent, model, effort);
-  }, [persistComposerDefaults]);
+  }, []);
 
   const toggleCascade = () => {
     if (cascadeStep === 'closed') { resetCascade(); refreshAgentStatus(); setCascadeStep('agent'); }

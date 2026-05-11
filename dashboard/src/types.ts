@@ -508,6 +508,15 @@ export interface SkillCatalogItem {
   installedNames: string[];
   stars?: number;
   pushedAt?: string;
+  iconUrl?: string;
+  totalCount?: number;
+  partial?: boolean;
+}
+
+export interface RemoteSkillInfo {
+  name: string;
+  description?: string;
+  path: string;
 }
 
 export interface McpSearchResult {
@@ -593,6 +602,8 @@ export interface CliCatalogItem {
   version?: string;
   authDetail?: string;
   platform: 'darwin' | 'linux' | 'win';
+  /** Present when the CLI has an npm-only install command that's safe to auto-run. */
+  autoInstall?: { label: string };
 }
 
 export interface CliStatus {

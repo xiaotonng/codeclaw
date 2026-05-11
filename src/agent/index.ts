@@ -90,6 +90,21 @@ export {
   type ProjectSkillPaths, type SkillInfo, type SkillListResult, type SkillScope,
 } from './skills.js';
 
+// ── Re-export: goal (persistent thread objective) ────────────────────────────
+export {
+  readGoal, writeGoal, clearGoal, setGoal, pauseGoal, resumeGoal, completeGoal,
+  accountTurn, bumpContinuationCount, shouldContinueAfterTurn,
+  renderContinuationPrompt, renderBudgetLimitPrompt,
+  sessionGoalPath, DEFAULT_MAX_CONTINUATIONS,
+  type ThreadGoal, type GoalStatus, type TurnUsage, type ContinuationDecision,
+} from './goal.js';
+
+// ── Re-export: native codex goal bridge ──────────────────────────────────────
+export {
+  setCodexGoal, getCodexGoal, clearCodexGoal, pauseCodexGoal, resumeCodexGoal,
+  type CodexThreadGoal, type CodexGoalStatus,
+} from './drivers/codex.js';
+
 // ── Re-export: MCP extensions ───────────────────────────────────────────────
 export {
   listAllMcpExtensions,
@@ -129,6 +144,7 @@ export {
   getCliCatalog, refreshCliStatus,
   startCliAuthSession, getAuthSession, cancelAuthSession,
   applyCliToken, logoutCli,
+  startCliInstallSession,
   type RecommendedCli, type CliCategory, type CliAuthType,
   type CliInstallSpec, type CliInstallCommand, type CliAuthSpec,
   type CliState, type CliStatus, type CliCatalogItem,

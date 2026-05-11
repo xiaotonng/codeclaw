@@ -16,8 +16,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { detectCli, invalidateCliStatus, type CliStatus } from './detector.js';
-import { getRecommendedCli } from './registry.js';
+import { detectCli, invalidateCliStatus, currentPlatform, type CliStatus } from './detector.js';
+import { getRecommendedCli, type RecommendedCli } from './registry.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -163,6 +163,118 @@ export async function startCliAuthSession(cliId: string): Promise<StartAuthSessi
 
   child.on('close', (code) => {
     void settle(code === 0, code);
+  });
+
+  return { ok: true, sessionId };
+}
+
+// ---------------------------------------------------------------------------
+// Auto-install — npm-based, safe-to-run install commands
+//
+// Reuses the same SESSIONS map and SSE protocol as oauth-web. We deliberately
+// allow ONLY `npm install -g <pkg>` style commands — brew/apt/dnf/winget/scoop
+// flows often need sudo or interactive confirmation and stay manual.
+// ---------------------------------------------------------------------------
+
+export interface AutoInstallSpec {
+  /** Argv to spawn, e.g. ['npm', 'install', '-g', '@jackwener/opencli']. */
+  argv: string[];
+  /** Short label shown on the auto-install button (e.g. "npm"). */
+  label: string;
+}
+
+const NPM_GLOBAL_INSTALL_RE = /^npm\s+(?:install|i)\s+(?:-g|--global)\s+(\S.*)$/;
+const SHELL_METACHAR_RE = /[|;&`$()<>]/;
+
+/**
+ * Inspect a CLI's install spec for the current platform and return a single
+ * argv that's safe to spawn without user-side approvals. Returns null when no
+ * such command exists (brew/apt/dnf/winget/scoop/curl-pipe-sh entries are all
+ * rejected on purpose — those require sudo or interactive confirmation).
+ */
+export function resolveAutoInstallSpec(
+  cli: RecommendedCli,
+  platform: 'darwin' | 'linux' | 'win',
+): AutoInstallSpec | null {
+  const commands = cli.install[platform] || [];
+  for (const c of commands) {
+    const cmd = c.cmd.trim();
+    if (SHELL_METACHAR_RE.test(cmd)) continue;
+    if (/^sudo\b/i.test(cmd)) continue;
+    const m = cmd.match(NPM_GLOBAL_INSTALL_RE);
+    if (!m) continue;
+    const pkgs = m[1].split(/\s+/).filter(Boolean);
+    if (pkgs.length === 0) continue;
+    return { argv: ['npm', 'install', '-g', ...pkgs], label: c.label || 'npm' };
+  }
+  return null;
+}
+
+export async function startCliInstallSession(
+  cliId: string,
+): Promise<StartAuthSessionResult | { ok: false; error: string }> {
+  const cli = getRecommendedCli(cliId);
+  if (!cli) return { ok: false, error: `unknown cli: ${cliId}` };
+  const spec = resolveAutoInstallSpec(cli, currentPlatform());
+  if (!spec) return { ok: false, error: `no auto-install command available for ${cliId}` };
+
+  const sessionId = randomUUID();
+  const events = new EventEmitter();
+  events.setMaxListeners(0);
+
+  const session: AuthSession & { _child?: ChildProcess } = {
+    sessionId,
+    cliId,
+    startedAt: Date.now(),
+    events,
+    done: false,
+    ok: false,
+    exitCode: null,
+    backlog: [],
+  };
+  SESSIONS.set(sessionId, session);
+
+  const [cmd, ...args] = spec.argv;
+  const child = spawn(cmd, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, NO_COLOR: '1', TERM: 'dumb', CI: '1' },
+    // npm on Windows is npm.cmd — needs shell resolution. spawn() args are
+    // still passed argv-style; we don't concat into a shell string.
+    shell: process.platform === 'win32',
+    windowsHide: true,
+  });
+  session._child = child;
+
+  const pushOutput = (chunk: string) => {
+    session.backlog.push(chunk);
+    if (session.backlog.length > BACKLOG_LINES) session.backlog.splice(0, session.backlog.length - BACKLOG_LINES);
+    events.emit('event', { type: 'output', chunk } satisfies AuthSessionEvent);
+  };
+
+  child.stdout?.on('data', (buf: Buffer) => pushOutput(buf.toString('utf8')));
+  child.stderr?.on('data', (buf: Buffer) => pushOutput(buf.toString('utf8')));
+  child.on('error', (err) => {
+    events.emit('event', { type: 'error', message: err.message } satisfies AuthSessionEvent);
+  });
+
+  let settled = false;
+  child.on('close', async (code) => {
+    if (settled) return;
+    settled = true;
+    invalidateCliStatus(cliId);
+    let finalStatus: CliStatus | undefined;
+    try { finalStatus = await detectCli(cli); } catch { /* best-effort */ }
+    if (finalStatus) {
+      events.emit('event', { type: 'status', status: finalStatus } satisfies AuthSessionEvent);
+    }
+    // Install succeeded if the npm exit is 0 AND detection now sees the binary.
+    // Auth state is intentionally NOT required — for token / oauth CLIs the
+    // user still needs to sign in afterwards, which is a separate flow.
+    const installed = finalStatus ? finalStatus.state !== 'not_installed' : code === 0;
+    session.ok = code === 0 && installed;
+    session.exitCode = code;
+    session.done = true;
+    events.emit('event', { type: 'done', ok: session.ok, exitCode: code } satisfies AuthSessionEvent);
   });
 
   return { ok: true, sessionId };

@@ -53,6 +53,7 @@ export function buildDefaultMenuCommands(agentCount: number, skills: SkillInfo[]
     { command: 'workspaces', description: 'Pick saved workspace' },
     { command: 'models', description: 'Switch models' },
     { command: 'mode', description: 'Toggle plan mode' },
+    { command: 'goal', description: 'Set/inspect a persistent goal' },
     { command: 'stop', description: 'Stop current session' },
     { command: 'status', description: 'Show status' },
     { command: 'host', description: 'Host info' },

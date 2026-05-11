@@ -95,6 +95,11 @@ export interface RecommendedSkillRepo {
   category: SkillCategory;
   recommendedScope: RecommendedScope;
   homepage?: string;
+  /**
+   * Optional explicit icon URL (SVG/PNG). When unset, the dashboard falls back
+   * to the GitHub owner's avatar derived from `source`.
+   */
+  iconUrl?: string;
 }
 
 export interface McpSearchResult {

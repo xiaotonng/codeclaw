@@ -74,7 +74,13 @@ export class CodexAppServer {
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => { this.kill(); resolve(false); }, CODEX_APPSERVER_SPAWN_TIMEOUT_MS);
       const args = ['app-server'];
-      for (const c of this.configOverrides) args.push('-c', c);
+      // Always enable codex's native /goal feature so pikiclaw can route through
+      // codex's own `thread/goal/*` RPC + continuation engine. User-supplied -c
+      // overrides win.
+      const overrides = this.configOverrides.some(entry => /^features\.goals\s*=/.test(entry))
+        ? this.configOverrides
+        : [...this.configOverrides, 'features.goals=true'];
+      for (const c of overrides) args.push('-c', c);
       agentLog(`[codex-rpc] spawning: codex ${args.join(' ')}`);
       const proc = spawn('codex', args, {
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -218,6 +224,100 @@ function getSharedServer(): CodexAppServer {
 export function shutdownCodexServer(): void {
   _sharedServer?.kill();
   _sharedServer = null;
+}
+
+// ---------------------------------------------------------------------------
+// Native /goal RPC bridge — `thread/goal/*` is exposed by codex app-server
+// when `features.goals=true` (we always set that). pikiclaw treats codex's
+// SQLite + continuation engine as the source of truth for codex sessions.
+//
+// Wire format (camelCase per codex-rs/app-server-protocol/schema/typescript/v2):
+//   thread/goal/set    { threadId, objective?, status?, tokenBudget? }  → ThreadGoal
+//   thread/goal/get    { threadId }                                     → ThreadGoal | null
+//   thread/goal/clear  { threadId }                                     → ()
+//   Status enum: "active" | "paused" | "budgetLimited" | "complete"
+// ---------------------------------------------------------------------------
+
+export type CodexGoalStatus = 'active' | 'paused' | 'budgetLimited' | 'complete';
+
+export interface CodexThreadGoal {
+  threadId: string;
+  objective: string;
+  status: CodexGoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+const CODEX_GOAL_RPC_TIMEOUT_MS = 15_000;
+
+async function ensureSharedServerForGoal(): Promise<CodexAppServer | null> {
+  const srv = getSharedServer();
+  if (!(await srv.ensureRunning())) return null;
+  return srv;
+}
+
+function unwrapGoal(raw: any): CodexThreadGoal | null {
+  const g = raw?.goal ?? raw;
+  if (!g || typeof g !== 'object') return null;
+  if (typeof g.threadId !== 'string') return null;
+  return {
+    threadId: g.threadId,
+    objective: String(g.objective ?? ''),
+    status: (g.status as CodexGoalStatus) || 'active',
+    tokenBudget: typeof g.tokenBudget === 'number' ? g.tokenBudget : null,
+    tokensUsed: typeof g.tokensUsed === 'number' ? g.tokensUsed : 0,
+    timeUsedSeconds: typeof g.timeUsedSeconds === 'number' ? g.timeUsedSeconds : 0,
+    createdAt: typeof g.createdAt === 'number' ? g.createdAt : 0,
+    updatedAt: typeof g.updatedAt === 'number' ? g.updatedAt : 0,
+  };
+}
+
+/** Set / replace the active goal on a codex thread. Codex auto-starts a continuation turn if it is idle. */
+export async function setCodexGoal(opts: {
+  threadId: string;
+  objective?: string;
+  status?: CodexGoalStatus;
+  tokenBudget?: number | null;
+}): Promise<{ ok: true; goal: CodexThreadGoal | null } | { ok: false; error: string }> {
+  const srv = await ensureSharedServerForGoal();
+  if (!srv) return { ok: false, error: 'codex app-server unavailable' };
+  const params: Record<string, unknown> = { threadId: opts.threadId };
+  if (typeof opts.objective === 'string') params.objective = opts.objective;
+  if (opts.status) params.status = opts.status;
+  if (opts.tokenBudget !== undefined) params.tokenBudget = opts.tokenBudget;
+  const resp = await srv.call('thread/goal/set', params, CODEX_GOAL_RPC_TIMEOUT_MS);
+  if (resp?.error) return { ok: false, error: String(resp.error.message || 'thread/goal/set failed') };
+  return { ok: true, goal: unwrapGoal(resp?.result) };
+}
+
+export async function getCodexGoal(threadId: string): Promise<CodexThreadGoal | null> {
+  const srv = await ensureSharedServerForGoal();
+  if (!srv) return null;
+  const resp = await srv.call('thread/goal/get', { threadId }, CODEX_GOAL_RPC_TIMEOUT_MS);
+  if (resp?.error) {
+    agentWarn(`[codex-rpc] thread/goal/get error: ${resp.error.message || resp.error}`);
+    return null;
+  }
+  return unwrapGoal(resp?.result);
+}
+
+export async function clearCodexGoal(threadId: string): Promise<{ ok: boolean; error?: string }> {
+  const srv = await ensureSharedServerForGoal();
+  if (!srv) return { ok: false, error: 'codex app-server unavailable' };
+  const resp = await srv.call('thread/goal/clear', { threadId }, CODEX_GOAL_RPC_TIMEOUT_MS);
+  if (resp?.error) return { ok: false, error: String(resp.error.message || 'thread/goal/clear failed') };
+  return { ok: true };
+}
+
+export async function pauseCodexGoal(threadId: string) {
+  return setCodexGoal({ threadId, status: 'paused' });
+}
+
+export async function resumeCodexGoal(threadId: string) {
+  return setCodexGoal({ threadId, status: 'active' });
 }
 
 // ---------------------------------------------------------------------------
@@ -966,6 +1066,12 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       for (let i = 0; i < opts.codexExtraArgs.length; i++) {
         if (opts.codexExtraArgs[i] === '-c' && opts.codexExtraArgs[i + 1]) config.push(opts.codexExtraArgs[++i]);
       }
+    }
+    // Enable codex's native `/goal` feature so `thread/goal/*` RPCs work and
+    // the model gets the native `create_goal` / `update_goal` / `get_goal`
+    // tools + continuation engine. User-provided -c overrides win.
+    if (!config.some(entry => /^features\.goals\s*=/.test(entry))) {
+      config.push('features.goals=true');
     }
 
     if (!(await srv.ensureRunning(config, opts.extraEnv))) {

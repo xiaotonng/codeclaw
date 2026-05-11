@@ -21,7 +21,9 @@ export {
 export {
   startCliAuthSession, getAuthSession, cancelAuthSession,
   applyCliToken, logoutCli,
+  startCliInstallSession, resolveAutoInstallSpec,
   type AuthSession, type AuthSessionEvent,
   type ApplyTokenResult, type LogoutResult,
   type StartAuthSessionResult,
+  type AutoInstallSpec,
 } from './auth.js';

@@ -511,6 +511,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     const envVars = {
       MCP_WORKSPACE_PATH: workspacePath,
       MCP_WORKDIR: opts.workdir || '',
+      MCP_AGENT: opts.agent || '',
       MCP_STAGED_FILES: JSON.stringify(stagedFiles),
       MCP_CALLBACK_URL: `http://127.0.0.1:${port}`,
       MCP_LOG_URL: `http://127.0.0.1:${port}/log`,

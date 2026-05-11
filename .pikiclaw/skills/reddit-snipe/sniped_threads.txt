@@ -1,0 +1,10 @@
+# Reddit-snipe 已处理 thread 记录
+# 格式: <thread_url> | <ISO timestamp> | <link|no-link|skipped>
+# - link    : 发了完整 builder 评论（含 npx + GitHub 链接）
+# - no-link : 发了 builder 评论但去掉链接行（sub 规则禁外链）
+# - skipped : 评估过但 sub 标 skip / 其他原因没发
+# 即使最终没发评论也记录 — 避免下次重新评估同一帖
+https://www.reddit.com/r/ClaudeAI/comments/1t9tolw/running_two_claude_code_agents_on_the_same_repo/ | 2026-05-11T07:38:00Z | link  # POSTED
+https://www.reddit.com/r/ClaudeAI/comments/1t9uf9h/claude_managed_agents_launched_this_week_heres/ | 2026-05-11T07:30:00Z | drafted-defer  # held: same-sub 24h limit
+https://www.reddit.com/r/ClaudeAI/comments/1t9uz5j/hook_your_wearables_into_claude_code_or_any_mcp/ | 2026-05-11T07:30:00Z | drafted-defer  # held: same-sub 24h limit
+https://www.reddit.com/r/Playwright/comments/1t9vq0z/need_suggestions_for_ai_coding_agents/ | 2026-05-11T07:41:00Z | no-link  # POSTED (sub rule #1: No Advertising)

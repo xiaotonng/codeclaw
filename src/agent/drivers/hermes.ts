@@ -26,7 +26,7 @@ import {
   type TailMessage, type RichMessage, type MessageBlock,
   agentLog, agentWarn, emptyUsage, normalizeErrorMessage,
   listPikiclawSessions, findPikiclawSession,
-  buildStreamPreviewMeta, applyTurnWindow,
+  buildStreamPreviewMeta, applyTurnWindow, pushRecentActivity,
   IMAGE_EXTS, mimeForExt,
 } from '../index.js';
 
@@ -67,13 +67,23 @@ interface StreamState {
   text: string;
   thinking: string;
   activity: string;
+  recentActivity: string[];
+  toolsById: Map<string, { title: string }>;
   inputTokens: number | null;
   outputTokens: number | null;
+  cachedInputTokens: number | null;
+  contextWindow: number | null;
   contextUsedTokens: number | null;
 }
 
 function makeStreamState(): StreamState {
-  return { text: '', thinking: '', activity: '', inputTokens: null, outputTokens: null, contextUsedTokens: null };
+  return {
+    text: '', thinking: '', activity: '',
+    recentActivity: [],
+    toolsById: new Map(),
+    inputTokens: null, outputTokens: null, cachedInputTokens: null,
+    contextWindow: null, contextUsedTokens: null,
+  };
 }
 
 function applySessionUpdate(state: StreamState, update: any): boolean {
@@ -90,20 +100,39 @@ function applySessionUpdate(state: StreamState, update: any): boolean {
       return false;
     }
     case 'tool_call': {
-      state.activity = update.title || 'tool';
+      // ACP tool_call kicks off a new invocation. Accumulate it (mirroring
+      // Claude/Codex) so the user sees the full chain in the live footer,
+      // not just the title of whatever tool is currently mid-flight.
+      const id = typeof update.toolCallId === 'string' ? update.toolCallId : '';
+      const title = (typeof update.title === 'string' && update.title.trim()) || 'tool';
+      if (id) state.toolsById.set(id, { title });
+      pushRecentActivity(state.recentActivity, title);
+      state.activity = state.recentActivity.join('\n');
       return true;
     }
     case 'tool_call_update': {
-      if (update.title) state.activity = update.title;
-      if (update.status === 'completed' || update.status === 'failed') state.activity = '';
+      const id = typeof update.toolCallId === 'string' ? update.toolCallId : '';
+      const known = id ? state.toolsById.get(id) : null;
+      const title = (typeof update.title === 'string' && update.title.trim()) || known?.title || 'tool';
+      if (id && typeof update.title === 'string' && update.title.trim()) {
+        state.toolsById.set(id, { title });
+      }
+      if (update.status === 'completed') {
+        pushRecentActivity(state.recentActivity, `${title} done`);
+        state.activity = state.recentActivity.join('\n');
+      } else if (update.status === 'failed') {
+        pushRecentActivity(state.recentActivity, `${title} failed`);
+        state.activity = state.recentActivity.join('\n');
+      }
       return true;
     }
     case 'usage_update': {
-      if (typeof update.used === 'number') state.outputTokens = update.used;
-      if (typeof update.size === 'number') {
-        state.inputTokens = update.size;
-        state.contextUsedTokens = update.size;
-      }
+      // ACP semantics: `size` = model context window, `used` = current
+      // context pressure. We previously mis-mapped `size` to
+      // contextUsedTokens, which made the chip show the full window
+      // (e.g. "1.0M tok" for a 1M-window model) regardless of actual use.
+      if (typeof update.size === 'number') state.contextWindow = update.size;
+      if (typeof update.used === 'number') state.contextUsedTokens = update.used;
       return true;
     }
     default:
@@ -180,9 +209,9 @@ async function doHermesStream(opts: StreamOpts): Promise<StreamResult> {
   const buildMeta = () => buildStreamPreviewMeta({
     inputTokens: state.inputTokens,
     outputTokens: state.outputTokens,
-    cachedInputTokens: null,
+    cachedInputTokens: state.cachedInputTokens,
     cacheCreationInputTokens: null,
-    contextWindow: null,
+    contextWindow: state.contextWindow,
     contextUsedTokens: state.contextUsedTokens,
   });
 
@@ -289,6 +318,8 @@ async function doHermesStream(opts: StreamOpts): Promise<StreamResult> {
     state.text = '';
     state.thinking = '';
     state.activity = '';
+    state.recentActivity = [];
+    state.toolsById.clear();
     consumeUpdates = true;
 
     const promptResponse = await client.request('session/prompt', {
@@ -297,6 +328,19 @@ async function doHermesStream(opts: StreamOpts): Promise<StreamResult> {
     }, Math.max(opts.timeout * 1000, 30_000)) as any;
 
     stopReason = promptResponse?.stopReason || 'end_turn';
+
+    // `PromptResponse.usage` (ACP) carries real per-turn token counts from the
+    // provider. `usage_update` notifications, by contrast, describe the
+    // session's *context window pressure* (size/used), not this turn's I/O.
+    const usage = promptResponse?.usage;
+    if (usage && typeof usage === 'object') {
+      const input = usage.inputTokens ?? usage.input_tokens;
+      const output = usage.outputTokens ?? usage.output_tokens;
+      const cached = usage.cachedReadTokens ?? usage.cached_read_tokens;
+      if (typeof input === 'number') state.inputTokens = input;
+      if (typeof output === 'number') state.outputTokens = output;
+      if (typeof cached === 'number') state.cachedInputTokens = cached;
+    }
 
     const messageText = state.text.trim();
     const isRefusalOnly = !!messageText && messageText.length < 120 && REFUSAL_REGEX.test(messageText);
@@ -309,6 +353,8 @@ async function doHermesStream(opts: StreamOpts): Promise<StreamResult> {
       thinkingEffort: opts.thinkingEffort,
       inputTokens: state.inputTokens,
       outputTokens: state.outputTokens,
+      cachedInputTokens: state.cachedInputTokens,
+      contextWindow: state.contextWindow,
       contextUsedTokens: state.contextUsedTokens,
       stopReason,
       incomplete: stopReason !== 'end_turn',

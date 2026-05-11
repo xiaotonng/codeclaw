@@ -15,6 +15,7 @@ import type {
   McpServerConfig,
   PermissionRequestResult,
   SkillCatalogItem,
+  RemoteSkillInfo,
   SessionHubResult,
   SessionMessagesResult,
   SkillInfo,
@@ -250,6 +251,11 @@ export const api = {
     ),
   removeExtensionSkill: (name: string, global?: boolean, workdir?: string) =>
     post<{ ok: boolean; error?: string }>('/api/extensions/skills/remove', { name, global, workdir }),
+  listRepoSkills: (source: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; skills: RemoteSkillInfo[]; partial?: boolean; error?: string }>(
+      `/api/extensions/skills/list?source=${encodeURIComponent(source)}`,
+      { timeoutMs: 15_000, ...opts },
+    ),
   searchExtensionSkills: (query: string) =>
     json<{ ok: boolean; results: any[] }>(`/api/extensions/skills/search?q=${encodeURIComponent(query)}`),
 
@@ -275,6 +281,11 @@ export const api = {
   startCliAuth: (id: string) =>
     post<{ ok: boolean; sessionId?: string; error?: string }>(
       '/api/extensions/cli/auth/start',
+      { id },
+    ),
+  startCliInstall: (id: string) =>
+    post<{ ok: boolean; sessionId?: string; error?: string }>(
+      '/api/extensions/cli/install',
       { id },
     ),
   cancelCliAuth: (sessionId: string) =>

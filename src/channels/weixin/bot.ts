@@ -32,6 +32,7 @@ import {
   getSessionsPageData,
   getStartData,
   getWorkspacesData,
+  handleGoalCommand,
 } from '../../bot/commands.js';
 import { WeixinChannel, type WeixinContext, type WeixinMessagePayload } from './channel.js';
 import { getActiveUserConfig } from '../../core/config/user-config.js';
@@ -196,6 +197,9 @@ export class WeixinBot extends Bot {
         return true;
       case 'skills':
         await this.cmdSkills(ctx);
+        return true;
+      case 'goal':
+        await this.cmdGoal(ctx, args);
         return true;
       case 'stop':
         await this.cmdStop(ctx);
@@ -474,6 +478,15 @@ export class WeixinBot extends Bot {
     if (interrupted) parts.push('interrupted current run');
     if (cancelledQueued > 0) parts.push(`cancelled ${cancelledQueued} queued task(s)`);
     await ctx.reply(`Stopped: ${parts.join(', ')}.`);
+  }
+
+  private async cmdGoal(ctx: WeixinContext, args: string) {
+    const reply = await handleGoalCommand(this, ctx.chatId, args);
+    if (reply == null) {
+      await ctx.reply('No session selected. Use /sessions to pick one first.');
+      return;
+    }
+    await ctx.reply(reply);
   }
 
   private async cmdRestart(ctx: WeixinContext) {

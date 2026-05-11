@@ -11,11 +11,15 @@ import { getActiveUserConfig, loadWorkspaces, onUserConfigChange, resolveUserWor
 import {
   doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, resolveAgentModels, listSkills, stageSessionFiles,
   reconcileOrphanedRunningSessions, getAgentBoundModelId, setAgentBoundModelId, collapseSkillPrompt,
+  readGoal, accountTurn, shouldContinueAfterTurn, renderContinuationPrompt, renderBudgetLimitPrompt,
+  bumpContinuationCount, pauseGoal, resumeGoal, setGoal as setGoalState, clearGoal as clearGoalState,
+  setCodexGoal, getCodexGoal, clearCodexGoal, pauseCodexGoal, resumeCodexGoal,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type SessionInfo, type UsageResult,
   type AgentInteraction, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
   type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult,
+  type ThreadGoal, type GoalStatus, type CodexThreadGoal,
 } from '../agent/index.js';
 import {
   querySessions, querySessionTail, updateSession,
@@ -247,6 +251,46 @@ export interface RunningTask {
   deferForSteer?: boolean;
 }
 
+/**
+ * Driver-agnostic goal snapshot consumed by IM renderers + dashboard. The
+ * underlying store is either pikiclaw's goal.json (claude / gemini / hermes)
+ * or codex's native SQLite (codex). Status uses snake_case for both — codex's
+ * camelCase `budgetLimited` is converted to `budget_limited` at the boundary.
+ */
+export interface SessionGoalView {
+  source: 'pikiclaw' | 'codex';
+  objective: string;
+  status: GoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  continuationCount: number | null;
+}
+
+function normalizeFromPikiclaw(goal: ThreadGoal): SessionGoalView {
+  return {
+    source: 'pikiclaw',
+    objective: goal.objective,
+    status: goal.status,
+    tokenBudget: goal.tokenBudget,
+    tokensUsed: goal.tokensUsed,
+    timeUsedSeconds: goal.timeUsedSeconds,
+    continuationCount: goal.continuationCount,
+  };
+}
+
+function normalizeFromCodex(goal: CodexThreadGoal): SessionGoalView {
+  return {
+    source: 'codex',
+    objective: goal.objective,
+    status: goal.status === 'budgetLimited' ? 'budget_limited' : goal.status,
+    tokenBudget: goal.tokenBudget,
+    tokensUsed: goal.tokensUsed,
+    timeUsedSeconds: goal.timeUsedSeconds,
+    continuationCount: null,
+  };
+}
+
 export interface BeginHumanLoopPromptOpts {
   taskId: string;
   chatId: ChatId;
@@ -272,6 +316,12 @@ export interface SubmitSessionTaskOpts {
   thinkingEffort?: string | null;
   sourceMessageId?: number | string;
   chatId?: ChatId;
+  /**
+   * When set, this task is a runtime-injected goal continuation, not a user
+   * message. Stream events carry the flag so UIs can hide or label it, and the
+   * task does not chain another continuation if it ends up cancelled.
+   */
+  goalContinuation?: { kind: 'continuation' | 'budget_wrapup'; goalId: string };
   /**
    * Fork descriptor — when set, the spawned stream creates a brand-new child
    * session that branches off `parentSessionId`. The child gets its own ID
@@ -1422,6 +1472,11 @@ export class Bot {
           incomplete: !!result.incomplete,
           ...(result.ok ? {} : { error: result.error || result.message }),
         });
+        try {
+          this.maybeEnqueueGoalContinuation(session, opts, result);
+        } catch (err: any) {
+          this.debug(`[goal-continuation] enqueue failed: ${err?.message || err}`);
+        }
       } catch (error: any) {
         this.emitStream(currentSessionKey(), {
           type: 'done',
@@ -1440,6 +1495,210 @@ export class Bot {
     });
 
     return { ok: true, taskId, sessionKey: session.key, queued: true };
+  }
+
+  /**
+   * Goal continuation: after a turn ends, if a goal is still active for the
+   * session, account token + wall-clock usage, then enqueue one more task with
+   * the rendered continuation prompt. If the budget was just crossed, enqueue a
+   * single wrap-up turn with the budget-limit prompt instead. Goal-continuation
+   * tasks that get cancelled or errored auto-pause the goal so the loop does
+   * not silently resume on the user's next message.
+   *
+   * Codex sessions short-circuit: codex CLI runs its own native `/goal`
+   * lifecycle (state machine + continuation engine) inside its app-server, so
+   * pikiclaw stays out to avoid a double loop. See setSessionGoal et al — they
+   * bridge to codex's `thread/goal/*` RPC instead of writing pikiclaw's
+   * goal.json for codex sessions.
+   */
+  private maybeEnqueueGoalContinuation(
+    session: SessionRuntime,
+    opts: SubmitSessionTaskOpts,
+    result: StreamResult,
+  ): void {
+    if (session.agent === 'codex') return;
+    const sessionId = (result.sessionId || session.sessionId || '').trim();
+    if (!sessionId || isPendingSessionId(sessionId)) return;
+    const workdir = session.workdir;
+    const agent = session.agent;
+    const goalBefore = readGoal(workdir, agent, sessionId);
+    if (!goalBefore) return;
+
+    if (!result.ok || result.incomplete) {
+      if (opts.goalContinuation && goalBefore.status === 'active') {
+        pauseGoal(workdir, agent, sessionId);
+        this.debug(`[goal-continuation] paused goal=${goalBefore.goalId} after failed continuation`);
+      }
+      return;
+    }
+    if (goalBefore.status !== 'active') return;
+
+    const usedTokens = Math.max(0, (result.inputTokens || 0) + (result.outputTokens || 0));
+    const seconds = Math.max(0, Math.floor(result.elapsedS || 0));
+    const { goal, budgetJustCrossed } = accountTurn(workdir, agent, sessionId, {
+      tokens: usedTokens,
+      seconds,
+    });
+    if (!goal) return;
+
+    if (budgetJustCrossed) {
+      const prompt = renderBudgetLimitPrompt(goal);
+      this.debug(`[goal-continuation] budget exhausted goal=${goal.goalId} — enqueue wrap-up turn`);
+      this.submitSessionTask({
+        agent,
+        sessionId,
+        workdir,
+        prompt,
+        chatId: opts.chatId,
+        modelId: opts.modelId,
+        thinkingEffort: opts.thinkingEffort,
+        goalContinuation: { kind: 'budget_wrapup', goalId: goal.goalId },
+      });
+      return;
+    }
+
+    const decision = shouldContinueAfterTurn(goal);
+    if (!decision.shouldContinue) {
+      this.debug(`[goal-continuation] stop goal=${goal.goalId} reason=${decision.reason}`);
+      return;
+    }
+
+    const updated = bumpContinuationCount(workdir, agent, sessionId);
+    if (!updated) return;
+    const prompt = renderContinuationPrompt(updated);
+    this.debug(`[goal-continuation] continue goal=${updated.goalId} count=${updated.continuationCount} tokens=${updated.tokensUsed}/${updated.tokenBudget ?? '∞'}`);
+    this.submitSessionTask({
+      agent,
+      sessionId,
+      workdir,
+      prompt,
+      chatId: opts.chatId,
+      modelId: opts.modelId,
+      thinkingEffort: opts.thinkingEffort,
+      goalContinuation: { kind: 'continuation', goalId: updated.goalId },
+    });
+  }
+
+  /**
+   * Normalized goal view used by IM/dashboard renderers — same shape regardless
+   * of whether the source is pikiclaw's goal.json (claude / gemini / …) or
+   * codex's native SQLite state machine.
+   */
+  // SessionGoalView is exported below the class.
+
+  /**
+   * Read the current goal for a session. For codex this hits codex's native
+   * `thread/goal/get`; for other drivers, reads goal.json.
+   */
+  async getSessionGoal(workdir: string, agent: Agent, sessionId: string): Promise<SessionGoalView | null> {
+    if (agent === 'codex') {
+      if (!sessionId || isPendingSessionId(sessionId)) return null;
+      const goal = await getCodexGoal(sessionId);
+      return goal ? normalizeFromCodex(goal) : null;
+    }
+    const goal = readGoal(workdir, agent, sessionId);
+    return goal ? normalizeFromPikiclaw(goal) : null;
+  }
+
+  /**
+   * Set (or replace) the goal for a session. For codex this routes through
+   * codex's native `thread/goal/set` and codex auto-starts a continuation turn
+   * internally. For other drivers, pikiclaw writes goal.json and enqueues the
+   * first continuation turn so the agent starts working immediately.
+   */
+  async setSessionGoal(
+    workdir: string,
+    agent: Agent,
+    sessionId: string,
+    opts: { objective: string; tokenBudget?: number | null; chatId?: ChatId; modelId?: string | null; thinkingEffort?: string | null },
+  ): Promise<SessionGoalView> {
+    if (agent === 'codex') {
+      if (!sessionId || isPendingSessionId(sessionId)) {
+        throw new Error('codex session must exist before /goal — send a first message to create the thread');
+      }
+      const resp = await setCodexGoal({
+        threadId: sessionId,
+        objective: opts.objective,
+        status: 'active',
+        tokenBudget: opts.tokenBudget ?? null,
+      });
+      if (!resp.ok) throw new Error(resp.error);
+      // codex returns a snapshot; if for some reason it's null, re-fetch.
+      const goal = resp.goal ?? (await getCodexGoal(sessionId));
+      if (!goal) throw new Error('codex did not return a goal snapshot');
+      return normalizeFromCodex(goal);
+    }
+    const goal = setGoalState(workdir, agent, sessionId, {
+      objective: opts.objective,
+      tokenBudget: opts.tokenBudget ?? null,
+    });
+    if (!isPendingSessionId(sessionId)) {
+      const prompt = renderContinuationPrompt(goal);
+      this.submitSessionTask({
+        agent,
+        sessionId,
+        workdir,
+        prompt,
+        chatId: opts.chatId,
+        modelId: opts.modelId,
+        thinkingEffort: opts.thinkingEffort,
+        goalContinuation: { kind: 'continuation', goalId: goal.goalId },
+      });
+    }
+    return normalizeFromPikiclaw(goal);
+  }
+
+  async pauseSessionGoal(workdir: string, agent: Agent, sessionId: string): Promise<SessionGoalView | null> {
+    if (agent === 'codex') {
+      if (!sessionId || isPendingSessionId(sessionId)) return null;
+      const resp = await pauseCodexGoal(sessionId);
+      if (!resp.ok) throw new Error(resp.error);
+      const goal = resp.goal ?? (await getCodexGoal(sessionId));
+      return goal ? normalizeFromCodex(goal) : null;
+    }
+    const goal = pauseGoal(workdir, agent, sessionId);
+    return goal ? normalizeFromPikiclaw(goal) : null;
+  }
+
+  async resumeSessionGoal(
+    workdir: string,
+    agent: Agent,
+    sessionId: string,
+    opts: { chatId?: ChatId; modelId?: string | null; thinkingEffort?: string | null } = {},
+  ): Promise<SessionGoalView | null> {
+    if (agent === 'codex') {
+      if (!sessionId || isPendingSessionId(sessionId)) return null;
+      const resp = await resumeCodexGoal(sessionId);
+      if (!resp.ok) throw new Error(resp.error);
+      const goal = resp.goal ?? (await getCodexGoal(sessionId));
+      return goal ? normalizeFromCodex(goal) : null;
+    }
+    const goal = resumeGoal(workdir, agent, sessionId);
+    if (!goal || goal.status !== 'active') return goal ? normalizeFromPikiclaw(goal) : null;
+    if (!isPendingSessionId(sessionId)) {
+      const prompt = renderContinuationPrompt(goal);
+      this.submitSessionTask({
+        agent,
+        sessionId,
+        workdir,
+        prompt,
+        chatId: opts.chatId,
+        modelId: opts.modelId,
+        thinkingEffort: opts.thinkingEffort,
+        goalContinuation: { kind: 'continuation', goalId: goal.goalId },
+      });
+    }
+    return normalizeFromPikiclaw(goal);
+  }
+
+  async clearSessionGoal(workdir: string, agent: Agent, sessionId: string): Promise<void> {
+    if (agent === 'codex') {
+      if (!sessionId || isPendingSessionId(sessionId)) return;
+      const resp = await clearCodexGoal(sessionId);
+      if (!resp.ok) throw new Error(resp.error);
+      return;
+    }
+    clearGoalState(workdir, agent, sessionId);
   }
 
   cancelTask(taskId: string): { task: RunningTask | null; interrupted: boolean; cancelled: boolean } {

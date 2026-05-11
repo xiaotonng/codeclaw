@@ -615,6 +615,99 @@ app.post('/api/session-hub/session/steer', async (c) => {
 });
 
 // ==========================================================================
+// Persistent thread goal (analogous to Codex CLI's `/goal`).
+// ==========================================================================
+
+app.get('/api/session-hub/session/goal', async (c) => {
+  const workdir = c.req.query('workdir') || '';
+  const agent = c.req.query('agent') || '';
+  const sessionId = c.req.query('sessionId') || '';
+  if (!workdir || !agent || !sessionId) {
+    return c.json({ ok: false, error: 'workdir, agent, and sessionId query params required' }, 400);
+  }
+  const bot = runtime.getBotRef();
+  if (!bot) return c.json({ ok: false, error: 'bot not attached' }, 503);
+  try {
+    const goal = await bot.getSessionGoal(workdir, agent as Agent, sessionId);
+    return c.json({ ok: true, goal });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/goal', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { workdir, agent, sessionId, objective, tokenBudget, modelId, thinkingEffort } = body || {};
+    if (!workdir || !agent || !sessionId || typeof objective !== 'string' || !objective.trim()) {
+      return c.json({ ok: false, error: 'workdir, agent, sessionId, and objective are required' }, 400);
+    }
+    const bot = runtime.getBotRef();
+    if (!bot) return c.json({ ok: false, error: 'bot not attached' }, 503);
+    const goal = await bot.setSessionGoal(workdir, agent as Agent, sessionId, {
+      objective,
+      tokenBudget: typeof tokenBudget === 'number' ? tokenBudget : null,
+      modelId: typeof modelId === 'string' ? modelId : undefined,
+      thinkingEffort: typeof thinkingEffort === 'string' ? thinkingEffort : undefined,
+    });
+    return c.json({ ok: true, goal });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/goal/pause', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { workdir, agent, sessionId } = body || {};
+    if (!workdir || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
+    }
+    const bot = runtime.getBotRef();
+    if (!bot) return c.json({ ok: false, error: 'bot not attached' }, 503);
+    const goal = await bot.pauseSessionGoal(workdir, agent as Agent, sessionId);
+    return c.json({ ok: true, goal });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/goal/resume', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { workdir, agent, sessionId, modelId, thinkingEffort } = body || {};
+    if (!workdir || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
+    }
+    const bot = runtime.getBotRef();
+    if (!bot) return c.json({ ok: false, error: 'bot not attached' }, 503);
+    const goal = await bot.resumeSessionGoal(workdir, agent as Agent, sessionId, {
+      modelId: typeof modelId === 'string' ? modelId : undefined,
+      thinkingEffort: typeof thinkingEffort === 'string' ? thinkingEffort : undefined,
+    });
+    return c.json({ ok: true, goal });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+app.post('/api/session-hub/session/goal/clear', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { workdir, agent, sessionId } = body || {};
+    if (!workdir || !agent || !sessionId) {
+      return c.json({ ok: false, error: 'workdir, agent, and sessionId are required' }, 400);
+    }
+    const bot = runtime.getBotRef();
+    if (!bot) return c.json({ ok: false, error: 'bot not attached' }, 503);
+    await bot.clearSessionGoal(workdir, agent as Agent, sessionId);
+    return c.json({ ok: true });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+// ==========================================================================
 // Interaction prompts (human-in-the-loop)
 // ==========================================================================
 

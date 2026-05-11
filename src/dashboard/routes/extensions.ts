@@ -13,6 +13,7 @@
  */
 
 import { Hono } from 'hono';
+import { execFile } from 'node:child_process';
 import {
   addGlobalMcpExtension, removeGlobalMcpExtension, updateGlobalMcpExtension,
   addWorkspaceMcpExtension, removeWorkspaceMcpExtension, updateWorkspaceMcpExtension,
@@ -421,6 +422,31 @@ interface SkillCatalogItem {
   stars?: number;
   /** ISO timestamp of the repo's most recent push. */
   pushedAt?: string;
+  /** Brand logo URL — explicit `iconUrl` from the manifest, else GitHub owner avatar. */
+  iconUrl?: string;
+  /**
+   * Total number of skills discovered in the remote repo. Undefined while the
+   * GitHub Contents listing is cold or has failed — frontend re-fetches via
+   * /skills/list when the detail modal opens.
+   */
+  totalCount?: number;
+  /** True when the remote listing was capped by GitHub Contents API. */
+  partial?: boolean;
+}
+
+/**
+ * Extract the GitHub owner slug from a skill `source`. Accepts both the
+ * compact `owner/repo` form and full `https://github.com/owner/repo[...]`
+ * URLs. Returns null when the source doesn't look like a GitHub reference,
+ * in which case the dashboard falls back to a letter avatar.
+ */
+function extractGithubOwner(source: string): string | null {
+  if (!source) return null;
+  const cleaned = source.trim().replace(/^https?:\/\/(www\.)?github\.com\//i, '');
+  const owner = cleaned.split('/')[0]?.trim();
+  if (!owner) return null;
+  // GitHub usernames: alphanumerics + single hyphens, 1–39 chars.
+  return /^[a-z0-9](?:[a-z0-9-]{0,38})$/i.test(owner) ? owner : null;
 }
 
 /**
@@ -438,6 +464,176 @@ const githubMetaCache = new Map<string, { value: RepoMeta; cachedAt: number }>()
 const GITHUB_META_TTL_MS = 24 * 60 * 60 * 1000;
 let githubMetaInflight: Promise<void> | null = null;
 
+/**
+ * Remote skill listings — cached per source. Each entry is the list of
+ * directories under the repo that contain a SKILL.md file. Same TTL as the
+ * stars cache (24h); on miss the catalog response simply omits totalCount and
+ * the modal triggers a fresh fetch when opened.
+ */
+export interface RemoteSkillInfo {
+  name: string;
+  /** First non-empty line of the SKILL.md description frontmatter, when cheap to read. */
+  description?: string;
+  /** Path under the repo (e.g. "skills/mcp-builder"). For Open-on-GitHub links. */
+  path: string;
+}
+interface RemoteSkillsResult {
+  skills: RemoteSkillInfo[];
+  /** True when the GitHub Contents listing was capped (we didn't paginate beyond ~1000). */
+  partial: boolean;
+}
+const remoteSkillsCache = new Map<string, { value: RemoteSkillsResult; cachedAt: number }>();
+const REMOTE_SKILLS_TTL_MS = 24 * 60 * 60 * 1000;
+const remoteSkillsInflight = new Map<string, Promise<RemoteSkillsResult | null>>();
+
+/**
+ * Resolve a GitHub API token without making the user export anything. Order:
+ *   1. `GITHUB_TOKEN` env var (explicit override wins).
+ *   2. `gh auth token` — pikiclaw recommends `gh` in its CLI catalog, so any
+ *      user who's set up the CLI extensions has a token already. Cached for
+ *      10 minutes since tokens rarely rotate; on rotation the next refresh
+ *      picks it up automatically.
+ *
+ * Returns null when neither path works (gh missing or not signed in). In that
+ * case GitHub Contents calls fall back to the 60 req/h unauth limit, which is
+ * still enough for most casual users.
+ */
+let githubTokenCache: { value: string; resolvedAt: number } | null = null;
+let githubTokenInflight: Promise<string | null> | null = null;
+const GITHUB_TOKEN_TTL_MS = 10 * 60 * 1000;
+
+async function resolveGithubToken(): Promise<string | null> {
+  if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
+  if (githubTokenCache && Date.now() - githubTokenCache.resolvedAt < GITHUB_TOKEN_TTL_MS) {
+    return githubTokenCache.value;
+  }
+  // Singleflight: if a probe is already in flight, await its result instead of
+  // spawning N parallel `gh` subprocesses. The 14-source catalog warm-up used
+  // to race here and one keyring lock-contention failure would poison the
+  // cache for the next 10 minutes. We also only cache on success — a null
+  // result just falls through to the next caller's probe.
+  if (githubTokenInflight) return githubTokenInflight;
+  githubTokenInflight = (async () => {
+    const value = await new Promise<string | null>((resolve) => {
+      try {
+        execFile('gh', ['auth', 'token'], { timeout: 3_000 }, (err, stdout) => {
+          if (err) { resolve(null); return; }
+          const out = (stdout?.toString() || '').trim();
+          resolve(out || null);
+        });
+      } catch { resolve(null); }
+    });
+    if (value) githubTokenCache = { value, resolvedAt: Date.now() };
+    return value;
+  })().finally(() => { githubTokenInflight = null; });
+  return githubTokenInflight;
+}
+
+function parseSourceToOwnerRepo(source: string): { owner: string; repo: string } | null {
+  if (!source) return null;
+  const cleaned = source.trim().replace(/^https?:\/\/(www\.)?github\.com\//i, '').replace(/\.git$/, '');
+  const [owner, repo] = cleaned.split('/');
+  if (!owner || !repo) return null;
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,38})$/i.test(owner)) return null;
+  if (!/^[a-z0-9._-]+$/i.test(repo)) return null;
+  return { owner, repo };
+}
+
+interface GhContentEntry {
+  name: string;
+  path: string;
+  type: 'dir' | 'file' | 'symlink' | 'submodule';
+}
+
+async function fetchGithubContents(owner: string, repo: string, path: string): Promise<GhContentEntry[] | null> {
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURI(path)}`;
+  try {
+    const headers: Record<string, string> = {
+      'User-Agent': 'pikiclaw-dashboard',
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    };
+    const token = await resolveGithubToken();
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 8_000);
+    const res = await fetch(url, { headers, signal: ctrl.signal });
+    clearTimeout(timeout);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!Array.isArray(data)) return null;
+    return data as GhContentEntry[];
+  } catch { return null; }
+}
+
+/**
+ * Discover skills inside a remote repo. Tries the two common layouts:
+ *   1. `<repo>/skills/<name>/SKILL.md`   (Anthropic-style)
+ *   2. `<repo>/<name>/SKILL.md`          (flat layout)
+ *
+ * Returns a deduplicated list of subdirectory names that look like skills.
+ * Best-effort — a missing SKILL.md inside a subdir just gets included if the
+ * subdir name matches sensible conventions, since some repos lazy-load.
+ */
+async function listRemoteSkillsFromGithub(source: string): Promise<RemoteSkillsResult | null> {
+  const cached = remoteSkillsCache.get(source);
+  if (cached && Date.now() - cached.cachedAt < REMOTE_SKILLS_TTL_MS) return cached.value;
+
+  const inflight = remoteSkillsInflight.get(source);
+  if (inflight) return inflight;
+
+  const promise = (async () => {
+    const parsed = parseSourceToOwnerRepo(source);
+    if (!parsed) return null;
+    const { owner, repo } = parsed;
+
+    // Look for skills/ subdir first; fall back to root if absent.
+    let listing = await fetchGithubContents(owner, repo, 'skills');
+    let basePath = 'skills';
+    if (!listing || listing.length === 0) {
+      listing = await fetchGithubContents(owner, repo, '');
+      basePath = '';
+    }
+    if (!listing) return null;
+
+    const directories = listing.filter(e => e.type === 'dir' && !e.name.startsWith('.'));
+
+    // To keep one repo from costing 100+ subsequent fetches (verifying SKILL.md
+    // inside each subdir), we skip the per-skill verification and instead
+    // accept any directory under the resolved base as a candidate skill. This
+    // matches how `npx skills add` itself enumerates targets.
+    const skills: RemoteSkillInfo[] = directories.map(d => ({
+      name: d.name,
+      path: d.path,
+    }));
+
+    // Some repos return >1000 entries; GitHub's contents endpoint caps there.
+    const partial = directories.length >= 1000;
+    const result: RemoteSkillsResult = { skills, partial };
+    remoteSkillsCache.set(source, { value: result, cachedAt: Date.now() });
+    return result;
+  })().finally(() => remoteSkillsInflight.delete(source));
+
+  remoteSkillsInflight.set(source, promise);
+  return promise;
+}
+
+/** GET /api/extensions/skills/list?source=owner/repo — list a repo's available skills. */
+app.get('/api/extensions/skills/list', async (c) => {
+  const source = c.req.query('source')?.trim();
+  if (!source) return c.json({ ok: false, error: 'source is required', skills: [] }, 400);
+  const result = await listRemoteSkillsFromGithub(source);
+  if (!result) {
+    return c.json({
+      ok: false,
+      error: 'failed to list remote skills',
+      skills: [],
+      partial: false,
+    }, 502);
+  }
+  return c.json({ ok: true, skills: result.skills, partial: result.partial });
+});
+
 async function fetchOneRepoMeta(source: string): Promise<RepoMeta | null> {
   // Accept either `owner/repo` or a full GitHub URL.
   const slug = source.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
@@ -445,12 +641,13 @@ async function fetchOneRepoMeta(source: string): Promise<RepoMeta | null> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5_000);
+    const token = await resolveGithubToken();
     const res = await fetch(`https://api.github.com/repos/${slug}`, {
       signal: controller.signal,
       headers: {
         'Accept': 'application/vnd.github+json',
         'User-Agent': 'pikiclaw-dashboard',
-        ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
     });
     clearTimeout(timer);
@@ -511,15 +708,50 @@ app.get('/api/extensions/skills/catalog', async (c) => {
     await ensureRepoMeta(sources).catch(() => { /* non-fatal */ });
   }
 
+  // Fire-and-forget warm-up for the remote-skills listing on any source we
+  // haven't seen yet. On the first ever catalog load this won't return totals,
+  // but the SWR refresh on the dashboard picks them up moments later.
+  for (const s of sources) {
+    if (!remoteSkillsCache.has(s) && !remoteSkillsInflight.has(s)) {
+      void listRemoteSkillsFromGithub(s).catch(() => { /* non-fatal */ });
+    }
+  }
+
+  // Build a lookup keyed by installed-skill name (lowercased) so we can quickly
+  // mark a repo's remote skills as installed. Scope-filter once up front.
+  const scopedInstalled = scope === 'global'
+    ? installed.filter(s => s.scope === 'global')
+    : scope === 'workspace'
+      ? installed.filter(s => s.scope === 'project')
+      : installed;
+  const installedByName = new Map<string, typeof scopedInstalled[number]>();
+  for (const s of scopedInstalled) installedByName.set(s.name.toLowerCase(), s);
+
   const items: SkillCatalogItem[] = filtered.map(repo => {
-    const hints = (repo.skills || []).map(s => s.toLowerCase());
-    const candidateMatches = installed.filter(s => hints.includes(s.name.toLowerCase()));
-    const matches = scope === 'global'
-      ? candidateMatches.filter(m => m.scope === 'global')
-      : scope === 'workspace'
-        ? candidateMatches.filter(m => m.scope === 'project')
-        : candidateMatches;
     const meta = githubMetaCache.get(repo.source)?.value;
+    const remote = remoteSkillsCache.get(repo.source)?.value;
+    const owner = extractGithubOwner(repo.source);
+    const iconUrl = repo.iconUrl
+      ?? (owner ? `https://github.com/${owner}.png?size=80` : undefined);
+
+    // Prefer the remote-listing intersection over the static `repo.skills` hint
+    // — most catalog entries don't bother filling the hint, and the GitHub
+    // listing is authoritative when cached.
+    let installedSkillNames: string[];
+    if (remote) {
+      installedSkillNames = remote.skills
+        .map(s => s.name)
+        .filter(name => installedByName.has(name.toLowerCase()));
+    } else {
+      const hints = (repo.skills || []).map(s => s.toLowerCase());
+      installedSkillNames = scopedInstalled
+        .filter(s => hints.includes(s.name.toLowerCase()))
+        .map(s => s.name);
+    }
+    const firstMatch = installedSkillNames[0]
+      ? installedByName.get(installedSkillNames[0].toLowerCase())
+      : undefined;
+
     return {
       id: repo.id,
       name: repo.name,
@@ -529,11 +761,14 @@ app.get('/api/extensions/skills/catalog', async (c) => {
       category: repo.category,
       recommendedScope: repo.recommendedScope,
       homepage: repo.homepage,
-      installed: matches.length > 0,
-      scope: matches[0]?.scope,
-      installedNames: matches.map(m => m.name),
+      installed: installedSkillNames.length > 0,
+      scope: firstMatch?.scope,
+      installedNames: installedSkillNames,
       stars: meta?.stars,
       pushedAt: meta?.pushedAt,
+      iconUrl,
+      totalCount: remote?.skills.length,
+      partial: remote?.partial,
     };
   });
 

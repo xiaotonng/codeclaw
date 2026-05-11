@@ -104,6 +104,96 @@ export function getWorkspacesData(bot: Bot, chatId: ChatId): WorkspacesData {
 }
 
 // ---------------------------------------------------------------------------
+// Goal — channel-agnostic /goal command dispatch
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle /goal <args> for a chat. Returns a human-readable status line for
+ * the IM renderer to send back. Returns null when there is no active session
+ * for the chat (caller renders its own "pick a session first" message).
+ *
+ * For codex sessions this awaits codex's native `thread/goal/*` RPC; for other
+ * drivers it's effectively sync but stays async for a uniform call site.
+ */
+export async function handleGoalCommand(bot: Bot, chatId: ChatId, rawArgs: string): Promise<string | null> {
+  const session = bot.selectedSession(chatId);
+  if (!session || !session.sessionId) return null;
+  const args = rawArgs.trim();
+  const workdir = session.workdir;
+  const agent = session.agent;
+  const sessionId = session.sessionId;
+
+  if (!args) {
+    const goal = await bot.getSessionGoal(workdir, agent, sessionId);
+    return formatGoalStatusLine(goal, agent);
+  }
+
+  const lower = args.toLowerCase();
+  try {
+    if (lower === 'pause') {
+      const goal = await bot.pauseSessionGoal(workdir, agent, sessionId);
+      if (!goal) return 'No goal set for this session.';
+      return `Paused goal: ${truncate(goal.objective, 80)}`;
+    }
+    if (lower === 'resume') {
+      const goal = await bot.resumeSessionGoal(workdir, agent, sessionId, { chatId });
+      if (!goal) return 'No goal to resume.';
+      if (goal.status !== 'active') return `Cannot resume goal (status: ${goal.status}).`;
+      return `Resumed goal: ${truncate(goal.objective, 80)}`;
+    }
+    if (lower === 'clear' || lower === 'cancel' || lower === 'stop') {
+      await bot.clearSessionGoal(workdir, agent, sessionId);
+      return 'Cleared goal.';
+    }
+
+    const { objective, tokenBudget } = parseObjective(args);
+    if (!objective) return 'Usage: /goal <objective>  (or pause / resume / clear)';
+    const goal = await bot.setSessionGoal(workdir, agent, sessionId, {
+      objective,
+      tokenBudget,
+      chatId,
+    });
+    const budgetLabel = goal.tokenBudget != null ? `, budget ${goal.tokenBudget} tokens` : '';
+    if (agent === 'codex') {
+      return [
+        `Goal set (codex native)${budgetLabel}: ${truncate(goal.objective, 120)}`,
+        'Send any message to trigger codex\'s native continuation loop. Each message resumes the thread and codex audits / continues until it marks the goal complete or hits the budget.',
+      ].join('\n');
+    }
+    return `Goal set${budgetLabel}: ${truncate(goal.objective, 120)}\nThe agent will keep working until it audits the objective complete${goal.tokenBudget != null ? ' or exhausts the budget' : ''}.`;
+  } catch (e: any) {
+    return `Failed: ${e?.message || e}`;
+  }
+}
+
+function formatGoalStatusLine(goal: Awaited<ReturnType<Bot['getSessionGoal']>>, agent: Agent): string {
+  if (!goal) return 'No goal set for this session. Use `/goal <objective>` to set one.';
+  const budget = goal.tokenBudget != null
+    ? `${goal.tokensUsed}/${goal.tokenBudget} tokens`
+    : `${goal.tokensUsed} tokens (no budget)`;
+  const continuations = goal.continuationCount != null ? `  ·  ${goal.continuationCount} continuations` : '';
+  const engine = goal.source === 'codex' ? '  ·  codex native' : '';
+  return [
+    `Goal: ${truncate(goal.objective, 200)}`,
+    `Status: ${goal.status}  ·  ${budget}${continuations}  ·  ${goal.timeUsedSeconds}s elapsed${engine}`,
+  ].join('\n');
+}
+
+function parseObjective(args: string): { objective: string; tokenBudget: number | null } {
+  const m = args.match(/^budget=(\d+)\s+(.+)$/i);
+  if (m) {
+    const tokenBudget = Number.parseInt(m[1], 10);
+    return { objective: m[2].trim(), tokenBudget: Number.isFinite(tokenBudget) && tokenBudget > 0 ? tokenBudget : null };
+  }
+  return { objective: args, tokenBudget: null };
+}
+
+function truncate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+}
+
+// ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 

@@ -94,6 +94,14 @@ while True:
                 with open(capture_path, "w") as f:
                     json.dump(params.get("prompt"), f)
             except Exception: pass
+        # Optionally interleave tool_call / tool_call_update events so the
+        # driver's activity-accumulator code path gets exercised.
+        for ev in SCRIPT.get("toolEvents", []):
+            write({"jsonrpc":"2.0","method":"session/update","params":{
+                "sessionId": session_id,
+                "update": ev,
+            }})
+            time.sleep(0.01)
         # Stream chunks for the prompt response, then return stopReason.
         for chunk in SCRIPT.get("promptChunks", ["Hello!"]):
             write({"jsonrpc":"2.0","method":"session/update","params":{
@@ -115,6 +123,7 @@ interface Scenario {
   stopReason?: string;
   loadBehavior?: 'ok' | 'null' | 'error';
   replayChunks?: string[];
+  toolEvents?: any[];
 }
 
 let tmpDir: string;
@@ -131,7 +140,7 @@ afterEach(() => {
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 });
 
-async function runDriver(scenario: Scenario, opts: Partial<StreamOpts> = {}): Promise<{ result: StreamResult; deltas: string[]; capturedPrompt: any }> {
+async function runDriver(scenario: Scenario, opts: Partial<StreamOpts> = {}): Promise<{ result: StreamResult; deltas: string[]; activities: string[]; capturedPrompt: any }> {
   // Dynamic import so vi.resetModules() above gives us a fresh module graph.
   const { doHermesStream } = await import('../src/agent/drivers/hermes.ts');
   // Patch the AcpClient spawn command via env: AcpClient invokes whatever we
@@ -153,6 +162,7 @@ async function runDriver(scenario: Scenario, opts: Partial<StreamOpts> = {}): Pr
   process.env.HERMES_PROMPT_CAPTURE_PATH = capturePath;
 
   const deltas: string[] = [];
+  const activities: string[] = [];
   const baseOpts: StreamOpts = {
     agent: 'hermes',
     prompt: '你好',
@@ -161,7 +171,7 @@ async function runDriver(scenario: Scenario, opts: Partial<StreamOpts> = {}): Pr
     sessionId: null,
     model: 'openai/gpt-5.4-mini',
     thinkingEffort: 'medium',
-    onText: (text) => { deltas.push(text); },
+    onText: (text, _thinking, activity) => { deltas.push(text); activities.push(activity || ''); },
     ...opts,
   };
 
@@ -169,7 +179,7 @@ async function runDriver(scenario: Scenario, opts: Partial<StreamOpts> = {}): Pr
     const result = await doHermesStream(baseOpts);
     let capturedPrompt: any = null;
     try { capturedPrompt = JSON.parse(fs.readFileSync(capturePath, 'utf8')); } catch {}
-    return { result, deltas, capturedPrompt };
+    return { result, deltas, activities, capturedPrompt };
   } finally {
     if (prevPath == null) delete process.env.PATH;
     else process.env.PATH = prevPath;
@@ -256,6 +266,34 @@ describe('Hermes ACP driver', () => {
     // The user's text still rides along after the image.
     const textBlocks = capturedPrompt.filter((b: any) => b?.type === 'text');
     expect(textBlocks.map((b: any) => b.text)).toContain('你好');
+  });
+
+  it('accumulates the tool-call chain in activity instead of overwriting per tool', async () => {
+    // Three tools fire in sequence; each completes before the next starts.
+    // The pre-fix behaviour wiped activity on every completion, so users only
+    // saw "in-flight title or empty". Now we keep the whole chain visible.
+    const { activities } = await runDriver({
+      promptChunks: ['Done.'],
+      stopReason: 'end_turn',
+      toolEvents: [
+        { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Read foo.py', status: 'in_progress' },
+        { sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'completed' },
+        { sessionUpdate: 'tool_call', toolCallId: 't2', title: 'Grep bar', status: 'in_progress' },
+        { sessionUpdate: 'tool_call_update', toolCallId: 't2', status: 'completed' },
+        { sessionUpdate: 'tool_call', toolCallId: 't3', title: 'Edit baz.py', status: 'in_progress' },
+        { sessionUpdate: 'tool_call_update', toolCallId: 't3', status: 'failed' },
+      ],
+    });
+    const final = activities[activities.length - 1] || '';
+    expect(final).toContain('Read foo.py');
+    expect(final).toContain('Read foo.py done');
+    expect(final).toContain('Grep bar');
+    expect(final).toContain('Grep bar done');
+    expect(final).toContain('Edit baz.py');
+    expect(final).toContain('Edit baz.py failed');
+    // And the chain should be ordered: start ▸ done ▸ next start ▸ next done...
+    expect(final.indexOf('Read foo.py')).toBeLessThan(final.indexOf('Grep bar'));
+    expect(final.indexOf('Grep bar')).toBeLessThan(final.indexOf('Edit baz.py'));
   });
 
   it('keeps going when session/load returns null (session not in DB)', async () => {

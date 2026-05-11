@@ -317,7 +317,7 @@ def _md_to_lark_md(report_md: str, max_len: int = 4000) -> str:
 
 # ── 主入口 ────────────────────────────────────
 
-def push_report(report_md: str) -> str:
+def push_report(report_md: str, title_prefix: str = "🎯 Snipe 候选") -> str:
     """推送 snipe 报告到飞书，返回结果信息。
 
     策略：先尝试创建文档 + 发通知卡片；
@@ -333,7 +333,7 @@ def push_report(report_md: str) -> str:
         return "SKIP: 缺少 FEISHU_CHAT_ID"
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    title = f"🎯 Snipe 候选（{now}）"
+    title = f"{title_prefix}（{now}）"
 
     try:
         token = _get_tenant_token(app_id, app_secret)
@@ -371,6 +371,11 @@ def main():
     parser = argparse.ArgumentParser(description="推送 snipe 报告到飞书")
     parser.add_argument("--report-file", help="Markdown 报告文件路径")
     parser.add_argument("--stdin", action="store_true", help="从 stdin 读取报告")
+    parser.add_argument(
+        "--title",
+        default="🎯 Snipe 候选",
+        help="飞书文档/卡片标题前缀（会自动追加时间戳）",
+    )
     args = parser.parse_args()
 
     _load_env()
@@ -388,7 +393,7 @@ def main():
         print("ERROR: 报告内容为空", file=sys.stderr)
         sys.exit(1)
 
-    result = push_report(report_md)
+    result = push_report(report_md, title_prefix=args.title)
     print(result)
 
     if result.startswith("ERROR"):

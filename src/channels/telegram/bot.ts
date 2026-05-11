@@ -39,6 +39,7 @@ import {
   getWorkspacesData,
   resolveSkillPrompt,
   summarizePromptForStatus,
+  handleGoalCommand,
 } from '../../bot/commands.js';
 import {
   buildAgentsCommandView,
@@ -495,6 +496,15 @@ export class TelegramBot extends Bot {
       { parseMode: 'HTML' },
     );
     void requestProcessRestart({ log: msg => this.log(msg) });
+  }
+
+  private async cmdGoal(ctx: TgContext, args: string) {
+    const reply = await handleGoalCommand(this, ctx.chatId, args);
+    if (reply == null) {
+      await ctx.reply('No session selected. Use /sessions to pick one first.');
+      return;
+    }
+    await ctx.reply(reply);
   }
 
   private async cmdStop(ctx: TgContext) {
@@ -1092,6 +1102,7 @@ export class TelegramBot extends Bot {
         case 'mode':     await this.cmdMode(ctx); return;
         case 'skills':   await this.cmdSkills(ctx); return;
         case 'ext':      await this.cmdExt(ctx); return;
+        case 'goal':     await this.cmdGoal(ctx, args); return;
         case 'stop':     await this.cmdStop(ctx); return;
         case 'status':   await this.cmdStatus(ctx); return;
         case 'host':     await this.cmdHost(ctx); return;
