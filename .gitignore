@@ -6,6 +6,9 @@ dashboard/dist/
 *.tgz
 tmp/
 dashboard-loaded.png
+dashboard-*.png
 .pikiclaw/*
 !.pikiclaw/skills/
 !.pikiclaw/skills/**
+.playwright-mcp/
+**/.playwright-mcp/
