@@ -22,6 +22,8 @@ import doubaoLogo from '../assets/brands/doubao.png';
 import glmLogo from '../assets/brands/glm.png';
 import minimaxLogo from '../assets/brands/minimax.ico';
 import openaiLogo from '../assets/brands/openai.svg';
+import ollamaLogo from '../assets/brands/ollama.png';
+import lmstudioLogo from '../assets/brands/lmstudio.png';
 import { cn } from '../utils';
 
 const brandIcons: Record<string, string> = {
@@ -51,6 +53,8 @@ const brandIcons: Record<string, string> = {
   glm: glmLogo,
   minimax: minimaxLogo,
   openai: openaiLogo,
+  ollama: ollamaLogo,
+  lmstudio: lmstudioLogo,
 };
 
 /**
@@ -58,8 +62,6 @@ const brandIcons: Record<string, string> = {
  */
 const letterFallbacks: Record<string, { letter: string; color: string; bg: string }> = {
   custom: { letter: '+', color: '#94a3b8', bg: 'rgba(148,163,184,0.12)' },
-  ollama: { letter: 'O', color: '#e2e8f0', bg: 'rgba(15,23,42,0.65)' },
-  lmstudio: { letter: 'LM', color: '#a5b4fc', bg: 'rgba(99,102,241,0.14)' },
 };
 
 export function BrandIcon({ brand, size = 18, className }: {

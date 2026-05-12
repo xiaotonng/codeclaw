@@ -24,6 +24,7 @@ import { BrandIcon } from '../../components/BrandIcon';
 import { useStore } from '../../store';
 import { getAgentMeta } from '../../utils';
 import type { Locale } from '../../i18n';
+import type { LocalBackendStatus } from '../../types';
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -192,6 +193,9 @@ interface Copy {
   remove: string;
   removeConfirm: string;
   unbound: string;
+  boundOne: string;
+  boundN: (n: number) => string;
+  notConnected: string;
   modelsAvailable: (count: number) => string;
 
   modalAddTitle: string;
@@ -241,6 +245,9 @@ function getCopy(locale: Locale): Copy {
       remove: '删除',
       removeConfirm: '删除该供应商？已绑定的智能体会自动恢复为官方 Auth。',
       unbound: '尚未被任何智能体使用',
+      boundOne: '已绑定',
+      boundN: n => `${n} 个智能体在用`,
+      notConnected: '未接入',
       modalAddTitle: '接入模型供应商',
       modalAddHint: tpl => tpl ? `已套用 ${tpl} 模板，仅需粘贴 API Key。` : '填入端点和凭据，保存后即可在智能体卡片上选用。',
       modalEditTitle: '编辑供应商配置',
@@ -284,6 +291,9 @@ function getCopy(locale: Locale): Copy {
     remove: 'Remove',
     removeConfirm: 'Remove this provider? Bound agents will fall back to native auth.',
     unbound: 'Not used by any agent yet',
+    boundOne: 'Bound to',
+    boundN: n => `${n} agents in use`,
+    notConnected: 'Not connected',
     modalAddTitle: 'Connect Model Provider',
     modalAddHint: tpl => tpl ? `Pre-filled from the ${tpl} template — just paste your API key.` : 'Enter endpoint and credential. After saving, choose models on the agent cards above.',
     modalEditTitle: 'Edit Provider',
@@ -350,7 +360,13 @@ async function send<T>(method: string, url: string, body?: unknown): Promise<T> 
 
 // Best-effort brand-id from baseURL host (used to pick a logo for configured cards).
 function brandIdForProvider(p: { kind: ProviderKind; baseURL: string }): string {
-  const host = (() => { try { return new URL(p.baseURL).host.toLowerCase(); } catch { return ''; } })();
+  const url = (() => { try { return new URL(p.baseURL); } catch { return null; } })();
+  const host = url?.host.toLowerCase() ?? '';
+  const port = url?.port ?? '';
+  // Local backends — recognised by their default loopback ports so the
+  // configured provider card picks up the right brand mark after Connect.
+  if ((host.startsWith('127.0.0.1') || host.startsWith('localhost')) && port === '11434') return 'ollama';
+  if ((host.startsWith('127.0.0.1') || host.startsWith('localhost')) && port === '1234') return 'lmstudio';
   if (host.includes('openrouter')) return 'openrouter';
   if (host.includes('anthropic')) return 'anthropic';
   if (host.includes('deepseek')) return 'deepseek';
@@ -381,26 +397,109 @@ function ValidationBadge({ v, copy }: { v: ValidationStatus | null; copy: Copy }
 }
 
 // ---------------------------------------------------------------------------
-// Quick template card
+// Provider tile — unified for both unbound templates and connected providers.
+// Bound tiles get an accent border + "已接入" badge and surface validation
+// state in place of the marketing blurb so the user can see status without
+// opening the modal. Click semantics: bound → edit modal, unbound → add modal.
 // ---------------------------------------------------------------------------
 
-function TemplateCard({ template, locale, onPick }: {
-  template: ProviderTemplate;
+interface TileDescriptor {
+  /** A connected provider OR a marketing template (or both, when a template
+   *  has an existing matching provider). */
+  provider?: ProviderRow;
+  template?: ProviderTemplate;
+  boundAgents?: string[];
+}
+
+function ProviderTile({
+  desc,
+  copy,
+  locale,
+  onPick,
+}: {
+  desc: TileDescriptor;
+  copy: Copy;
   locale: Locale;
-  onPick: (t: ProviderTemplate) => void;
+  onPick: (desc: TileDescriptor) => void;
 }) {
-  const name = locale === 'zh-CN' ? template.name.zh : template.name.en;
-  const blurb = locale === 'zh-CN' ? template.blurb.zh : template.blurb.en;
+  const { provider, template, boundAgents = [] } = desc;
+  const isBound = !!provider;
+  const brand = provider ? brandIdForProvider(provider) : (template?.id ?? 'custom');
+  const name = provider?.name
+    ?? (template ? (locale === 'zh-CN' ? template.name.zh : template.name.en) : '');
+  const blurb = template ? (locale === 'zh-CN' ? template.blurb.zh : template.blurb.en) : '';
+
+  // Unified tile language used across the page. Rule: only render a Badge
+  // when there's *load-bearing* status to share — i.e. the tile has been
+  // configured and the user might care whether it's healthy or broken.
+  // Unconfigured tiles render NO badge: the muted top-right would otherwise
+  // turn every "not yet picked" template into a fake action item, which is
+  // what made the grid feel busy. Connected/healthy uses ok green so it
+  // stands out against the sea of neutral defaults.
+  const validationState = provider?.validation?.state ?? null;
+  const renderBadge = () => {
+    if (!provider) return null;
+    if (validationState === 'ready') {
+      const count = provider.validation?.modelCount;
+      return (
+        <Badge variant="ok">
+          {count != null ? copy.modelsAvailable(count) : copy.validationReady}
+        </Badge>
+      );
+    }
+    if (validationState === 'invalid') return <Badge variant="err">{copy.validationInvalid}</Badge>;
+    if (validationState === 'error') return <Badge variant="warn">{copy.validationError}</Badge>;
+    return <Badge variant="warn">{copy.validationUnvalidated}</Badge>;
+  };
+
+  // Detail line under the name. Stays a single tight line for all states so
+  // tiles share a consistent typographic rhythm.
+  const renderDetail = () => {
+    if (isBound && boundAgents.length > 0) {
+      return (
+        <div className="flex items-center gap-1.5 text-[11.5px] text-fg-5">
+          <span className="shrink-0">{copy.boundN(boundAgents.length)}</span>
+          <div className="flex items-center gap-0.5">
+            {boundAgents.slice(0, 4).map(a => (
+              <span
+                key={a}
+                className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-edge bg-panel"
+                title={a}
+              >
+                <BrandIcon brand={a} size={10} />
+              </span>
+            ))}
+          </div>
+        </div>
+      );
+    }
+    if (isBound && provider!.validation?.detail && validationState !== 'ready') {
+      return (
+        <div className="truncate text-[11.5px] leading-relaxed text-fg-4" title={provider!.validation.detail}>
+          {provider!.validation.detail}
+        </div>
+      );
+    }
+    return (
+      <div className="truncate text-[11.5px] leading-relaxed text-fg-5" title={blurb}>
+        {blurb}
+      </div>
+    );
+  };
+
   return (
     <button
       type="button"
-      onClick={() => onPick(template)}
-      className="group relative flex flex-col items-start gap-2 rounded-md border border-edge bg-panel-alt px-3.5 py-3 text-left transition hover:border-edge-strong hover:bg-panel"
+      onClick={() => onPick(desc)}
+      className="group relative flex h-[104px] flex-col rounded-lg border border-edge bg-panel-alt px-4 py-3.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-edge-strong hover:bg-panel hover:shadow-[0_4px_16px_rgba(15,23,42,0.06)]"
     >
-      <BrandIcon brand={template.id} size={28} />
-      <div className="min-w-0">
-        <div className="text-[13px] font-semibold tracking-tight text-fg group-hover:text-fg">{name}</div>
-        <div className="mt-0.5 text-[11px] leading-relaxed text-fg-5 line-clamp-2">{blurb}</div>
+      <div className="flex w-full items-start justify-between gap-2">
+        <BrandIcon brand={brand} size={32} />
+        {renderBadge()}
+      </div>
+      <div className="mt-auto min-w-0">
+        <div className="truncate text-[14px] font-semibold tracking-tight text-fg group-hover:text-fg">{name}</div>
+        <div className="mt-1">{renderDetail()}</div>
       </div>
     </button>
   );
@@ -441,6 +540,7 @@ function ConfigModal({
   existingProvider,
   onClose,
   onSaved,
+  onRemove,
 }: {
   open: boolean;
   copy: Copy;
@@ -450,6 +550,8 @@ function ConfigModal({
   existingProvider?: ProviderRow;
   onClose: () => void;
   onSaved: () => void;
+  /** Only meaningful when editing — surfaces a Remove action in the footer. */
+  onRemove?: () => void | Promise<void>;
 }) {
   const [draft, setDraft] = useState<ConfigDraft>(() => initial || draftFromTemplate(TEMPLATES[0], locale));
   const [submitting, setSubmitting] = useState(false);
@@ -625,7 +727,20 @@ function ConfigModal({
           <div className="rounded-md border border-rose-700/40 bg-rose-900/20 px-3 py-2 text-xs text-rose-200">{error}</div>
         )}
       </div>
-      <div className="mt-6 border-t border-edge pt-4">
+      <div className="mt-6 flex items-center justify-between gap-2 border-t border-edge pt-4">
+        {/* Remove is only shown when editing — gives users a way back to the
+            unbound tile without leaving the modal. */}
+        <div>
+          {isEdit && onRemove && (
+            <button
+              type="button"
+              onClick={() => void onRemove()}
+              className="text-[12px] text-fg-5 transition hover:text-[var(--th-err)]"
+            >
+              {copy.remove}
+            </button>
+          )}
+        </div>
         <ActionBar
           primary={{ label: submitting ? copy.saving : copy.save, onClick: submit, disabled: !canSave }}
           secondary={{ label: copy.cancel, onClick: onClose }}
@@ -679,91 +794,47 @@ export function useModelLayer(): ModelLayerSnapshot {
 // Provider card
 // ---------------------------------------------------------------------------
 
-function ProviderCard({
-  provider,
-  copy,
-  boundAgents,
-  onEdit,
-  onRemove,
-}: {
-  provider: ProviderRow;
-  copy: Copy;
-  locale: Locale;
-  boundAgents: string[];
-  onEdit: () => void;
-  onRemove: () => void;
-}) {
-  const brand = brandIdForProvider(provider);
-  return (
-    <div className="glass rounded-md border border-edge px-4 py-3 shadow-[0_1px_0_rgba(255,255,255,0.02),0_4px_12px_rgba(15,23,42,0.05)]">
-      <div className="flex items-start gap-3">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-edge bg-panel-alt">
-          <BrandIcon brand={brand} size={22} />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[15px] font-semibold tracking-tight text-fg">{provider.name}</span>
-            <ValidationBadge v={provider.validation} copy={copy} />
-          </div>
-          <div className="mt-1 truncate text-[11px] font-mono text-fg-5" title={provider.baseURL}>
-            {provider.baseURL}
-          </div>
-          {provider.validation?.detail && provider.validation.state !== 'ready' && (
-            <div className="mt-1 text-[11px] leading-relaxed text-fg-4">{provider.validation.detail}</div>
-          )}
-          {/* Bound agents — chips when present, otherwise a single muted line. */}
-          {boundAgents.length > 0 ? (
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              {boundAgents.map(a => {
-                const meta = getAgentMeta(a);
-                return (
-                  <span
-                    key={a}
-                    className="inline-flex h-5 items-center gap-1 rounded-full border border-edge bg-panel-alt px-2 text-[11px] text-fg-3"
-                  >
-                    <BrandIcon brand={a} size={11} />
-                    <span>{meta.shortLabel}</span>
-                  </span>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="mt-2 text-[11px] text-fg-5">{copy.unbound}</div>
-          )}
-        </div>
-        {/* Inline text-link actions, right-aligned. No standalone validate
-            button — validation runs at save-time and the result is already
-            communicated by the badge above. */}
-        <div className="flex shrink-0 items-center gap-3 self-start text-[12px]">
-          <button
-            type="button"
-            onClick={onEdit}
-            className="text-fg-4 transition hover:text-fg-2"
-          >
-            {copy.edit}
-          </button>
-          <span className="text-fg-6" aria-hidden="true">·</span>
-          <button
-            type="button"
-            onClick={onRemove}
-            className="text-fg-4 transition hover:text-[var(--th-err)]"
-          >
-            {copy.remove}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+/**
+ * Drop trailing slashes and collapse localhost ↔ 127.0.0.1 — matches the
+ * normalization done on the server when reconciling local backends with
+ * existing providers, so we can recognize a local-backend provider here.
+ */
+function normalizeProviderBaseURL(raw: string): string {
+  return raw
+    .replace(/\/+$/, '')
+    .replace(/^http:\/\/localhost(?=[:/]|$)/i, 'http://127.0.0.1')
+    .replace(/^https:\/\/localhost(?=[:/]|$)/i, 'https://127.0.0.1');
+}
+
+function providerMatchesLocalBackend(
+  provider: ProviderRow,
+  localBackends: LocalBackendStatus[],
+): boolean {
+  const target = normalizeProviderBaseURL(provider.baseURL);
+  return localBackends.some(b => normalizeProviderBaseURL(b.openAIBaseURL) === target);
 }
 
 // ---------------------------------------------------------------------------
 // Main section
 // ---------------------------------------------------------------------------
 
-export default function ModelsSection({ snapshot }: { snapshot?: ModelLayerSnapshot } = {}) {
+export default function ModelsSection({
+  snapshot,
+  localBackends,
+}: {
+  snapshot?: ModelLayerSnapshot;
+  /**
+   * Optional list of detected local backends (Ollama / LM Studio). When
+   * provided, a provider card whose baseURL matches a local backend renders
+   * the backend's installed-model list inline so users immediately see what's
+   * on disk after connecting it.
+   */
+  localBackends?: LocalBackendStatus[];
+} = {}) {
   const localState = useModelLayer();
   const layer = snapshot ?? localState;
   const { providers, profiles, bindings, reload } = layer;
+  const backendsForLookup = localBackends ?? [];
 
   const locale = useStore(s => s.locale);
   const copy = useMemo(() => getCopy(locale), [locale]);
@@ -831,65 +902,67 @@ export default function ModelsSection({ snapshot }: { snapshot?: ModelLayerSnaps
     return m;
   }, [providers]);
 
-  const pickTemplate = useCallback((tpl: ProviderTemplate) => {
-    // "custom" always opens a fresh add — there is no canonical provider to edit.
-    if (tpl.id !== 'custom') {
-      const existing = providerByTemplateId.get(tpl.id);
-      if (existing) {
-        setModal({ kind: 'edit', provider: existing });
-        return;
+  // Build the unified tile list. Layout, in order:
+  //   1. Every known template — bound to its matching Provider when one
+  //      exists, otherwise rendered as an unbound marketing tile.
+  //   2. Any configured Provider that doesn't map to a known template (i.e.
+  //      Custom endpoints), each as its own bound tile.
+  //   3. The "+ Custom" add tile, always last.
+  // Local-backend providers are filtered out everywhere — they're managed by
+  // the Local Models section below, no point duplicating them here.
+  const tiles = useMemo<TileDescriptor[]>(() => {
+    const visibleProviders = providers.filter(p => !providerMatchesLocalBackend(p, backendsForLookup));
+    const claimedProviderIds = new Set<string>();
+    const out: TileDescriptor[] = [];
+    for (const tpl of TEMPLATES) {
+      if (tpl.id === 'custom') continue;
+      const provider = providerByTemplateId.get(tpl.id);
+      if (provider && !providerMatchesLocalBackend(provider, backendsForLookup)) {
+        claimedProviderIds.add(provider.id);
+        out.push({
+          template: tpl,
+          provider,
+          boundAgents: boundAgentsByProviderId.get(provider.id) ?? [],
+        });
+      } else {
+        out.push({ template: tpl });
       }
     }
-    setModal({ kind: 'add', template: tpl });
-  }, [providerByTemplateId]);
+    for (const provider of visibleProviders) {
+      if (claimedProviderIds.has(provider.id)) continue;
+      out.push({
+        provider,
+        boundAgents: boundAgentsByProviderId.get(provider.id) ?? [],
+      });
+    }
+    const customTpl = TEMPLATES.find(t => t.id === 'custom');
+    if (customTpl) out.push({ template: customTpl });
+    return out;
+  }, [providers, providerByTemplateId, backendsForLookup, boundAgentsByProviderId]);
 
-  // A brand is "taken" when at least one configured Provider matches it; we
-  // skip those templates so connected brands don't appear twice (once as a
-  // configured card, once as a redundant template tile). "custom" is always
-  // surfaced as an add-tile since multiple custom endpoints are common.
-  const unconnectedTemplates = useMemo(
-    () => TEMPLATES.filter(tpl => tpl.id === 'custom' || !providerByTemplateId.has(tpl.id)),
-    [providerByTemplateId],
-  );
+  const pickTile = useCallback((desc: TileDescriptor) => {
+    if (desc.provider) {
+      setModal({ kind: 'edit', provider: desc.provider });
+      return;
+    }
+    if (desc.template) {
+      setModal({ kind: 'add', template: desc.template });
+    }
+  }, []);
 
   return (
-    <div className="space-y-3">
-      {/* Configured providers — full-width cards, top of the section so users
-          see their own state first. */}
-      {providers.length > 0 && (
-        <div className="space-y-2">
-          {providers.map(provider => (
-            <ProviderCard
-              key={provider.id}
-              provider={provider}
-              copy={copy}
-              locale={locale}
-              boundAgents={boundAgentsByProviderId.get(provider.id) || []}
-              onEdit={() => setModal({ kind: 'edit', provider })}
-              onRemove={() => remove(provider)}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Add-provider grid — only brands the user hasn't connected yet, plus
-          the always-available Custom tile. When everything is connected this
-          group collapses down to just the Custom tile. */}
-      {unconnectedTemplates.length > 0 && (
-        <div className="space-y-1.5 pt-1">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-fg-5">{copy.addLabel}</div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-            {unconnectedTemplates.map(tpl => (
-              <TemplateCard
-                key={tpl.id}
-                template={tpl}
-                locale={locale}
-                onPick={pickTemplate}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+        {tiles.map((desc, idx) => (
+          <ProviderTile
+            key={desc.provider?.id ?? `tpl-${desc.template?.id ?? idx}`}
+            desc={desc}
+            copy={copy}
+            locale={locale}
+            onPick={pickTile}
+          />
+        ))}
+      </div>
 
       {modal && (
         <ConfigModal
@@ -901,6 +974,12 @@ export default function ModelsSection({ snapshot }: { snapshot?: ModelLayerSnaps
           existingProvider={modal.kind === 'edit' ? modal.provider : undefined}
           onClose={() => setModal(null)}
           onSaved={reload}
+          onRemove={modal.kind === 'edit'
+            ? async () => {
+                await remove(modal.provider);
+                setModal(null);
+              }
+            : undefined}
         />
       )}
     </div>

@@ -26,7 +26,7 @@ import { BrandIcon } from '../../components/BrandIcon';
 import { Badge, Button, Input, Label, Modal, ModalHeader, ModelSelect, Select, Spinner } from '../../components/ui';
 import { SectionCard } from '../shared';
 import ModelsSection, { useModelLayer, type ModelLayerSnapshot } from '../models/ModelsTab';
-import LocalModelsSection from '../local-models/LocalModelsSection';
+import LocalModelsSection, { useLocalBackends } from '../local-models/LocalModelsSection';
 
 const NATIVE_PROVIDER_VALUE = '__native__';
 const AGENT_ORDER: Agent[] = ['claude', 'codex', 'gemini', 'hermes'];
@@ -227,6 +227,12 @@ type CopyPack = {
   configError: string;
   // Read-only banner for external native (Hermes)
   externalNativeNote: (path: string) => string;
+  // Compact agent row + modal
+  configure: string;
+  configModalTitle: (label: string) => string;
+  rowSummaryNative: string;
+  rowSummaryNoModel: string;
+  rowSummaryNoEffort: string;
 };
 
 function getCopy(locale: Locale): CopyPack {
@@ -283,6 +289,11 @@ function getCopy(locale: Locale): CopyPack {
       saved: '已保存',
       configError: '保存失败',
       externalNativeNote: path => `Hermes 当前从 ${path || '~/.hermes/config.yaml'} 读取这些值；切换为某个 BYOK 供应商可由 pikiclaw 接管。`,
+      configure: '配置',
+      configModalTitle: label => `配置 ${label}`,
+      rowSummaryNative: '官方认证',
+      rowSummaryNoModel: '未选模型',
+      rowSummaryNoEffort: '默认强度',
     };
   }
   return {
@@ -337,6 +348,11 @@ function getCopy(locale: Locale): CopyPack {
     saved: 'Saved',
     configError: 'Save failed',
     externalNativeNote: path => `Hermes reads these values from ${path || '~/.hermes/config.yaml'}; pick a BYOK provider to let pikiclaw take over.`,
+    configure: 'Configure',
+    configModalTitle: label => `Configure ${label}`,
+    rowSummaryNative: 'Native auth',
+    rowSummaryNoModel: 'No model',
+    rowSummaryNoEffort: 'Default effort',
   };
 }
 
@@ -752,6 +768,35 @@ function AgentInlineConfig({
 // AgentRow — single agent card
 // ---------------------------------------------------------------------------
 
+/**
+ * Compact summary line shown in the collapsed AgentRow. Returns the values
+ * that the row needs to render its `provider · model · effort` chip strip.
+ * `providerLabel` is intentionally short — full provider name lives in the
+ * config modal where the user actually picks one.
+ */
+function buildRowSummary(
+  agent: AgentRuntimeStatus,
+  boundInfo: BoundProfileInfo | null,
+  copy: CopyPack,
+): { providerBrand: string; providerLabel: string; modelText: string; effortText: string } {
+  if (boundInfo) {
+    return {
+      providerBrand: boundInfo.providerBrand,
+      providerLabel: boundInfo.providerName,
+      modelText: boundInfo.modelId || copy.rowSummaryNoModel,
+      effortText: boundInfo.effort || copy.rowSummaryNoEffort,
+    };
+  }
+  const native = agent.nativeConfig || null;
+  const nativeSlug = native?.provider || null;
+  return {
+    providerBrand: brandIdForNativeSlug(nativeSlug),
+    providerLabel: copy.rowSummaryNative,
+    modelText: agent.nativeSelectedModel || native?.model || agent.selectedModel || copy.rowSummaryNoModel,
+    effortText: agent.nativeSelectedEffort || native?.effort || agent.selectedEffort || copy.rowSummaryNoEffort,
+  };
+}
+
 function AgentRow({
   agent,
   copy,
@@ -762,11 +807,9 @@ function AgentRow({
   checkingAgent,
   onUpdate,
   onCheckUpdate,
+  onEdit,
   loading = false,
-  layer,
   boundInfo,
-  toast,
-  onConfigSaved,
 }: {
   agent: AgentRuntimeStatus;
   copy: CopyPack;
@@ -777,56 +820,66 @@ function AgentRow({
   checkingAgent: boolean;
   onUpdate: (agent: AgentRuntimeStatus) => void;
   onCheckUpdate: (agent: AgentRuntimeStatus) => void;
+  onEdit: (agent: AgentRuntimeStatus) => void;
   loading?: boolean;
-  layer: ModelLayerSnapshot;
   boundInfo: BoundProfileInfo | null;
-  toast: (msg: string, ok?: boolean) => void;
-  onConfigSaved: () => void | Promise<void>;
 }) {
   const meta = getAgentMeta(agent.agent);
-  const versionText = agent.version || copy.noVersion;
   const tagline = meta.advantageKey ? t(meta.advantageKey) : '';
+  const summary = agent.installed ? buildRowSummary(agent, boundInfo, copy) : null;
 
   return (
-    <div className="glass rounded-md border border-edge px-4 py-3 shadow-[0_1px_0_rgba(255,255,255,0.02),0_4px_12px_rgba(15,23,42,0.05)]">
-      {/* Header row — identity + install status + top-right actions. This row
-          is stable regardless of install state so the card never reflows. */}
-      <div className="flex flex-wrap items-start gap-3">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-edge bg-panel-alt">
-            <BrandIcon brand={agent.agent} size={22} />
-          </div>
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="text-[15px] font-semibold text-fg">{meta.label}</div>
-              {agent.isDefault && <Badge variant="accent">{copy.defaultBadge}</Badge>}
-              {loading
-                ? <Badge variant="muted"><Spinner className="h-3 w-3" /> {t('status.loading')}</Badge>
-                : agent.installed
-                  ? <Badge variant="ok">{copy.installed}</Badge>
-                  : <Badge variant="warn">{copy.notInstalled}</Badge>}
-              {agent.installed && agent.updateAvailable && (
-                <Badge variant="warn">{copy.updateAvailable}</Badge>
-              )}
-            </div>
-            <div className="mt-1 text-[12px] leading-relaxed text-fg-5">
-              {copy.versionLabel}: {versionText}
-              {agent.latestVersion && agent.updateAvailable && (
-                <span className="ml-1.5 text-amber-400">→ {agent.latestVersion}</span>
-              )}
-              {agent.latestVersion && !agent.updateAvailable && agent.installed && (
-                <span className="ml-1.5 text-emerald-400">✓</span>
-              )}
-            </div>
-          </div>
+    <div
+      className="glass rounded-md border border-edge px-3.5 py-2.5 shadow-[0_1px_0_rgba(255,255,255,0.02),0_4px_12px_rgba(15,23,42,0.05)]"
+      title={tagline || undefined}
+    >
+      <div className="flex items-center gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-edge bg-panel-alt">
+          <BrandIcon brand={agent.agent} size={20} />
         </div>
 
-        {/* Top-right actions: install (if missing) or update / check-update (if installed). */}
-        <div className={cn('flex shrink-0 flex-col items-end gap-1.5')}>
+        {/* Identity + summary (two tight lines) */}
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[14px] font-semibold tracking-tight text-fg">{meta.label}</span>
+            {agent.isDefault && <Badge variant="accent">{copy.defaultBadge}</Badge>}
+            {loading
+              ? <Badge variant="muted"><Spinner className="h-3 w-3" /> {t('status.loading')}</Badge>
+              : agent.installed
+                ? <Badge variant="ok">{copy.installed}</Badge>
+                : <Badge variant="muted">{copy.notInstalled}</Badge>}
+            {agent.installed && agent.updateAvailable && (
+              <Badge variant="warn">{copy.updateAvailable}</Badge>
+            )}
+            {agent.installed && agent.version && (
+              <span className="text-[11px] font-mono text-fg-5">v{agent.version}</span>
+            )}
+            {agent.latestVersion && agent.updateAvailable && (
+              <span className="text-[11px] text-amber-400">→ {agent.latestVersion}</span>
+            )}
+          </div>
+          {/* Line 2: config summary for installed agents, tagline for missing ones. */}
+          {summary ? (
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-fg-4">
+              <span className="inline-flex items-center gap-1">
+                <BrandIcon brand={summary.providerBrand} size={11} />
+                <span className="text-fg-3">{summary.providerLabel}</span>
+              </span>
+              <span className="text-fg-6" aria-hidden="true">·</span>
+              <span className="font-mono text-fg-3">{summary.modelText}</span>
+              <span className="text-fg-6" aria-hidden="true">·</span>
+              <span>{summary.effortText}</span>
+            </div>
+          ) : tagline ? (
+            <div className="mt-0.5 truncate text-[11px] text-fg-5">{tagline}</div>
+          ) : null}
+        </div>
+
+        {/* Right-side actions: install / update / check-update / configure */}
+        <div className="flex shrink-0 items-center gap-1.5">
           {loading && (
-            <div className="inline-flex h-7 items-center gap-2 rounded-md border border-edge bg-transparent px-2.5 text-[11px] text-fg-5">
+            <div className="inline-flex h-7 items-center gap-2 px-2 text-[11px] text-fg-5">
               <Spinner className="h-3 w-3" />
-              {t('status.loading')}
             </div>
           )}
           {!loading && !agent.installed && (
@@ -842,55 +895,32 @@ function AgentRow({
           {!loading && agent.installed && !agent.updateAvailable && (
             <Button
               variant="ghost"
-              size="sm"
+              size="icon"
               disabled={checkingAgent}
               onClick={() => onCheckUpdate(agent)}
-              className="gap-1.5 text-[11px]"
+              title={copy.checkUpdate}
+              aria-label={copy.checkUpdate}
+              className="h-7 w-7"
             >
-              {checkingAgent
-                ? <><Spinner className="h-3 w-3" /> {copy.checking}</>
-                : <><span aria-hidden="true">↻</span> {copy.checkUpdate}</>}
+              {checkingAgent ? <Spinner className="h-3 w-3" /> : <span aria-hidden="true">↻</span>}
+            </Button>
+          )}
+          {!loading && agent.installed && (
+            <Button variant="outline" size="sm" onClick={() => onEdit(agent)}>
+              {copy.configure}
             </Button>
           )}
         </div>
       </div>
 
-      {/* Tagline — short factual description of the agent's origin / niche. */}
-      {tagline && (
-        <div className="mt-2 text-[12px] leading-relaxed text-fg-4">
-          {tagline}
-        </div>
-      )}
-
-      {/* Body row. The contents flip based on install state — config controls
-          only appear once the CLI is present. */}
-      {!loading && !agent.installed && (
-        <div className="mt-3 rounded-md border border-dashed border-edge bg-panel-alt px-3 py-2.5 text-[12px] leading-relaxed text-fg-4">
-          {copy.notInstalledHint}
-        </div>
-      )}
-      {!loading && agent.installed && (
-        <div className="mt-3 border-t border-edge pt-3">
-          <AgentInlineConfig
-            agentId={agent.agent}
-            agentStatus={agent}
-            boundInfo={boundInfo}
-            copy={copy}
-            layer={layer}
-            toast={toast}
-            onSaved={onConfigSaved}
-          />
-        </div>
-      )}
-
       {/* Update status detail (errors / skipped reasons). */}
       {!loading && agent.installed && agent.updateAvailable && agent.updateStatus === 'skipped' && agent.updateDetail && (
-        <div className="mt-2 text-[11px] leading-relaxed" style={{ color: 'var(--th-badge-warn-text)' }}>
+        <div className="mt-1.5 text-[11px] leading-relaxed" style={{ color: 'var(--th-badge-warn-text)' }}>
           {copy.updateSkipped}: {agent.updateDetail}
         </div>
       )}
       {!loading && agent.installed && agent.updateStatus === 'failed' && agent.updateDetail && (
-        <div className="mt-2 text-[11px] leading-relaxed" style={{ color: 'var(--th-badge-err-text)' }}>
+        <div className="mt-1.5 text-[11px] leading-relaxed" style={{ color: 'var(--th-badge-err-text)' }}>
           {copy.updateFailed}: {agent.updateDetail}
         </div>
       )}
@@ -930,6 +960,10 @@ export function AgentTab() {
   const t = useMemo(() => createT(locale), [locale]);
   const copy = useMemo(() => getCopy(locale), [locale]);
   const modelLayer = useModelLayer();
+  // Probed once at the AgentTab level so both ModelsSection (to surface
+  // installed local models on the configured provider card) and
+  // LocalModelsSection (tile grid + install modal) share one source of truth.
+  const localBackendLayer = useLocalBackends();
 
   const [snapshot, setSnapshot] = useState<SnapshotState | null>(
     storeAgentStatus ? { defaultAgent: storeAgentStatus.defaultAgent, agents: storeAgentStatus.agents } : null,
@@ -942,6 +976,7 @@ export function AgentTab() {
   const [defaultsDraft, setDefaultsDraft] = useState<Agent>('codex');
   const [updatingAgent, setUpdatingAgent] = useState<Agent | null>(null);
   const [checkingAgent, setCheckingAgent] = useState<Agent | null>(null);
+  const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const hasLoaded = useRef(!!storeAgentStatus);
 
   useEffect(() => {
@@ -1106,38 +1141,54 @@ export function AgentTab() {
     await refresh();
   }, [modelLayer, refresh]);
 
+  const editingAgentStatus = editingAgent ? agents.find(a => a.agent === editingAgent) ?? null : null;
+  const editingMeta = editingAgentStatus ? getAgentMeta(editingAgentStatus.agent) : null;
+
   return (
     <div className="animate-in space-y-4">
-      <section className="space-y-3">
-        <SectionCard className="space-y-3">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <div className="text-base font-semibold tracking-tight text-fg">{copy.defaultsTitle}</div>
-              <div className="mt-0.5 text-[13px] leading-relaxed text-fg-4">{copy.defaultsHint}</div>
+      {/* Compact section: agent list with inline "default" strip on top.
+          The default-agent chip is a single button — label + brand + name +
+          chevron are baked into one pill, so the affordance is the chip
+          itself rather than a separate ghost "修改默认" button that nobody
+          notices. Same "click the thing to edit it" pattern as the rest
+          of the page. */}
+      <section className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-fg-5">{copy.agentsTitle}</div>
+          {initialLoading ? (
+            <div className="flex items-center gap-1.5 text-[12px] text-fg-5">
+              <Spinner className="h-3 w-3" />
+              <span>{copy.defaultAgent}</span>
             </div>
-            <div className="flex justify-end">
-              <Button
-                variant="secondary"
-                onClick={() => setDefaultsModalOpen(true)}
-                disabled={updating || !canEditDefaults}
+          ) : (
+            <button
+              type="button"
+              onClick={() => setDefaultsModalOpen(true)}
+              disabled={updating || !canEditDefaults}
+              title={copy.editDefaults}
+              className="group inline-flex items-center gap-1.5 rounded-full border border-edge bg-panel-alt px-3 py-1 text-[12px] transition hover:border-edge-strong hover:bg-panel disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className="text-fg-5 group-hover:text-fg-4">{copy.defaultAgent}</span>
+              <BrandIcon brand={defaultAgent} size={14} />
+              <span className="font-semibold text-fg-2">{defaultAgentValue}</span>
+              <svg
+                className="text-fg-6 transition group-hover:text-fg-3"
+                width="11"
+                height="11"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.25"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
               >
-                {copy.editDefaults}
-              </Button>
-            </div>
-          </div>
-
-          <SummaryField
-            label={copy.defaultAgent}
-            value={defaultAgentValue}
-            hint={defaultAgentHint}
-            loading={initialLoading}
-          />
-        </SectionCard>
-      </section>
-
-      <section className="space-y-3">
-        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-fg-5">{copy.agentsTitle}</div>
-        <div className="space-y-3">
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+          )}
+        </div>
+        <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
           {agents.map(agent => (
             <AgentRow
               key={agent.agent}
@@ -1151,10 +1202,8 @@ export function AgentTab() {
               checkingAgent={checkingAgent === agent.agent}
               onUpdate={handleUpdate}
               onCheckUpdate={handleCheckUpdate}
-              layer={modelLayer}
+              onEdit={a => setEditingAgent(a.agent)}
               boundInfo={buildBoundInfo(modelLayer, agent.agent)}
-              toast={toast}
-              onConfigSaved={handleConfigSaved}
             />
           ))}
         </div>
@@ -1178,7 +1227,7 @@ export function AgentTab() {
             <div className="mt-0.5 text-[13px] leading-relaxed text-fg-4">{copy.modelsHint}</div>
           </div>
         </div>
-        <ModelsSection snapshot={modelLayer} />
+        <ModelsSection snapshot={modelLayer} localBackends={localBackendLayer.backends} />
       </section>
 
       <section className="space-y-3 pt-4">
@@ -1188,8 +1237,35 @@ export function AgentTab() {
             <div className="mt-0.5 text-[13px] leading-relaxed text-fg-4">{copy.localHint}</div>
           </div>
         </div>
-        <LocalModelsSection onConnected={handleConfigSaved} />
+        <LocalModelsSection snapshot={localBackendLayer} onConnected={handleConfigSaved} />
       </section>
+
+      {/* Per-agent configure modal — provider/model/effort. Wraps the same
+          form the inline card used to render. AgentInlineConfig keeps its own
+          dirty/save state; we just close the modal after onSaved fires. */}
+      <Modal open={!!editingAgentStatus} onClose={() => setEditingAgent(null)} wide>
+        {editingAgentStatus && editingMeta && (
+          <>
+            <ModalHeader
+              title={copy.configModalTitle(editingMeta.label)}
+              description={editingMeta.advantageKey ? t(editingMeta.advantageKey) : undefined}
+              onClose={() => setEditingAgent(null)}
+            />
+            <AgentInlineConfig
+              agentId={editingAgentStatus.agent}
+              agentStatus={editingAgentStatus}
+              boundInfo={buildBoundInfo(modelLayer, editingAgentStatus.agent)}
+              copy={copy}
+              layer={modelLayer}
+              toast={toast}
+              onSaved={async () => {
+                await handleConfigSaved();
+                setEditingAgent(null);
+              }}
+            />
+          </>
+        )}
+      </Modal>
 
       {/* Defaults modal — agent only */}
       <Modal open={defaultsModalOpen} onClose={() => setDefaultsModalOpen(false)}>
