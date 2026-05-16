@@ -822,6 +822,17 @@ interface CodexStreamState {
   turnStatus: string | null;
   turnError: string | null;
   messagePhases: Map<string, string>;
+  /**
+   * Item IDs whose final-answer text we've already absorbed via deltas. When
+   * `item/completed` fires for a final_answer that *did* stream incrementally,
+   * `s.text` already holds the content and we skip the append in
+   * handleCompletedAgentMessage. For messages that arrive as a single
+   * `item/completed` (no preceding deltas), the itemId is absent here so we
+   * append the completed text and emit — without this the preview stays empty
+   * until the turn-end backfill in doCodexStream, which is exactly the
+   * "answer only shows up after everything finishes" bug.
+   */
+  deltaSeenForItem: Set<string>;
   commentaryByItem: Map<string, string>;
   commentaryParts: string[];
   activeCommands: Map<string, string>;
@@ -851,6 +862,7 @@ function createCodexStreamState(opts: StreamOpts): CodexStreamState {
     codexCumulative: null,
     turnId: null, turnStatus: null, turnError: null,
     messagePhases: new Map(),
+    deltaSeenForItem: new Set(),
     commentaryByItem: new Map(),
     commentaryParts: [],
     activeCommands: new Map(),
@@ -971,6 +983,7 @@ function handleAgentMessageDelta(params: any, s: CodexStreamState, emit: () => v
   const phase = params.itemId ? (s.messagePhases.get(params.itemId) || 'final_answer') : 'final_answer';
   if (phase === 'final_answer') {
     s.text += delta;
+    if (params.itemId) s.deltaSeenForItem.add(params.itemId);
   } else if (params.itemId) {
     const prev = s.commentaryByItem.get(params.itemId) || '';
     s.commentaryByItem.set(params.itemId, prev + delta);
@@ -1023,7 +1036,21 @@ function handleRawResponseItemCompleted(item: any, s: CodexStreamState, emit: ()
 function handleCompletedAgentMessage(item: any, s: CodexStreamState, emit: () => void): void {
   const phase = item.phase || s.messagePhases.get(item.id) || 'final_answer';
   if (phase === 'final_answer') {
-    if (item.text?.trim()) s.msgs.push(item.text.trim());
+    const text = item.text?.trim();
+    if (text) {
+      s.msgs.push(text);
+      // When Codex emits the final-answer body without intervening deltas
+      // (short replies, certain provider configs), `s.text` is empty and the
+      // preview would stay blank until doCodexStream's turn-end backfill.
+      // Append the completed body now so the live stream catches up. The
+      // delta-seen set tells us whether we'd be duplicating content already
+      // accumulated via item/agentMessage/delta.
+      const alreadyStreamed = item.id && s.deltaSeenForItem.has(item.id);
+      if (!alreadyStreamed) {
+        s.text = s.text.trim() ? `${s.text.trim()}\n\n${text}` : text;
+      }
+    }
+    emit();
   } else {
     const commentary = item.text?.trim() || s.commentaryByItem.get(item.id)?.trim() || '';
     if (commentary) {
@@ -1033,6 +1060,7 @@ function handleCompletedAgentMessage(item: any, s: CodexStreamState, emit: () =>
     s.commentaryByItem.delete(item.id);
     emit();
   }
+  if (item.id) s.deltaSeenForItem.delete(item.id);
   s.messagePhases.delete(item.id);
 }
 
@@ -2014,6 +2042,7 @@ class CodexDriver implements AgentDriver {
   readonly id = 'codex';
   readonly cmd = 'codex';
   readonly thinkLabel = 'Reasoning';
+  readonly acceptedProviderKinds = ['openai', 'openai-compatible'] as const;
 
   async doStream(opts: StreamOpts): Promise<StreamResult> { return doCodexStream(opts); }
 

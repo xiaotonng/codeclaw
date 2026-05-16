@@ -307,6 +307,12 @@ function claudeParse(ev: any, s: any) {
 
   if (t === 'assistant') {
     const msg = ev.message || {};
+    // Skip Claude CLI's synthetic feedback events on the live channel — they
+    // arrive as `assistant` events but represent runtime notices (no response,
+    // model error, …), not real Claude output. The historical jsonl reader
+    // converts them into `system_notice` blocks; on the live stream we just
+    // drop them so they don't pollute s.text / s.thinking.
+    if (msg.model === '<synthetic>') return;
     const contents = msg.content || [];
     const th = contents.filter((b: any) => b?.type === 'thinking').map((b: any) => b.thinking || '').join('\n\n');
     const tx = contents.filter((b: any) => b?.type === 'text').map((b: any) => b.text || '').join('\n\n');
@@ -861,7 +867,7 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
               title = display.length <= 120 ? display : `${display.slice(0, 117).trimEnd()}...`;
             }
           }
-          if (!model && ev.type === 'assistant' && ev.message?.model) {
+          if (!model && ev.type === 'assistant' && ev.message?.model && ev.message.model !== '<synthetic>') {
             model = ev.message.model;
           }
           if (title && model) break;
@@ -1288,14 +1294,20 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
             pendingBlocks = text ? [{ type: 'text', content: text }, ...imageBlocks] : [...imageBlocks];
           }
         } else if (ev.type === 'assistant') {
-          // `model:"<synthetic>"` is Claude CLI's marker for a turn that ended
-          // without producing real output (stream killed mid-flight, tool result
-          // arrived without follow-up, etc.). It writes the text "No response
-          // requested." but it's a placeholder, not content — surfacing it makes
-          // a failed turn look like Claude said something. Skip it so the turn
-          // either collapses to a bare user message (no phantom header) or, if
-          // a live stream is still attached, the error tile takes over.
-          if (ev.message?.model === '<synthetic>') continue;
+          // `model:"<synthetic>"` is Claude CLI's out-of-band channel — emitted
+          // when the runtime needs to tell the user something *as if* the
+          // assistant spoke ("No response requested.", "There's an issue with
+          // the selected model…", etc.). Surface it as a `system_notice` block
+          // rather than a real text reply: the content stays visible (so model
+          // errors and other meaningful feedback aren't lost), but it renders
+          // as a notice tile instead of impersonating a Claude turn.
+          if (ev.message?.model === '<synthetic>') {
+            if (pendingRole === 'user') flush();
+            pendingRole = 'assistant';
+            const noticeText = extractClaudeText(ev.message?.content, true).trim();
+            if (noticeText) pendingBlocks.push({ type: 'system_notice', content: noticeText });
+            continue;
+          }
           if (pendingRole === 'user') flush();
           pendingRole = 'assistant';
           const u = ev.message?.usage;
@@ -1649,6 +1661,11 @@ class ClaudeDriver implements AgentDriver {
   readonly cmd = 'claude';
   readonly thinkLabel = 'Thinking';
   readonly capabilities = { fork: true, modelSwitch: true };
+  // Claude Code BYOK routes through ANTHROPIC_BASE_URL — accepts both
+  // first-party Anthropic and any openai-compatible provider that exposes an
+  // Anthropic-protocol-shaped endpoint (OpenRouter `/api/v1`, DeepSeek
+  // `/anthropic/v1`, …). cf. src/model/injector.ts:claudeInjector.
+  readonly acceptedProviderKinds = ['anthropic', 'openai-compatible'] as const;
 
   async doStream(opts: StreamOpts): Promise<StreamResult> {
     return doClaudeStream(opts);

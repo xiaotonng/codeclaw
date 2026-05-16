@@ -274,7 +274,17 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     try {
       const res = await api.getWorkspaces();
       const list = res.ok ? res.workspaces : [];
-      if (list.length) setWorkspaces(list);
+      if (list.length) {
+        // Preserve previous reference when content is unchanged so the
+        // `workspaces` dep of downstream effects doesn't fire on benign
+        // refetches (StrictMode double-mount, focus refresh, etc.).
+        setWorkspaces(prev => (
+          prev.length === list.length
+          && prev.every((p, i) => p.path === list[i].path && p.name === list[i].name)
+            ? prev
+            : list
+        ));
+      }
       initializedRef.current = true;
     } catch {
       initializedRef.current = true;

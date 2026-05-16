@@ -92,15 +92,30 @@ export const SessionPanel = memo(function SessionPanel({
   // `interactions` field of the stream snapshot. The latest entry is rendered
   // as a modal popup; the server clears entries as users answer them.
   const [interactions, setInteractions] = useState<InteractionSnapshot[]>([]);
+  // Optimistic state for the RUNNING task only — the user message bubble that
+  // backs the in-flight turn until rawTurns picks it up. Earlier this slot
+  // doubled as the optimistic source for queued sends, which meant sending a
+  // new follow-up while a task was still streaming would overwrite the
+  // running task's bubble. Queued sends now live in `pendingQueuedSends`.
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(initialPendingPrompt || null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>(initialPendingImageUrls || []);
-  const [pendingQueued, setPendingQueued] = useState(false);
-  // The taskId backing pendingPrompt — needed because steer can promote a
-  // queued task to streaming while OTHER tasks remain queued (so the
-  // "no more queued" heuristic for clearing pendingQueued is wrong on its own).
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
   const pendingTaskIdRef = useRef<string | null>(null);
   pendingTaskIdRef.current = pendingTaskId;
+  // Optimistic state for queued sends — one entry per send made while another
+  // task was already streaming. Each entry carries an opaque localId so we can
+  // match the API-assigned taskId back to the right entry even if responses
+  // arrive out of order. InputComposer reads this array to fill its queued-row
+  // prompts before the server snapshot's `queuedTasks` catches up.
+  type PendingQueuedSend = { localId: string; taskId: string | null; prompt: string; imageUrls: string[] };
+  const [pendingQueuedSends, setPendingQueuedSends] = useState<PendingQueuedSend[]>([]);
+  const pendingQueuedSendsRef = useRef<PendingQueuedSend[]>([]);
+  pendingQueuedSendsRef.current = pendingQueuedSends;
+  // Routes the next onSendTaskAssigned callback. Set in handleSendStart based
+  // on whether the send went to the queue or kicked off a new running turn.
+  // Sends are sequential (InputComposer guards with `sending`), so a single
+  // ref is sufficient.
+  const lastSendQueuedLocalIdRef = useRef<string | null>(null);
   const [editDraft, setEditDraft] = useState<string | null>(null);
   const [forkRequest, setForkRequest] = useState<{ atTurn: number } | null>(null);
   const [forkPrompt, setForkPrompt] = useState('');
@@ -144,24 +159,53 @@ export const SessionPanel = memo(function SessionPanel({
     setPendingPrompt(null);
     setPendingImageUrls(prev => { for (const u of prev) URL.revokeObjectURL(u); return []; });
     pendingImageUrlsRef.current = [];
-    setPendingQueued(false);
     setPendingTaskId(null);
   }, []);
 
+  const clearPendingQueuedSends = useCallback(() => {
+    setPendingQueuedSends(prev => {
+      if (!prev.length) return prev;
+      for (const s of prev) for (const url of s.imageUrls) URL.revokeObjectURL(url);
+      return [];
+    });
+    lastSendQueuedLocalIdRef.current = null;
+  }, []);
+
   const handleSendStart = useCallback((prompt: string, imageUrls?: string[]) => {
-    // Revoke any previous pending images
-    for (const u of pendingImageUrlsRef.current) URL.revokeObjectURL(u);
-    setPendingPrompt(prompt || null);
+    const willBeQueued = !!liveStreamRef.current || streamingRef.current;
     const urls = imageUrls || [];
+    if (willBeQueued) {
+      // Don't disturb the running task's optimistic bubble — append to the
+      // queued-sends list so the InputComposer queue row gets its prompt and
+      // the conversation history keeps showing the in-flight running turn.
+      const localId = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      lastSendQueuedLocalIdRef.current = localId;
+      setPendingQueuedSends(prev => [...prev, { localId, taskId: null, prompt: prompt || '', imageUrls: urls }]);
+      return;
+    }
+    // No active stream — this send is the (about-to-be) running task. Replace
+    // the running pending slot wholesale and revoke any stale image URLs.
+    for (const u of pendingImageUrlsRef.current) URL.revokeObjectURL(u);
+    lastSendQueuedLocalIdRef.current = null;
+    setPendingPrompt(prompt || null);
     setPendingImageUrls(urls);
     pendingImageUrlsRef.current = urls;
-    // If a stream is active, the message will be queued — don't show in conversation yet
-    setPendingQueued(!!liveStreamRef.current || streamingRef.current);
-    // pendingTaskId resolves async via onSendTaskAssigned once the API returns.
     setPendingTaskId(null);
   }, []);
 
   const handleSendTaskAssigned = useCallback((taskId: string) => {
+    const queuedLocalId = lastSendQueuedLocalIdRef.current;
+    if (queuedLocalId) {
+      lastSendQueuedLocalIdRef.current = null;
+      setPendingQueuedSends(prev => {
+        const idx = prev.findIndex(s => s.localId === queuedLocalId);
+        if (idx < 0) return prev;
+        const next = prev.slice();
+        next[idx] = { ...next[idx], taskId };
+        return next;
+      });
+      return;
+    }
     setPendingTaskId(taskId);
   }, []);
 
@@ -299,6 +343,7 @@ export const SessionPanel = memo(function SessionPanel({
       }
       if (prev === 'done') {
         clearPending();
+        clearPendingQueuedSends();
       } else if (prev === null && localStreamPendingRef.current) {
         // Do NOT clear pending here — for slow uploads (e.g. images via FormData),
         // the poll may return null before the stream actually starts. The pending
@@ -348,13 +393,24 @@ export const SessionPanel = memo(function SessionPanel({
         });
       }
       setStreaming(true);
-      // Reveal the optimistic bubble once the latest-sent task is the one
-      // streaming. Falls back to the FIFO "nothing left queued" heuristic for
-      // the legacy case where pendingTaskId hasn't resolved yet (very fast
-      // start before the send API returns).
-      const isPendingsTask = !!state.taskId && pendingTaskIdRef.current === state.taskId;
-      const hasMoreQueued = !!state.queuedTaskIds?.length;
-      if (isPendingsTask || !hasMoreQueued) setPendingQueued(false);
+      // Promote a queued send to the running pending slot when the streaming
+      // task is one we previously queued. Without this, the queued send's
+      // optimistic bubble would never appear in the conversation while it
+      // runs — we'd be stuck showing the prior task's deduped pendingPrompt.
+      if (state.taskId && state.taskId !== pendingTaskIdRef.current) {
+        const queue = pendingQueuedSendsRef.current;
+        const idx = queue.findIndex(s => s.taskId === state.taskId);
+        if (idx >= 0) {
+          const promoted = queue[idx];
+          // Revoke the previous running slot's images before overwriting.
+          for (const url of pendingImageUrlsRef.current) URL.revokeObjectURL(url);
+          setPendingPrompt(promoted.prompt || null);
+          setPendingImageUrls(promoted.imageUrls);
+          pendingImageUrlsRef.current = promoted.imageUrls;
+          setPendingTaskId(state.taskId);
+          setPendingQueuedSends(prev => prev.filter((_, i) => i !== idx));
+        }
+      }
       if (stickToBottomRef.current) scrollToBottomRef.current = true;
     } else if (state.phase === 'queued') {
       setLiveStream(null);
@@ -379,8 +435,29 @@ export const SessionPanel = memo(function SessionPanel({
       }
       if (!hasMoreQueued) localStreamPendingRef.current = false;
     }
+    // Prune queued-send optimistic entries whose server-assigned taskId no
+    // longer appears in the live snapshot — covers server-side cancel /
+    // completion paths where the entry would otherwise leak until the safety
+    // effect kicks in. Entries with taskId === null are kept (their API
+    // response is still in flight).
+    const liveTaskIds = new Set<string>();
+    if (state.taskId) liveTaskIds.add(state.taskId);
+    if (Array.isArray(state.queuedTaskIds)) for (const id of state.queuedTaskIds) liveTaskIds.add(id);
+    setPendingQueuedSends(prev => {
+      let changed = false;
+      const next: PendingQueuedSend[] = [];
+      for (const send of prev) {
+        if (!send.taskId || liveTaskIds.has(send.taskId)) {
+          next.push(send);
+        } else {
+          for (const url of send.imageUrls) URL.revokeObjectURL(url);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
     prevPhaseRef.current = state.phase;
-  }, [clearPending, loadLatestTurns, session.sessionId, session.agent, onSessionChange, workdir]);
+  }, [clearPending, clearPendingQueuedSends, loadLatestTurns, session.sessionId, session.agent, onSessionChange, workdir]);
 
   const requestStreamPolling = useCallback(() => {
     localStreamPendingRef.current = true;
@@ -390,10 +467,23 @@ export const SessionPanel = memo(function SessionPanel({
   const handleRecallTask = useCallback(async (taskId: string) => {
     try {
       await api.recallSessionMessage(taskId);
-      // Only wipe the optimistic pending state if it belongs to THIS task —
-      // recalling an older queued task shouldn't erase the still-in-flight
-      // latest-sent message's bubble.
+      // The running task (pendingTaskId) being recalled is the rare case — the
+      // common recall is for a queued entry. Both branches must clean their
+      // own optimistic state so the bubble / queue row vanishes immediately.
       if (pendingTaskIdRef.current === taskId) clearPending();
+      setPendingQueuedSends(prev => {
+        let changed = false;
+        const next: PendingQueuedSend[] = [];
+        for (const send of prev) {
+          if (send.taskId === taskId) {
+            for (const url of send.imageUrls) URL.revokeObjectURL(url);
+            changed = true;
+          } else {
+            next.push(send);
+          }
+        }
+        return changed ? next : prev;
+      });
       // Optimistic: clear the specific task reference so UI responds immediately
       setQueuedTaskIds(prev => prev.filter(id => id !== taskId));
       setQueuedTasks(prev => prev.filter(t => t.taskId !== taskId));
@@ -506,9 +596,10 @@ export const SessionPanel = memo(function SessionPanel({
     if (displayState !== 'running' && !streaming && !liveStream
         && !streamPhase && queuedTaskIds.length === 0) {
       clearPending();
+      clearPendingQueuedSends();
       localStreamPendingRef.current = false;
     }
-  }, [displayState, streaming, liveStream, streamPhase, queuedTaskIds.length, clearPending]);
+  }, [displayState, streaming, liveStream, streamPhase, queuedTaskIds.length, clearPending, clearPendingQueuedSends]);
 
   useLayoutEffect(() => {
     const anchor = prependAnchorRef.current;
@@ -656,16 +747,21 @@ export const SessionPanel = memo(function SessionPanel({
                 />
               );
             })}
-            {/* Optimistic pending message — hidden while queued behind an active stream (pendingQueued),
-                and deduped against the last loaded user turn to avoid double-rendering after history refresh.
-                When the server's matching turn lacks images we still hold, optimisticBridgesImages keeps
-                this rendered (the matching server user is also stripped from `turns` above).
-                Note: we deliberately do NOT gate on clearPendingOnLoadRef here. That ref signals an
-                in-flight history fetch triggered by 'done', and the actual pending clear is batched with
-                setHistory/setLiveStream(null) inside loadLatestTurns. Hiding here would create a gap
-                between 'done' and fetch completion where neither the optimistic bubble nor the server
-                turn is visible — the "loading flash" the user sees post-stream. */}
-            {(pendingPrompt || pendingImageUrls.length > 0) && !pendingQueued
+            {/* Optimistic pending message — represents the RUNNING task's user
+                turn until rawTurns picks it up. Deduped against the last loaded
+                user turn to avoid double-rendering after history refresh. When
+                the server's matching turn lacks images we still hold,
+                optimisticBridgesImages keeps this rendered (the matching server
+                user is also stripped from `turns` above). Queued sends never
+                land in pendingPrompt — they live in `pendingQueuedSends` and
+                surface in InputComposer's queue rows instead.
+                Note: we deliberately do NOT gate on clearPendingOnLoadRef here.
+                That ref signals an in-flight history fetch triggered by 'done',
+                and the actual pending clear is batched with setHistory/
+                setLiveStream(null) inside loadLatestTurns. Hiding here would
+                create a gap between 'done' and fetch completion where neither
+                the optimistic bubble nor the server turn is visible. */}
+            {(pendingPrompt || pendingImageUrls.length > 0)
               && (optimisticBridgesImages
                   || !(pendingPrompt && rawTurns.length > 0
                        && rawTurns[rawTurns.length - 1]?.user?.text?.trim() === pendingPrompt.trim())) && (
@@ -704,7 +800,7 @@ export const SessionPanel = memo(function SessionPanel({
         streamTaskId={streamTaskId}
         queuedTaskIds={queuedTaskIds}
         queuedTasks={queuedTasks}
-        pendingPrompt={pendingPrompt}
+        pendingQueuedSends={pendingQueuedSends}
         onRecall={handleRecallTask}
         onSteer={handleSteerTask}
         onStopAll={handleStopAll}

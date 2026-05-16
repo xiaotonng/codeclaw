@@ -43,6 +43,15 @@ export interface AgentDriver {
   readonly thinkLabel: string;
   /** Static capability flags. Drivers omit this to opt into all defaults (false). */
   readonly capabilities?: AgentDriverCapabilities;
+  /**
+   * Which BYOK provider kinds this driver can route through. The unified
+   * /models picker uses this to filter compatible Profiles into the agent's
+   * cross-provider model list (cf. resolveAgentModels). String values
+   * intentionally — kept bare so this interface stays independent of the
+   * Model layer's ProviderKind union (see src/model/types.ts).
+   * Omit to opt out of BYOK Profile listing entirely.
+   */
+  readonly acceptedProviderKinds?: readonly string[];
 
   doStream(opts: StreamOpts): Promise<StreamResult>;
   getSessions(workdir: string, limit?: number): Promise<SessionListResult>;
@@ -85,4 +94,13 @@ export function getDriverCapabilities(id: string): AgentDriverCapabilities {
   const d = drivers.get(id);
   if (!d?.capabilities) return DEFAULT_CAPABILITIES;
   return { ...DEFAULT_CAPABILITIES, ...d.capabilities };
+}
+
+/**
+ * Provider kinds this driver can route through. Empty array means the driver
+ * declared no compatibility (so no Profiles will be listed for it). Callers
+ * should treat this as the filter for cross-provider model offerings.
+ */
+export function getAcceptedProviderKinds(id: string): readonly string[] {
+  return drivers.get(id)?.acceptedProviderKinds ?? [];
 }

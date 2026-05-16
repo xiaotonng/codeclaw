@@ -174,9 +174,11 @@ export function getProfile(id: string): ModelProfileConfig | null {
   return layer.profiles?.[id] || null;
 }
 
-function defaultProfileName(providerName: string, modelId: string, effort?: string | null): string {
-  const e = effort ? ` (${effort})` : '';
-  return `${providerName} · ${modelId}${e}`;
+function defaultProfileName(_providerName: string, modelId: string, _effort?: string | null): string {
+  // Keep the auto-generated label short: the brand icon already carries the
+  // provider, and effort lives in its own pill on the card. Just the model id
+  // gives the cleanest tile + IM list, with the user free to override.
+  return modelId;
 }
 
 export function addProfile(input: AddProfileInput): ModelProfileConfig {

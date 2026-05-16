@@ -1,6 +1,23 @@
 import type { Agent } from './types';
 import type { SessionInfo } from './types';
 
+/**
+ * Which ProviderKinds each agent driver can route BYOK Profiles through.
+ * Mirrors the static `acceptedProviderKinds` declarations on the driver
+ * classes in src/agent/drivers/*.ts and the runtime-time check in
+ * src/model/injector.ts — those are the authority; this constant lets the
+ * dashboard pre-filter the "我的模型" group without an extra API round-trip.
+ *
+ * Gemini is the strict one: the CLI doesn't accept a custom baseURL, so
+ * only `google` (Google AI Studio keys) is a valid BYOK target.
+ */
+export const AGENT_ACCEPTED_PROVIDER_KINDS: Record<Agent, readonly string[]> = {
+  claude: ['anthropic', 'openai-compatible'],
+  codex: ['openai', 'openai-compatible'],
+  gemini: ['google'],
+  hermes: ['anthropic', 'openai', 'openai-compatible', 'google'],
+};
+
 export function fmtBytes(b: number): string {
   if (b < 1024) return b + 'B';
   if (b < 1048576) return (b / 1024).toFixed(0) + 'KB';

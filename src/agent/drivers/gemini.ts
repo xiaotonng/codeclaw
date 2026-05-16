@@ -906,6 +906,7 @@ class GeminiDriver implements AgentDriver {
   readonly id = 'gemini';
   readonly cmd = 'gemini';
   readonly thinkLabel = 'Thinking';
+  readonly acceptedProviderKinds = ['google'] as const;
 
   async doStream(opts: StreamOpts): Promise<StreamResult> { return doGeminiStream(opts); }
 

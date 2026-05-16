@@ -425,9 +425,11 @@ export interface SessionListOpts {
 /** A single message in a session tail (plain text). */
 export interface TailMessage { role: 'user' | 'assistant'; text: string; }
 
-/** A content block within a message — text, thinking, tool activity, or image. */
+/** A content block within a message — text, thinking, tool activity, image, or
+ *  a `system_notice` (agent-runtime placeholder like Claude CLI's `model:"<synthetic>"`
+ *  feedback events — surface as a notice, not as a real assistant reply). */
 export interface MessageBlock {
-  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | 'plan' | 'sub_agent';
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | 'plan' | 'sub_agent' | 'system_notice';
   content: string;
   toolName?: string;
   toolId?: string;
@@ -604,8 +606,31 @@ export interface AgentListResult { agents: AgentInfo[]; }
 // Model listing types
 // ---------------------------------------------------------------------------
 
-/** A single model entry returned by the agent's model list. */
-export interface ModelInfo { id: string; alias: string | null; }
+/**
+ * A single model entry returned by the agent's model list.
+ *
+ * Optional fields are populated by `resolveAgentModels` when the entry comes
+ * from a BYOK Profile rather than the driver's native catalogue. They let the
+ * IM `/models` picker render grouped, source-labelled rows without losing the
+ * old "just a list of model ids" shape that other callers rely on.
+ */
+export interface ModelInfo {
+  id: string;
+  alias: string | null;
+  /**
+   * Logical bucket for the picker: `'native'` = the agent CLI's built-in
+   * models (no Profile required); `'cloud'` = remote BYOK Profile; `'local'`
+   * = locally-running backend (Ollama / mlx-lm). Native entries omit
+   * `profileId`/`providerName`. Default is `'native'` when absent.
+   */
+  group?: 'native' | 'cloud' | 'local';
+  /** Profile id when this row originates from a BYOK Profile. */
+  profileId?: string | null;
+  /** Display name of the Profile's provider (e.g. "OpenRouter"). */
+  providerName?: string | null;
+  /** Whether the backing provider is currently reachable. Only set for local. */
+  online?: boolean;
+}
 
 /** Result of listing models for an agent. */
 export interface ModelListResult {

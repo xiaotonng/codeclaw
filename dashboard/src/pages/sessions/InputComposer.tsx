@@ -1,6 +1,6 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo } from 'react';
 import { createPortal } from 'react-dom';
-import { cn, EFFORT_OPTIONS, getAgentMeta, shortenModel } from '../../utils';
+import { AGENT_ACCEPTED_PROVIDER_KINDS, cn, EFFORT_OPTIONS, getAgentMeta, shortenModel } from '../../utils';
 import { api } from '../../api';
 import { useStore } from '../../store';
 import { Spinner } from '../../components/ui';
@@ -21,7 +21,29 @@ type CascadeStep = 'closed' | 'agent' | 'model' | 'effort';
 const draftStore = new Map<string, { text: string; files: File[] }>();
 function draftKey(agent: string, sessionId: string) { return `${agent}:${sessionId}`; }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingPrompt, onRecall, onSteer, onStopAll, editDraft, onEditDraftConsumed }: {
+/**
+ * Pick a BrandIcon id for a configured Provider based on its base URL / kind.
+ * Mirrors the logic used in AgentTab / ModelsTab so the same provider shows
+ * the same logo everywhere.
+ */
+function brandIdForProvider(p: { kind: string; baseURL: string }): string {
+  const host = (() => { try { return new URL(p.baseURL).host.toLowerCase(); } catch { return ''; } })();
+  if (host.includes('openrouter')) return 'openrouter';
+  if (host.includes('anthropic')) return 'anthropic';
+  if (host.includes('deepseek')) return 'deepseek';
+  if (host.includes('googleapis') || host.includes('vertex')) return 'google';
+  if (host.includes('openai.com')) return 'openai';
+  if (host.includes('dashscope') || host.includes('qwen') || host.includes('aliyun')) return 'qwen';
+  if (host.includes('volces') || host.includes('volcengine') || host.includes('doubao')) return 'doubao';
+  if (host.includes('bigmodel') || host.includes('zhipu') || host.includes('z.ai')) return 'glm';
+  if (host.includes('minimax')) return 'minimax';
+  if (p.kind === 'anthropic') return 'anthropic';
+  if (p.kind === 'google') return 'google';
+  if (p.kind === 'openai') return 'openai';
+  return 'custom';
+}
+
+export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, onRecall, onSteer, onStopAll, editDraft, onEditDraftConsumed }: {
   session: SessionInfo;
   workdir: string;
   onStreamQueued: () => void;
@@ -33,7 +55,12 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   streamTaskId?: string | null;
   queuedTaskIds?: string[];
   queuedTasks?: Array<{ taskId: string; prompt: string }>;
-  pendingPrompt?: string | null;
+  /** Optimistic fallback for queued sends — used by each queued row while the
+   *  server snapshot's `queuedTasks` hasn't yet caught up. `imageUrls` are
+   *  blob previews surfaced as inline thumbnails so the user can recognize
+   *  the queued message at a glance (server-side queued state has no image
+   *  data, so older rows after a refresh fall back to text only). */
+  pendingQueuedSends?: Array<{ taskId: string | null; prompt: string; imageUrls?: string[] }>;
   onRecall?: (taskId: string) => void;
   onSteer?: (taskId: string) => void;
   /** Stop the running stream AND cancel every queued task for this session. */
@@ -67,6 +94,13 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [pendingAgent, setPendingAgent] = useState<string | null>(null);
   const [pendingModel, setPendingModel] = useState<string | null>(null);
   const [pendingEffort, setPendingEffort] = useState<string | null>(null);
+  // Tracks the staged Profile id while the user steps through the cascade.
+  // `null` (after the user touches the model step) means "switching to native";
+  // `undefined` means "user hasn't picked yet — leave the existing binding
+  // untouched on apply." This three-state semantics matters because applying
+  // the cascade should be a no-op for the agent's Profile binding when the
+  // user only changed the effort.
+  const [pendingProfileSelection, setPendingProfileSelection] = useState<string | null | undefined>(undefined);
   const [cascadeStep, setCascadeStep] = useState<CascadeStep>('closed');
   const [cascadePos, setCascadePos] = useState<{ left: number; bottom: number } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -80,6 +114,34 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [skillMenuIndex, setSkillMenuIndex] = useState(0);
   const skillMenuRef = useRef<HTMLDivElement>(null);
   const refreshAgentStatus = useStore(s => s.refreshAgentStatus);
+
+  // Model layer — Providers + Profiles + current bindings. Fetched lazily on
+  // cascade open so the dropdown can list "我的模型" (Profile shortcuts) next
+  // to the agent's native model catalogue. Kept local to InputComposer since
+  // this is the only session-scoped consumer; the dashboard agents page has
+  // its own `useModelLayer` hook with the same shape.
+  const [profiles, setProfiles] = useState<Array<{
+    id: string; name: string; providerId: string; modelId: string; effort?: string | null;
+  }>>([]);
+  const [providers, setProviders] = useState<Array<{ id: string; name: string; kind: string; baseURL: string }>>([]);
+  const [activeProfiles, setActiveProfiles] = useState<Record<string, string | null>>({});
+
+  const refreshModelLayer = useCallback(async () => {
+    try {
+      const [pRes, profRes, bRes] = await Promise.all([
+        fetch('/api/models/providers').then(r => r.json()),
+        fetch('/api/models/profiles').then(r => r.json()),
+        fetch('/api/models/agents').then(r => r.json()),
+      ]);
+      if (pRes?.ok) setProviders(pRes.providers || []);
+      if (profRes?.ok) setProfiles(profRes.profiles || []);
+      if (bRes?.ok) {
+        const map: Record<string, string | null> = {};
+        for (const b of bRes.bindings || []) map[b.agent] = b.activeProfileId;
+        setActiveProfiles(map);
+      }
+    } catch { /* network blip — leave previous snapshot in place */ }
+  }, []);
 
   useEffect(() => { if (storeAgents?.length) setAgents(storeAgents); }, [storeAgents]);
   useEffect(() => { attachmentsRef.current = imageAttachments; }, [imageAttachments]);
@@ -442,13 +504,55 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const currentAgent = agents.find(a => a.agent === effectiveAgent) || null;
   const cascadeAgentId = pendingAgent || effectiveAgent;
   const cascadeAgent = agents.find(a => a.agent === cascadeAgentId) || currentAgent;
-  // When the cascading agent is BYOK-bound, the relevant catalogue is the
-  // provider's, not the agent CLI's native list. byokModels is provided by
-  // the server when an active Profile is bound; otherwise we fall back to
-  // the native models list so this is a no-op for native-auth agents.
-  const models = (cascadeAgent?.byokProviderName && cascadeAgent.byokModels?.length)
-    ? cascadeAgent.byokModels
-    : (cascadeAgent?.models || []);
+  // Unified model list — native catalogue + "我的模型" Profiles the agent can
+  // route through. Each row carries kind + profileId so the click handler
+  // knows whether to clear the active Profile binding (native) or set it
+  // (profile). The previous shape mixed native vs byok in one untyped
+  // ModelInfo array which couldn't express the distinction.
+  type CascadeModelRow = {
+    id: string;
+    /** What renders in the row. For Profiles this is the user-set name. */
+    label: string;
+    /** Discriminates the click handler. Native rows clear the Profile binding. */
+    kind: 'native' | 'profile';
+    /** Profile id when kind='profile'; the model id to send is `id`. */
+    profileId?: string;
+    /** Secondary line — provider name for Profile rows, alias for native. */
+    description?: string;
+  };
+  const models = useMemo<CascadeModelRow[]>(() => {
+    if (!cascadeAgent) return [];
+    const out: CascadeModelRow[] = [];
+    // Native section — the agent CLI's own model list. byokModels is no longer
+    // used here because Profiles are now first-class entries below.
+    for (const m of cascadeAgent.models || []) {
+      out.push({
+        id: m.id,
+        label: m.id,
+        kind: 'native',
+        description: m.alias && m.alias.toLowerCase() !== m.id.toLowerCase() ? m.alias : undefined,
+      });
+    }
+    // 我的模型 section — Profiles compatible with this agent's BYOK kinds.
+    const acceptedKinds = new Set(AGENT_ACCEPTED_PROVIDER_KINDS[cascadeAgentId] || []);
+    for (const p of profiles) {
+      const provider = providers.find(x => x.id === p.providerId);
+      if (!provider || !acceptedKinds.has(provider.kind)) continue;
+      const showModelId = p.name.trim().toLowerCase() !== p.modelId.trim().toLowerCase();
+      out.push({
+        id: p.modelId,
+        label: p.name,
+        kind: 'profile',
+        profileId: p.id,
+        description: showModelId ? `${provider.name} · ${p.modelId}` : provider.name,
+      });
+    }
+    return out;
+  }, [cascadeAgent, cascadeAgentId, profiles, providers]);
+  // First Profile row index for inserting the "我的模型" group header.
+  const firstProfileIdx = useMemo(() => models.findIndex(m => m.kind === 'profile'), [models]);
+  // Index of the currently-active Profile in the unified list (or -1).
+  const activeProfileIdForAgent = activeProfiles[cascadeAgentId] || null;
   // Per-session cascade choice wins over the global runtime default. Falling
   // back to currentAgent fields means an unset session shows the user's global
   // default; once they pick from the cascade, that pick scopes to this session.
@@ -460,23 +564,45 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const activePreview = previewImageId ? imageAttachments.find(item => item.id === previewImageId) || null : null;
   const canSend = (!!input.trim() || imageAttachments.length > 0) && !sending && !!effectiveAgent;
 
-  const resetCascade = () => { setPendingAgent(null); setPendingModel(null); setPendingEffort(null); };
+  const resetCascade = () => {
+    setPendingAgent(null);
+    setPendingModel(null);
+    setPendingEffort(null);
+    setPendingProfileSelection(undefined);
+  };
 
-  const applyCascade = useCallback((agent: string, model: string, effort: string | null) => {
+  const applyCascade = useCallback(async (agent: string, model: string, effort: string | null) => {
     const nextEffort = agent === 'gemini' ? '' : (effort || '');
-    // Per-session only. We deliberately do NOT touch the shared `agents` array
-    // or POST to /api/runtime-agent — doing either would leak this session's
-    // choice into every other session's default.
+    // Profile binding is intentionally global (one binding per agent across
+    // all sessions). When the user picks a Profile row in this cascade we
+    // POST it through; native picks clear the binding. Per-session model and
+    // effort overrides still flow only into local state and never touch
+    // /api/runtime-agent, so other sessions keep their own pick.
+    if (pendingProfileSelection !== undefined) {
+      try {
+        await fetch(`/api/models/agents/${agent}/active`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profileId: pendingProfileSelection }),
+        });
+        void refreshModelLayer();
+        void refreshAgentStatus();
+      } catch { /* fall through — the per-session model id still applies */ }
+    }
     setSelectedAgent(agent);
     setSelectedModel(model);
     setSelectedEffort(nextEffort);
     resetCascade();
     setCascadeStep('closed');
-  }, []);
+  }, [pendingProfileSelection, refreshModelLayer, refreshAgentStatus]);
 
   const toggleCascade = () => {
-    if (cascadeStep === 'closed') { resetCascade(); refreshAgentStatus(); setCascadeStep('agent'); }
-    else { resetCascade(); setCascadeStep('closed'); }
+    if (cascadeStep === 'closed') {
+      resetCascade();
+      refreshAgentStatus();
+      void refreshModelLayer();
+      setCascadeStep('agent');
+    } else { resetCascade(); setCascadeStep('closed'); }
   };
 
   // Build summary label for the cascade trigger
@@ -485,9 +611,32 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const displayModel = pendingModel ?? currentModel;
   const displayEffort = pendingEffort ?? currentEffort;
   const shortModel = displayModel ? shortenModel(displayModel) : '';
+
+  // BYOK binding for the agent currently shown in the chip. When present we
+  // splice in a provider chip (logo + user-set name) between the agent label
+  // and the model id so the chip surfaces both pieces of identity.
+  const displayProfile = (() => {
+    const id = activeProfiles[displayAgent];
+    return id ? profiles.find(p => p.id === id) ?? null : null;
+  })();
+  const displayProvider = displayProfile
+    ? providers.find(p => p.id === displayProfile.providerId) ?? null
+    : null;
+  const displayProviderBrand = displayProvider ? brandIdForProvider(displayProvider) : null;
+  // When a Profile is bound, prefer the user-set Profile name over the raw
+  // model id. Matches the cascade row label. Fall back to the shortened model
+  // id when there's no Profile (native auth) or when the user named the
+  // Profile identical to its modelId.
+  const displayModelLabel = displayProfile
+    && displayProfile.name.trim().toLowerCase() !== displayProfile.modelId.trim().toLowerCase()
+    ? displayProfile.name
+    : shortModel;
+
+  // Plain-text fallback used as the button tooltip when the user hovers.
   const cascadeLabel = [
     displayMeta.shortLabel,
-    shortModel || null,
+    displayProvider ? displayProvider.name : null,
+    displayModelLabel || null,
     displayEffort ? displayEffort.charAt(0).toUpperCase() + displayEffort.slice(1) : null,
   ].filter(Boolean).join(' / ');
 
@@ -520,19 +669,39 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             {effectiveQueuedIds.map((taskId, idx) => {
               const isLatest = idx === effectiveQueuedIds.length - 1;
               const positionLabel = effectiveQueuedIds.length > 1 ? `${t('hub.queued')} #${idx + 1}` : t('hub.queued');
-              // Per-task prompt comes from the server snapshot. Fall back to
-              // pendingPrompt only for the latest row (covers the brief moment
-              // before the snapshot catches up after a fresh send).
+              // Per-task prompt + images come from pendingQueuedSends (client-
+              // only blob URLs) with the server snapshot as the text fallback.
+              // Server queue state doesn't carry image data, so an older
+              // queued row that survives a refresh just shows the text.
+              const optimistic = pendingQueuedSends?.find(p => p.taskId === taskId)
+                || (isLatest ? pendingQueuedSends?.find(p => !p.taskId) : undefined);
               const taskPrompt = queuedTasks?.find(qt => qt.taskId === taskId)?.prompt
-                || (isLatest ? pendingPrompt : null);
+                || optimistic?.prompt
+                || null;
+              const taskImages = optimistic?.imageUrls?.length ? optimistic.imageUrls : [];
               return (
                 <div
                   key={taskId}
                   className="flex items-center gap-2.5 rounded-lg border border-warn/25 bg-warn/[0.04] px-3.5 py-1.5 transition-colors"
                 >
                   <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0" />
-                  <div className="flex-1 min-w-0 flex items-baseline gap-2">
+                  <div className="flex-1 min-w-0 flex items-center gap-2">
                     <span className="text-[12px] font-medium text-warn shrink-0">{positionLabel}</span>
+                    {taskImages.length > 0 && (
+                      <div className="flex items-center gap-1 shrink-0">
+                        {taskImages.slice(0, 3).map((url, i) => (
+                          <img
+                            key={`${url}-${i}`}
+                            src={url}
+                            alt=""
+                            className="h-5 w-5 rounded object-cover border border-warn/30"
+                          />
+                        ))}
+                        {taskImages.length > 3 && (
+                          <span className="text-[10px] text-fg-5/60">+{taskImages.length - 3}</span>
+                        )}
+                      </div>
+                    )}
                     {taskPrompt && (
                       <span className="text-[11px] text-fg-5/60 truncate">{taskPrompt}</span>
                     )}
@@ -693,7 +862,32 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
               {agents.length
                 ? <BrandIcon brand={displayAgent} size={12} />
                 : <Spinner className="h-3 w-3" />}
-              <span className="max-w-[420px] truncate">{agents.length ? cascadeLabel : t('hub.selectAgent')}</span>
+              {agents.length ? (
+                <span className="flex items-center gap-1 max-w-[460px] min-w-0 truncate">
+                  <span className="shrink-0">{displayMeta.shortLabel}</span>
+                  {displayProvider && (
+                    <>
+                      <span className="text-fg-5/40 shrink-0">/</span>
+                      <BrandIcon brand={displayProviderBrand || 'custom'} size={12} />
+                      <span className="shrink-0 truncate max-w-[140px]">{displayProvider.name}</span>
+                    </>
+                  )}
+                  {displayModelLabel && (
+                    <>
+                      <span className="text-fg-5/40 shrink-0">/</span>
+                      <span className="truncate" title={displayModel || undefined}>{displayModelLabel}</span>
+                    </>
+                  )}
+                  {displayEffort && (
+                    <>
+                      <span className="text-fg-5/40 shrink-0">/</span>
+                      <span className="shrink-0">{displayEffort.charAt(0).toUpperCase() + displayEffort.slice(1)}</span>
+                    </>
+                  )}
+                </span>
+              ) : (
+                <span className="max-w-[420px] truncate">{t('hub.selectAgent')}</span>
+              )}
               <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
                 className={cn('text-fg-5/30 transition-transform duration-200', cascadeStep !== 'closed' && 'rotate-180')}>
                 <polyline points="6 9 12 15 18 9" />
@@ -777,19 +971,54 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                   })}
                   {cascadeStep === 'model' && (
                     <>
-                      {models.map(m => (
-                        <CascadeItem key={m.id} selected={m.id === (pendingModel ?? currentModel) || m.alias === (pendingModel ?? currentModel)} onClick={() => {
-                          const finalAgent = pendingAgent || effectiveAgent;
-                          setPendingModel(m.id);
-                          if (EFFORT_OPTIONS[finalAgent as keyof typeof EFFORT_OPTIONS]?.length) {
-                            setCascadeStep('effort');
-                            return;
-                          }
-                          void applyCascade(finalAgent, m.id, null);
-                        }}>
-                          <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={m.id}>{m.id}</span>
-                        </CascadeItem>
-                      ))}
+                      {models.map((m, idx) => {
+                        // Group header: insert a small label row before the first
+                        // native row and before the first Profile row so the user
+                        // can see at a glance which catalogue they're picking from.
+                        const showNativeHeader = idx === 0 && m.kind === 'native';
+                        const showProfileHeader = idx === firstProfileIdx && m.kind === 'profile';
+                        // "Current" highlighting:
+                        //  - Profile rows light up when the row's profileId is the
+                        //    one the agent is currently bound to (or staged this turn).
+                        //  - Native rows light up when no Profile is bound (or the
+                        //    user just staged "switch to native") AND the model id
+                        //    matches.
+                        const stagedProfile = pendingProfileSelection !== undefined
+                          ? pendingProfileSelection
+                          : activeProfileIdForAgent;
+                        const isSelected = m.kind === 'profile'
+                          ? !!m.profileId && m.profileId === stagedProfile
+                          : !stagedProfile && m.id === (pendingModel ?? currentModel);
+                        return (
+                          <div key={`${m.kind}:${m.profileId || m.id}`}>
+                            {showNativeHeader && (
+                              <div className="px-3 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-fg-5">{t('hub.modelGroupNative')}</div>
+                            )}
+                            {showProfileHeader && (
+                              <div className="px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-fg-5">{t('hub.modelGroupProfiles')}</div>
+                            )}
+                            <CascadeItem selected={isSelected} onClick={() => {
+                              const finalAgent = pendingAgent || effectiveAgent;
+                              setPendingModel(m.id);
+                              setPendingProfileSelection(m.profileId ?? null);
+                              if (EFFORT_OPTIONS[finalAgent as keyof typeof EFFORT_OPTIONS]?.length) {
+                                setCascadeStep('effort');
+                                return;
+                              }
+                              void applyCascade(finalAgent, m.id, null);
+                            }}>
+                              <div className="min-w-0 flex-1">
+                                <div className={cn('truncate text-[11.5px]', m.kind === 'native' && 'font-mono text-[11px]')} title={m.id}>
+                                  {m.label}
+                                </div>
+                                {m.description && (
+                                  <div className="truncate text-[10px] text-fg-5/80">{m.description}</div>
+                                )}
+                              </div>
+                            </CascadeItem>
+                          </div>
+                        );
+                      })}
                       {models.length === 0 && <div className="px-3 py-3 text-[11px] text-fg-5 text-center">{t('config.noModel')}</div>}
                     </>
                   )}

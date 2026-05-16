@@ -21,12 +21,13 @@ import { api } from '../../api';
 import { createT, type Locale } from '../../i18n';
 import { useStore } from '../../store';
 import type { Agent, AgentRuntimeStatus, AgentStatusResponse, ModelInfo } from '../../types';
-import { cn, EFFORT_OPTIONS, getAgentMeta } from '../../utils';
+import { AGENT_ACCEPTED_PROVIDER_KINDS, cn, EFFORT_OPTIONS, getAgentMeta } from '../../utils';
 import { BrandIcon } from '../../components/BrandIcon';
 import { Badge, Button, Input, Label, Modal, ModalHeader, ModelSelect, Select, Spinner } from '../../components/ui';
 import { SectionCard } from '../shared';
 import ModelsSection, { useModelLayer, type ModelLayerSnapshot } from '../models/ModelsTab';
 import LocalModelsSection, { useLocalBackends } from '../local-models/LocalModelsSection';
+import ProfilesSection from '../profiles/ProfilesSection';
 
 const NATIVE_PROVIDER_VALUE = '__native__';
 const AGENT_ORDER: Agent[] = ['claude', 'codex', 'gemini', 'hermes'];
@@ -201,6 +202,8 @@ type CopyPack = {
   upToDate: string;
   install: string;
   installing: string;
+  profilesTitle: string;
+  profilesHint: string;
   modelsTitle: string;
   modelsHint: string;
   localTitle: string;
@@ -220,6 +223,10 @@ type CopyPack = {
   modelSearchPlaceholder: string;
   modelSearchEmpty: string;
   modelCurrentLabel: string;
+  modelGroupNative: string;
+  modelGroupProfiles: string;
+  modelPickerEmpty: string;
+  modelPickerEmptyHint: string;
   saveChanges: string;
   saving: string;
   saved: string;
@@ -264,10 +271,12 @@ function getCopy(locale: Locale): CopyPack {
       upToDate: '已是最新',
       install: '安装',
       installing: '安装中…',
+      profilesHint: '把你常用的模型登记成一条条快捷方式，自由起别名。这是一份纯粹的选择列表——智能体（包括 Hermes）会从这里挑模型，但选了谁不会反向显示在这里。',
+      profilesTitle: '我的模型',
       modelsTitle: '模型供应商',
-      modelsHint: '接入 BYOK 供应商；接入后可在上方任一智能体卡片的「供应商」下拉中选用。',
+      modelsHint: '接入 BYOK 供应商；接入后可在上方"我的模型"里挑选具体模型并固定下来。',
       localTitle: '本地模型',
-      localHint: '在本机检测 Ollama / LM Studio 并按内存推荐合适的开源模型；接入后会作为一个供应商出现在智能体卡片中。',
+      localHint: '在本机检测 Ollama / mlx-lm 并按内存推荐合适的开源模型；接入后会作为一个供应商出现在智能体卡片中。',
       rowProvider: '供应商',
       rowModel: '模型',
       rowEffort: '推理强度',
@@ -282,6 +291,10 @@ function getCopy(locale: Locale): CopyPack {
       modelSearchPlaceholder: '搜索模型',
       modelSearchEmpty: '没有匹配的模型',
       modelCurrentLabel: '当前',
+      modelGroupNative: '官方',
+      modelGroupProfiles: '我的模型',
+      modelPickerEmpty: '没有可选模型',
+      modelPickerEmptyHint: '该智能体的官方模型列表为空，且你还没有登记任何"我的模型"。',
       saveChanges: '保存',
       saving: '保存中…',
       saved: '已保存',
@@ -322,10 +335,12 @@ function getCopy(locale: Locale): CopyPack {
     upToDate: 'Up to date',
     install: 'Install',
     installing: 'Installing…',
+    profilesTitle: 'My Models',
+    profilesHint: 'Register the models you actually use as named shortcuts. A pure selection list — agents (including Hermes) pick from here, but who picks what does not bubble back into this view.',
     modelsTitle: 'Model Providers',
-    modelsHint: 'Connect BYOK providers; pick one in any agent card above.',
+    modelsHint: 'Connect BYOK providers; pin specific models above in "My Models".',
     localTitle: 'Local Models',
-    localHint: 'Detect Ollama / LM Studio on this machine and surface coding models that fit your RAM. Connected backends show up as a provider on the agent cards.',
+    localHint: 'Detect Ollama / mlx-lm on this machine and surface coding models that fit your RAM. Connected backends show up as a provider on the agent cards.',
     rowProvider: 'Provider',
     rowModel: 'Model',
     rowEffort: 'Effort',
@@ -340,6 +355,10 @@ function getCopy(locale: Locale): CopyPack {
     modelSearchPlaceholder: 'Search models',
     modelSearchEmpty: 'No matching models',
     modelCurrentLabel: 'Current',
+    modelGroupNative: 'Native',
+    modelGroupProfiles: 'My Models',
+    modelPickerEmpty: 'No models available',
+    modelPickerEmptyHint: 'This agent has no native model list, and no "My Models" entries are registered.',
     saveChanges: 'Save',
     saving: 'Saving…',
     saved: 'Saved',
@@ -389,39 +408,64 @@ function applySnapshot(setter: (value: SnapshotState) => void, next: AgentStatus
 // Inline editor — Provider / Model / Effort
 // ---------------------------------------------------------------------------
 
+/**
+ * Unified selection: either a native model id (kind='native') or a Profile id
+ * from "My Models" (kind='profile'). The Provider column is gone — Profile IS
+ * the upstream contract, the Provider field underneath is now an internal
+ * detail of the chosen Profile, not a separate axis the user picks.
+ */
 interface ConfigDraft {
-  providerId: string;       // NATIVE_PROVIDER_VALUE or a Provider id
+  kind: 'native' | 'profile';
+  /** When kind='native': the model id to send to the CLI.
+   *  When kind='profile': mirrors the Profile's modelId for display/dirty checks. */
   modelId: string;
+  /** Active Profile id when kind='profile'; null when kind='native'. */
+  profileId: string | null;
+  /** Agent-level effort override. Stored in runtime config regardless of kind. */
   effort: string;
-  modelMode: 'list' | 'custom';
 }
 
 function makeInitialDraft(
-  agentId: Agent,
+  _agentId: Agent,
   agentStatus: AgentRuntimeStatus | null,
   boundInfo: BoundProfileInfo | null,
 ): ConfigDraft {
   if (boundInfo) {
     return {
-      providerId: boundInfo.providerId,
+      kind: 'profile',
       modelId: boundInfo.modelId,
+      profileId: boundInfo.profileId,
       effort: boundInfo.effort || '',
-      modelMode: 'list',
     };
   }
   const native = agentStatus?.nativeConfig || null;
   return {
-    providerId: NATIVE_PROVIDER_VALUE,
+    kind: 'native',
     modelId: native?.model || agentStatus?.selectedModel || '',
+    profileId: null,
     effort: native?.effort || agentStatus?.selectedEffort || '',
-    modelMode: 'list',
   };
 }
 
 function draftEqual(a: ConfigDraft, b: ConfigDraft): boolean {
-  return a.providerId === b.providerId
+  return a.kind === b.kind
+    && (a.profileId || '') === (b.profileId || '')
     && a.modelId.trim() === b.modelId.trim()
     && (a.effort || '') === (b.effort || '');
+}
+
+/** Encode/decode the unified selection on the wire used by ModelSelect.
+ *  Format mirrors the IM picker codec: `n:<modelId>` for native rows,
+ *  `p:<profileId>` for Profile rows. */
+function encodeSelection(draft: ConfigDraft): string {
+  return draft.kind === 'profile' && draft.profileId
+    ? `p:${draft.profileId}`
+    : `n:${draft.modelId}`;
+}
+function decodeSelection(value: string): { kind: 'native'; modelId: string } | { kind: 'profile'; profileId: string } | null {
+  if (value.startsWith('n:')) return { kind: 'native', modelId: value.slice(2) };
+  if (value.startsWith('p:')) return { kind: 'profile', profileId: value.slice(2) };
+  return null;
 }
 
 function AgentInlineConfig({
@@ -456,84 +500,12 @@ function AgentInlineConfig({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset draft whenever the saved state changes (e.g. after a successful save
-  // refreshes the snapshot, or when the user opts into a different binding).
   useEffect(() => { setDraft(baseline); setError(null); }, [baseline]);
 
-  const isNative = draft.providerId === NATIVE_PROVIDER_VALUE;
+  const isNative = draft.kind === 'native';
+  // External-native means we can't write the model from here (Hermes) — we
+  // surface it as a read-only display when the native selection is active.
   const nativeReadOnly = isNative && externalNative;
-
-  // Provider model list (for BYOK) — fetched lazily. We store the rich
-  // ProviderModelInfo array so the dropdown can render pricing / context info
-  // for providers that surface it (notably OpenRouter).
-  const [providerModelInfos, setProviderModelInfos] = useState<ProviderModelInfo[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsError, setModelsError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (isNative) {
-      setProviderModelInfos([]);
-      setModelsError(null);
-      setModelsLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setModelsLoading(true);
-    setModelsError(null);
-    fetch(`/api/models/providers/${draft.providerId}/models`)
-      .then(r => r.json())
-      .then((j: { ok: boolean; models?: string[]; modelInfos?: ProviderModelInfo[]; error?: string }) => {
-        if (cancelled) return;
-        if (!j.ok) {
-          setModelsError(j.error || 'Failed to load models');
-          setProviderModelInfos([]);
-        } else if (j.modelInfos && j.modelInfos.length) {
-          setProviderModelInfos(j.modelInfos);
-        } else {
-          // Fallback when the cache pre-dates the rich-info upgrade — synth a
-          // minimal info list so the dropdown still works (no pricing / dates).
-          setProviderModelInfos((j.models || []).map(id => ({ id })));
-        }
-      })
-      .catch(e => {
-        if (cancelled) return;
-        setModelsError(e?.message || String(e));
-        setProviderModelInfos([]);
-      })
-      .finally(() => { if (!cancelled) setModelsLoading(false); });
-    return () => { cancelled = true; };
-  }, [draft.providerId, isNative]);
-
-  const providerModels = useMemo(() => providerModelInfos.map(m => m.id), [providerModelInfos]);
-
-  // Native model list comes from the agent's CLI-detected models.
-  const nativeModels = useMemo(() => agentStatus.models.map(m => m.id), [agentStatus]);
-  const availableModels = isNative ? nativeModels : providerModels;
-
-  // Auto-flip to custom when no list is available (BYOK only — for native we
-  // always use the CLI-detected list as the source of truth and don't expose a
-  // custom-input toggle).
-  useEffect(() => {
-    if (modelsLoading) return;
-    if (isNative) {
-      if (draft.modelMode === 'custom') setDraft(d => ({ ...d, modelMode: 'list' }));
-      return;
-    }
-    if (availableModels.length === 0 && draft.modelMode === 'list') {
-      setDraft(d => ({ ...d, modelMode: 'custom' }));
-    }
-  }, [availableModels, modelsLoading, draft.modelMode, isNative]);
-
-  const providerOptions = useMemo(() => {
-    const nativeLabel = externalNative
-      ? `${copy.providerNativeFromAgent}${native?.provider ? ` · ${native.provider}` : ''}`
-      : copy.providerNative;
-    const opts: { value: string; label: string }[] = [
-      { value: NATIVE_PROVIDER_VALUE, label: nativeLabel },
-    ];
-    for (const p of layer.providers) opts.push({ value: p.id, label: p.name });
-    return opts;
-  }, [externalNative, native, layer.providers, copy.providerNative, copy.providerNativeFromAgent]);
 
   const effortOptions = useMemo(() => {
     const levels = EFFORT_OPTIONS[agentId] || EFFORT_OPTIONS['claude'];
@@ -543,94 +515,120 @@ function AgentInlineConfig({
     ];
   }, [agentId, copy.effortDefault]);
 
+  // Build the unified picker options: native rows from the agent CLI's own
+  // model list, then every Profile registered in "My Models". Provider is
+  // intentionally NOT a separate axis — selecting a Profile *is* selecting
+  // the upstream binding wholesale.
+  //
+  // External-native agents (Hermes — config lives in ~/.hermes/config.yaml)
+  // skip the native group entirely: pikiclaw can't enumerate Hermes' native
+  // catalogue, and the backend's `agentStatus.models` for these agents falls
+  // back to the currently-bound Profile id, which would surface as a fake
+  // "Native" row of the Profile's own modelId.
   const modelOptions = useMemo(() => {
-    type RichOpt = { value: string; label: string; description?: string; meta?: string };
-    let opts: RichOpt[];
-    if (isNative) {
-      // Native CLI-detected list. Surface the alias as a description ONLY when
-      // it carries information beyond the id — `sonnet` vs `claude-sonnet-4-6`
-      // is useful, but `GPT-5.4-Mini` next to `gpt-5.4-mini` is just noise.
-      opts = agentStatus.models.map(m => {
+    type RichOpt = { value: string; label: string; description?: string; meta?: string; group?: string };
+    const out: RichOpt[] = [];
+    if (!externalNative) {
+      for (const m of agentStatus.models) {
         const aliasNormalized = m.alias?.toLowerCase().replace(/[\s_-]/g, '');
         const idNormalized = m.id.toLowerCase().replace(/[\s_-]/g, '');
         const showAlias = m.alias && aliasNormalized !== idNormalized;
-        return {
-          value: m.id,
+        out.push({
+          value: `n:${m.id}`,
           label: m.id,
           description: showAlias ? m.alias! : undefined,
-        };
+          group: copy.modelGroupNative,
+        });
+      }
+    }
+    // Only Profiles whose provider kind the agent can actually route through
+    // (cf. injector.ts) are eligible. Gemini for example can only BYOK via
+    // `google` kind — listing an OpenRouter Profile here would let the user
+    // pick a binding that fails at spawn time.
+    const acceptedKinds = new Set(AGENT_ACCEPTED_PROVIDER_KINDS[agentId] || []);
+    for (const p of layer.profiles) {
+      const provider = layer.providers.find(x => x.id === p.providerId);
+      if (!provider || !acceptedKinds.has(provider.kind)) continue;
+      const providerName = provider.name;
+      // Description: provider name + raw modelId when it differs from the
+      // user-set display name. Keeps the row informative without doubling up
+      // on the visible name when the user left it as the model id default.
+      const showModelId = p.name.trim().toLowerCase() !== p.modelId.trim().toLowerCase();
+      const description = showModelId ? `${providerName} · ${p.modelId}` : providerName;
+      out.push({
+        value: `p:${p.id}`,
+        label: p.name,
+        description,
+        group: copy.modelGroupProfiles,
       });
+    }
+    return out;
+  }, [agentId, agentStatus.models, layer.profiles, layer.providers, copy.modelGroupNative, copy.modelGroupProfiles, externalNative]);
+
+  const selectionValue = encodeSelection(draft);
+
+  const handleSelectionChange = useCallback((value: string) => {
+    const parsed = decodeSelection(value);
+    if (!parsed) return;
+    if (parsed.kind === 'native') {
+      setDraft(d => ({
+        ...d,
+        kind: 'native',
+        modelId: parsed.modelId,
+        profileId: null,
+        // When flipping out of a Profile back to native, restore the native
+        // effort we know about rather than carrying the Profile's effort over.
+        effort: d.kind === 'profile'
+          ? (agentStatus.nativeSelectedEffort || agentStatus.nativeConfig?.effort || '')
+          : d.effort,
+      }));
     } else {
-      opts = providerModelInfos.map(info => ({
-        value: info.id,
-        ...buildModelOption(info),
+      const profile = layer.profiles.find(p => p.id === parsed.profileId);
+      setDraft(d => ({
+        ...d,
+        kind: 'profile',
+        profileId: parsed.profileId,
+        modelId: profile?.modelId || d.modelId,
+        // Carry the Profile's own effort (if it has one) over so the field
+        // reflects what the chosen entry was last configured with.
+        effort: profile?.effort || d.effort,
       }));
     }
-    if (draft.modelMode === 'list' && draft.modelId && !opts.some(o => o.value === draft.modelId)) {
-      opts.unshift({ value: draft.modelId, label: draft.modelId });
-    }
-    return opts;
-  }, [isNative, agentStatus.models, providerModelInfos, draft.modelMode, draft.modelId]);
+  }, [layer.profiles, agentStatus.nativeSelectedEffort, agentStatus.nativeConfig]);
 
   const dirty = !draftEqual(draft, baseline);
-  const canSave = !submitting && dirty && (nativeReadOnly || !!draft.modelId.trim());
+  const canSave = !submitting && dirty && (nativeReadOnly || !!draft.modelId.trim() || draft.kind === 'profile');
 
   const submit = useCallback(async () => {
     setError(null);
     setSubmitting(true);
     try {
       const targetEffort = draft.effort || null;
-      const targetModel = draft.modelId.trim();
 
-      if (isNative) {
-        // Clear any active Profile + delete the owned Profile so we fall back
-        // to native auth. For pikiclaw-managed native agents, persist the
-        // model/effort overrides via the runtime config.
-        const currentProfileId = layer.bindings[agentId];
-        const currentProfile = currentProfileId ? layer.profiles.find(p => p.id === currentProfileId) : null;
-        if (currentProfileId) await layer.setActiveProfile(agentId, null);
-        if (currentProfile) {
-          await fetch(`/api/models/profiles/${currentProfile.id}`, { method: 'DELETE' });
-        }
+      if (draft.kind === 'native') {
+        // Clear any active Profile binding. We do NOT delete the Profile here —
+        // it lives in "My Models" as a shared user resource, independent of
+        // which agent currently uses it.
+        if (layer.bindings[agentId]) await layer.setActiveProfile(agentId, null);
         if (!externalNative) {
           const patch: Record<string, unknown> = { agent: agentId };
-          if (targetModel && targetModel !== (agentStatus.selectedModel || '')) patch.model = targetModel;
-          if (targetEffort !== (agentStatus.selectedEffort || null)) patch.effort = targetEffort;
+          const targetModel = draft.modelId.trim();
+          if (targetModel && targetModel !== (agentStatus.nativeSelectedModel || '')) patch.model = targetModel;
+          if (targetEffort !== (agentStatus.nativeSelectedEffort || null)) patch.effort = targetEffort;
           if (Object.keys(patch).length > 1) {
             const res = await api.updateRuntimeAgent(patch);
             if (!res.ok) throw new Error(res.error || 'Failed to update agent');
           }
         }
       } else {
-        const provider = layer.providers.find(p => p.id === draft.providerId);
-        if (!provider) throw new Error('Provider not found');
-        const meta = getAgentMeta(agentId);
-        const currentProfileId = layer.bindings[agentId];
-        const currentProfile = currentProfileId ? layer.profiles.find(p => p.id === currentProfileId) : null;
-        const profileBody = {
-          providerId: provider.id,
-          modelId: targetModel,
-          effort: targetEffort,
-          name: `${meta.label} · ${provider.name}`,
-        };
-        let profileId: string | undefined = currentProfile?.id;
-        if (currentProfile) {
-          const r = await fetch(`/api/models/profiles/${currentProfile.id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(profileBody),
-          }).then(x => x.json());
-          if (!r.ok) throw new Error(r.error || 'Failed to update profile');
-        } else {
-          const r = await fetch('/api/models/profiles', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(profileBody),
-          }).then(x => x.json());
-          if (!r.ok) throw new Error(r.error || 'Failed to create profile');
-          profileId = r.profile?.id;
+        if (!draft.profileId) throw new Error('No profile selected');
+        await layer.setActiveProfile(agentId, draft.profileId);
+        // Effort is an agent-level override; we keep it in runtime config
+        // rather than mutating the shared Profile entry from here.
+        if (targetEffort !== (agentStatus.selectedEffort || null)) {
+          const res = await api.updateRuntimeAgent({ agent: agentId, effort: targetEffort });
+          if (!res.ok) throw new Error(res.error || 'Failed to update agent');
         }
-        if (profileId) await layer.setActiveProfile(agentId, profileId);
       }
 
       await Promise.resolve(onSaved());
@@ -642,79 +640,32 @@ function AgentInlineConfig({
     } finally {
       setSubmitting(false);
     }
-  }, [agentId, agentStatus, copy, draft, externalNative, isNative, layer, onSaved, toast]);
+  }, [agentId, agentStatus, copy, draft, externalNative, layer, onSaved, toast]);
 
   return (
     <div className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-3">
-        {/* Provider */}
+      <div className="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        {/* Model — unified picker: native rows + Profile rows from "我的模型". */}
         <div>
-          <Label className="!mb-1 text-[11px]">{copy.rowProvider}</Label>
-          <Select
-            value={draft.providerId}
-            options={providerOptions}
-            onChange={v => setDraft(d => {
-              if (v === d.providerId) return d;
-              // Switching providers resets the model so the user picks one
-              // that exists for the new provider rather than carrying over a
-              // stale id (which the new provider may not honour).
-              const next: ConfigDraft = { ...d, providerId: v, modelId: '', modelMode: 'list' };
-              if (v === NATIVE_PROVIDER_VALUE) {
-                next.modelId = defaultNativeModel(agentStatus);
-                // Same reasoning as defaultNativeModel: don't carry the BYOK
-                // profile's effort into native mode.
-                next.effort = agentStatus.nativeSelectedEffort
-                  || agentStatus.nativeConfig?.effort
-                  || '';
-              }
-              return next;
-            })}
-          />
-        </div>
-
-        {/* Model */}
-        <div>
-          <div className="mb-1 flex items-baseline justify-between gap-2">
-            <Label className="!mb-0 text-[11px]">{copy.rowModel}</Label>
-            {/* Custom-input toggle is BYOK-only. Native mode trusts the CLI's
-                detected model list so we never expose an unbounded text field
-                that would let the user enter an id the CLI cannot run. */}
-            {!nativeReadOnly && !isNative && (
-              <button
-                type="button"
-                onClick={() => setDraft(d => ({ ...d, modelMode: d.modelMode === 'list' ? 'custom' : 'list' }))}
-                className="text-[10px] text-fg-5 underline-offset-2 transition hover:text-fg-3 hover:underline"
-              >
-                {draft.modelMode === 'list' ? copy.modelCustomToggle : copy.modelListToggle}
-              </button>
-            )}
-          </div>
+          <Label className="!mb-1 text-[11px]">{copy.rowModel}</Label>
           {nativeReadOnly ? (
             <div className="flex h-9 items-center rounded-md border border-control-border bg-control px-3 text-[13px] text-fg-3">
               <span className="truncate font-mono">{native?.model || copy.noModel}</span>
             </div>
-          ) : draft.modelMode === 'list' ? (
-            modelsLoading && !isNative ? (
-              <div className="flex h-9 items-center gap-2 rounded-md border border-control-border bg-control px-3 text-[13px] text-fg-5">
-                <Spinner className="h-3.5 w-3.5" />
-                {copy.modelLoading}
-              </div>
-            ) : (
-              <ModelSelect
-                value={draft.modelId}
-                options={modelOptions}
-                onChange={v => setDraft(d => ({ ...d, modelId: v }))}
-                placeholder={availableModels.length ? '—' : copy.modelEmpty}
-                searchPlaceholder={copy.modelSearchPlaceholder}
-                noMatchesText={copy.modelSearchEmpty}
-                currentLabel={copy.modelCurrentLabel}
-              />
-            )
+          ) : modelOptions.length === 0 ? (
+            <div className="rounded-md border border-edge bg-panel-alt px-3 py-3">
+              <div className="text-[12px] font-medium text-fg-3">{copy.modelPickerEmpty}</div>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-fg-5">{copy.modelPickerEmptyHint}</div>
+            </div>
           ) : (
-            <Input
-              value={draft.modelId}
-              onChange={e => setDraft(d => ({ ...d, modelId: e.target.value }))}
-              placeholder={copy.modelCustomPlaceholder}
+            <ModelSelect
+              value={selectionValue}
+              options={modelOptions}
+              onChange={handleSelectionChange}
+              placeholder="—"
+              searchPlaceholder={copy.modelSearchPlaceholder}
+              noMatchesText={copy.modelSearchEmpty}
+              currentLabel={copy.modelCurrentLabel}
             />
           )}
         </div>
@@ -743,10 +694,10 @@ function AgentInlineConfig({
         </div>
       )}
 
-      {/* Error / models error */}
-      {(error || modelsError) && (
+      {/* Error */}
+      {error && (
         <div className="rounded-md border border-rose-700/40 bg-rose-900/20 px-3 py-2 text-xs text-rose-200">
-          {error || modelsError}
+          {error}
         </div>
       )}
 
@@ -1221,6 +1172,16 @@ export function AgentTab() {
           </div>
         </SectionCard>
       )}
+
+      <section className="space-y-3 pt-4">
+        <div className="flex items-baseline justify-between border-t border-edge pt-4">
+          <div>
+            <div className="text-base font-semibold tracking-tight text-fg">{copy.profilesTitle}</div>
+            <div className="mt-0.5 text-[13px] leading-relaxed text-fg-4">{copy.profilesHint}</div>
+          </div>
+        </div>
+        <ProfilesSection snapshot={modelLayer} />
+      </section>
 
       <section className="space-y-3 pt-4">
         <div className="flex items-baseline justify-between border-t border-edge pt-4">

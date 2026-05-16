@@ -23,7 +23,7 @@ import glmLogo from '../assets/brands/glm.png';
 import minimaxLogo from '../assets/brands/minimax.ico';
 import openaiLogo from '../assets/brands/openai.svg';
 import ollamaLogo from '../assets/brands/ollama.png';
-import lmstudioLogo from '../assets/brands/lmstudio.png';
+import mlxLogo from '../assets/brands/mlx.png';
 import { cn } from '../utils';
 
 const brandIcons: Record<string, string> = {
@@ -54,12 +54,9 @@ const brandIcons: Record<string, string> = {
   minimax: minimaxLogo,
   openai: openaiLogo,
   ollama: ollamaLogo,
-  lmstudio: lmstudioLogo,
+  mlx: mlxLogo,
 };
 
-/**
- * Letter-only fallback for the generic "custom" / "+" placeholder.
- */
 const letterFallbacks: Record<string, { letter: string; color: string; bg: string }> = {
   custom: { letter: '+', color: '#94a3b8', bg: 'rgba(148,163,184,0.12)' },
 };

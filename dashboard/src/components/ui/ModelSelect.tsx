@@ -5,8 +5,16 @@ import { cn } from '../../utils';
 interface ModelOption {
   value: string;
   label: string;
+  /** Secondary line shown beneath the label inside the menu. */
   description?: string;
+  /** Right-aligned monospace tag shown next to the label. */
   meta?: string;
+  /**
+   * Optional bucket label. Consecutive options sharing the same group render
+   * under one header row inside the menu. Use a stable string per group ("
+   * Native", "My Models", etc.). Omit to render flat (current behaviour).
+   */
+  group?: string;
 }
 
 interface MenuStyle {
@@ -170,6 +178,9 @@ export function ModelSelect({
             <span className="shrink-0 font-mono text-[10px] text-fg-5">{option.meta}</span>
           )}
         </div>
+        {option.description && (
+          <div className="mt-0.5 truncate text-[11px] leading-relaxed text-fg-5">{option.description}</div>
+        )}
       </div>
       {selected && (
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mt-0.5 shrink-0 text-fg-4">
@@ -178,6 +189,31 @@ export function ModelSelect({
       )}
     </button>
   );
+
+  /** Render filtered options with group headers between buckets. Group changes
+   *  emit a sticky-style label row; no group on options falls back to flat
+   *  rendering exactly as before. */
+  const renderGrouped = (opts: ModelOption[]) => {
+    const out: ReturnType<typeof renderOption>[] = [];
+    let lastGroup: string | undefined = undefined;
+    for (const option of opts) {
+      if (option.group && option.group !== lastGroup) {
+        out.push(
+          <div
+            key={`__group:${option.group}`}
+            className="px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-fg-5"
+          >
+            {option.group}
+          </div>
+        );
+        lastGroup = option.group;
+      } else if (!option.group) {
+        lastGroup = undefined;
+      }
+      out.push(renderOption(option, false));
+    }
+    return out;
+  };
 
   const menu = open && menuStyle
     ? createPortal(
@@ -226,7 +262,7 @@ export function ModelSelect({
             </>
           )}
           {filteredRest.length > 0 ? (
-            filteredRest.map(option => renderOption(option, false))
+            renderGrouped(filteredRest)
           ) : (
             <div className="px-3 py-3 text-center text-[12px] text-fg-5">
               {noMatchesText}

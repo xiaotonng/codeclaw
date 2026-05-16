@@ -316,63 +316,10 @@ export const api = {
       { timeoutMs: 15_000 },
     ),
 
-  // Local model backends (Ollama / LM Studio)
+  // Local model backends (Ollama / mlx-lm) — auto-attach on probe; no manual
+  // connect step. See src/dashboard/routes/local-models.ts for the contract.
   probeLocalModels: (opts?: ApiRequestOptions) =>
     json<LocalModelsProbeResponse>('/api/local-models/probe', { timeoutMs: 8_000, ...opts }),
-  connectLocalBackend: (backend: 'ollama' | 'lmstudio') =>
-    post<{ ok: boolean; providerId?: string; alreadyConnected?: boolean; error?: string }>(
-      '/api/local-models/connect',
-      { backend },
-    ),
-  /**
-   * Pull a model via Ollama's streaming `/api/pull`. Returns an async iterator
-   * over decoded NDJSON events so the caller can render a live progress bar.
-   * The returned `cancel()` aborts the upstream pull as well.
-   */
-  pullLocalModel: (
-    backend: 'ollama',
-    model: string,
-  ): { events: AsyncIterable<OllamaPullEvent>; cancel: () => void } => {
-    const controller = new AbortController();
-    const promise = fetch('/api/local-models/pull', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ backend, model }),
-      signal: controller.signal,
-    });
-    async function* iterate(): AsyncIterable<OllamaPullEvent> {
-      const res = await promise;
-      if (!res.ok || !res.body) {
-        let detail = `HTTP ${res.status}`;
-        try {
-          const j = await res.json();
-          if (j?.error) detail = j.error;
-        } catch { /* keep status */ }
-        throw new Error(detail);
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let nl = buffer.indexOf('\n');
-        while (nl !== -1) {
-          const line = buffer.slice(0, nl).trim();
-          buffer = buffer.slice(nl + 1);
-          nl = buffer.indexOf('\n');
-          if (!line) continue;
-          try { yield JSON.parse(line) as OllamaPullEvent; } catch { /* skip malformed */ }
-        }
-      }
-      const tail = buffer.trim();
-      if (tail) {
-        try { yield JSON.parse(tail) as OllamaPullEvent; } catch { /* skip */ }
-      }
-    }
-    return { events: iterate(), cancel: () => controller.abort() };
-  },
 
   // Session hub
   getWorkspaces: () => json<{ ok: boolean; workspaces: WorkspaceEntry[] }>('/api/workspaces'),
@@ -573,19 +520,6 @@ export const api = {
       opts,
     ),
 };
-
-/**
- * Single event from Ollama's `/api/pull` NDJSON stream. The set of `status`
- * strings is taken from Ollama's source and not exhaustive; treat `error`
- * presence as terminal failure and `status === 'success'` as terminal success.
- */
-export interface OllamaPullEvent {
-  status?: string;
-  digest?: string;
-  total?: number;
-  completed?: number;
-  error?: string;
-}
 
 /** Snapshot of the latest streaming state for a session (returned by polling endpoint). */
 export interface StreamSnapshot {

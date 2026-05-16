@@ -27,7 +27,10 @@ describe('CommandAction codec', () => {
     { kind: 'agent.switch', agent: 'hermes' },
     { kind: 'model.switch', modelId: 'claude-opus-4-7' },
     { kind: 'effort.set', effort: 'xhigh' },
-    { kind: 'models.select.model', modelId: 'gpt-5' },
+    // Two flavours: native pick (profileId: null) and BYOK Profile pick
+    // (profileId: uuid). Both round-trip through the codec.
+    { kind: 'models.select.model', modelId: 'gpt-5', profileId: null },
+    { kind: 'models.select.model', modelId: 'gpt-5', profileId: 'prof-xyz-1' },
     { kind: 'models.select.effort', effort: 'medium' },
     { kind: 'models.confirm' },
     { kind: 'skill.run', command: 'sk_review' },

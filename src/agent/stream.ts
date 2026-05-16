@@ -10,12 +10,14 @@ import { fileURLToPath } from 'node:url';
 import { restartManagedBrowser } from '../browser-supervisor.js';
 import { terminateProcessTree } from '../core/process-control.js';
 import { AGENT_DETECT_TIMEOUTS, AGENT_STREAM_HARD_KILL_GRACE_MS } from '../core/constants.js';
-import { getDriver, allDrivers } from './driver.js';
-import { resolveAgentInjection, getActiveProfile, getProvider, getProviderModelList, updateProfile } from '../model/index.js';
+import { getDriver, allDrivers, getAcceptedProviderKinds } from './driver.js';
+import {
+  resolveAgentInjection, getActiveProfile, getProvider, updateProfile, listProfiles,
+} from '../model/index.js';
 import type {
   Agent, AgentDetectOptions, AgentInfo, AgentListResult,
   StreamOpts, StreamResult, CodexCumulativeUsage,
-  ModelListOpts, ModelListResult, UsageOpts, UsageResult,
+  ModelListOpts, ModelListResult, ModelInfo, UsageOpts, UsageResult,
   SessionListOpts, SessionListResult, SessionTailOpts, SessionTailResult,
   SessionMessagesOpts, SessionMessagesResult,
   StreamPreviewMeta, StreamSubAgent,
@@ -598,43 +600,83 @@ export function listModels(agent: Agent, opts: ModelListOpts = {}): Promise<Mode
 }
 
 /**
+ * Detect a Provider whose baseURL is on the local machine (Ollama / mlx-lm
+ * connected via `/api/local-models/connect`). Used only to bucket the entry
+ * into the `'local'` group in the unified picker — runtime behaviour is
+ * unchanged whether or not the baseURL is loopback.
+ */
+function isLocalProviderBaseURL(baseURL: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::|\/|$)/i.test(baseURL);
+}
+
+/**
  * Resolve the model list a UI surface should show for `agent`.
  *
- * If the agent has an active BYOK Profile, the bound provider's `/models`
- * response wins — every model the user can pick is one the provider exposes.
- * Otherwise we fall back to the agent driver's native list.
+ * Returns a *union* of:
+ *   1. The agent CLI's native model catalogue (no Profile required), tagged
+ *      `group: 'native'`.
+ *   2. Every Profile whose provider kind appears in the driver's
+ *      `acceptedProviderKinds`, tagged `group: 'cloud'` (remote BYOK) or
+ *      `group: 'local'` (loopback baseURL — Ollama / mlx-lm).
  *
- * Used by the dashboard agent-status response and the IM `/models` command so
- * both surfaces stay consistent with the configured provider binding.
+ * The previous behaviour — filter to the active Profile's provider — meant
+ * users could not switch *across* providers from the IM picker without first
+ * unbinding through the dashboard. The unified list removes that step so
+ * `/models` is a one-screen pick.
+ *
+ * Callers that need the strictly-native list (e.g. the dashboard agent card's
+ * "Native" branch) should call `driver.listModels()` directly — this function
+ * is for the unified picker.
  */
 export async function resolveAgentModels(agent: Agent, opts: ModelListOpts = {}): Promise<ModelListResult> {
-  const profile = getActiveProfile(agent);
-  if (!profile) return getDriver(agent).listModels(opts);
+  const driver = getDriver(agent);
 
-  const provider = getProvider(profile.providerId);
-  if (!provider) return getDriver(agent).listModels(opts);
-
+  // 1. Native — agent CLI's built-in catalogue.
+  let nativeResult: ModelListResult;
   try {
-    const result = await getProviderModelList(provider.id);
-    if (result && result.models.length > 0) {
-      return {
-        agent,
-        models: result.models.map(id => ({ id, alias: null })),
-        sources: [`${provider.name} · ${provider.baseURL}`],
-        note: `Provider-bound models. ${result.fromCache ? 'Cached' : 'Live'}.`,
-      };
-    }
+    nativeResult = await driver.listModels(opts);
   } catch {
-    /* fall through to driver */
+    nativeResult = { agent, models: [], sources: [], note: null };
+  }
+  const native: ModelInfo[] = nativeResult.models.map(m => ({
+    id: m.id,
+    alias: m.alias,
+    group: 'native',
+  }));
+
+  // 2. BYOK Profiles compatible with this driver — grouped into cloud vs local
+  //    by baseURL. We never call the provider's /models endpoint here: that
+  //    list can run into the hundreds for OpenRouter and would drown the
+  //    picker. Profiles ARE the curated middle layer.
+  const acceptedKinds = new Set(getAcceptedProviderKinds(agent));
+  const cloud: ModelInfo[] = [];
+  const local: ModelInfo[] = [];
+  if (acceptedKinds.size > 0) {
+    for (const profile of listProfiles()) {
+      const provider = getProvider(profile.providerId);
+      if (!provider) continue;
+      if (!acceptedKinds.has(provider.kind)) continue;
+      const isLocal = isLocalProviderBaseURL(provider.baseURL);
+      const entry: ModelInfo = {
+        id: profile.modelId,
+        alias: profile.name,
+        group: isLocal ? 'local' : 'cloud',
+        profileId: profile.id,
+        providerName: provider.name,
+      };
+      (isLocal ? local : cloud).push(entry);
+    }
   }
 
-  // Provider unreachable or returned 0 models — let the user still pick the
-  // currently-bound id by surfacing it as a single-entry list.
+  const sources = [...nativeResult.sources];
+  if (cloud.length) sources.push(`${cloud.length} cloud profile${cloud.length === 1 ? '' : 's'}`);
+  if (local.length) sources.push(`${local.length} local profile${local.length === 1 ? '' : 's'}`);
+
   return {
     agent,
-    models: profile.modelId ? [{ id: profile.modelId, alias: null }] : [],
-    sources: [`${provider.name} · unreachable`],
-    note: 'Could not enumerate provider models. Showing bound model only.',
+    models: [...native, ...cloud, ...local],
+    sources,
+    note: nativeResult.note ?? null,
   };
 }
 

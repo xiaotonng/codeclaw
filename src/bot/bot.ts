@@ -24,6 +24,7 @@ import {
   type HandoverRef,
 } from '../agent/index.js';
 import { compactForHandover, describeHandoverRef } from '../agent/handover.js';
+import { getActiveProfileId, setActiveProfile, getProfile } from '../model/index.js';
 import {
   querySessions, querySessionTail, updateSession,
   type SessionQueryResult,
@@ -1956,19 +1957,50 @@ export class Bot {
     return true;
   }
 
-  switchModelForChat(chatId: ChatId, modelId: string) {
+  /**
+   * Switch the active model for a chat. Supports both native (agent CLI's own
+   * auth) and BYOK Profile selections:
+   *   - `profileId === undefined` (default) — set native model only; pre-union
+   *     callers (text-command channels) keep working unchanged.
+   *   - `profileId === null` — explicit clear: drop any active Profile, fall
+   *     back to native model.
+   *   - `profileId === '<uuid>'` — bind that Profile; `modelId` should match
+   *     the Profile's modelId so display surfaces stay in sync.
+   *
+   * The native model field (`agentConfigs[agent].model`) always tracks the
+   * effective model id used by the agent CLI — when a Profile is bound, this
+   * lets `modelForAgent()` return the right display string without an extra
+   * lookup. When unbinding, we leave the field alone so the user's prior
+   * native pick is preserved.
+   */
+  switchModelForChat(chatId: ChatId, modelId: string, profileId?: string | null) {
     const cs = this.chat(chatId);
+    // Update activeProfileByAgent first — resolveSessionStreamConfig downstream
+    // reads it via getActiveProfile() during spawn.
+    if (profileId !== undefined) {
+      setActiveProfile(cs.agent, profileId || null);
+    }
     this.setModelForAgent(cs.agent, modelId);
-    // Apply the switch to the *currently selected* session so the very next
-    // turn uses the new model — without dropping the session. We used to call
-    // `resetChatConversation` here, which forced the user to start a fresh
-    // session every time they re-picked a model; that defeated the purpose
-    // of switching mid-conversation. Mirrors `switchEffortForChat`.
     cs.modelId = modelId;
     const session = this.getSelectedSession(cs);
     if (session) session.modelId = modelId;
     this.persistAgentPreference(cs.agent, 'model', modelId);
-    this.log(`model switched to ${modelId} for ${cs.agent} chat=${chatId} session=${cs.activeSessionKey || '(none)'}`);
+    const profileTag = profileId === undefined
+      ? ''
+      : profileId
+        ? ` profile=${profileId}`
+        : ' profile=(cleared)';
+    this.log(`model switched to ${modelId} for ${cs.agent} chat=${chatId} session=${cs.activeSessionKey || '(none)'}${profileTag}`);
+  }
+
+  /**
+   * The Profile id currently bound to this agent, if any. Used by the IM
+   * picker to flag "current selection" when the user has a Profile bound —
+   * since multiple Profiles may share the same modelId, a model-id match
+   * alone is ambiguous.
+   */
+  activeProfileIdForAgent(agent: Agent): string | null {
+    return getActiveProfileId(agent);
   }
 
   switchEffortForChat(chatId: ChatId, effort: string) {

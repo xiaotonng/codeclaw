@@ -22,7 +22,14 @@ export type CommandAction =
   | { kind: 'agent.switch'; agent: Agent }
   | { kind: 'model.switch'; modelId: string }
   | { kind: 'effort.set'; effort: string }
-  | { kind: 'models.select.model'; modelId: string }
+  /**
+   * `modelId` always carries the model identifier the agent CLI / provider
+   * expects. `profileId` distinguishes BYOK Profile rows from native rows:
+   *   - `null` (or absent) → user picked a native model
+   *   - `'<uuid>'`         → user picked that Profile (and `modelId` is the
+   *     Profile's modelId, kept for display consistency)
+   */
+  | { kind: 'models.select.model'; modelId: string; profileId?: string | null }
   | { kind: 'models.select.effort'; effort: string }
   | { kind: 'models.confirm' }
   | { kind: 'skill.run'; command: string }
@@ -96,7 +103,11 @@ export function encodeCommandAction(action: CommandAction): string {
     case 'effort.set':
       return `eff:${action.effort}`;
     case 'models.select.model':
-      return `md:${action.modelId}`;
+      // Encode native vs profile selection on the wire so decode is unambiguous.
+      // `md:n:<modelId>` = native; `md:p:<profileId>:<modelId>` = BYOK profile.
+      return action.profileId
+        ? `md:p:${action.profileId}:${action.modelId}`
+        : `md:n:${action.modelId}`;
     case 'models.select.effort':
       return `ed:${action.effort}`;
     case 'models.confirm':
@@ -138,9 +149,26 @@ export function decodeCommandAction(data: string): CommandAction | null {
     return { kind: 'effort.set', effort };
   }
   if (data.startsWith('md:')) {
-    const modelId = data.slice(3);
-    if (!modelId) return null;
-    return { kind: 'models.select.model', modelId };
+    const rest = data.slice(3);
+    if (rest.startsWith('n:')) {
+      const modelId = rest.slice(2);
+      if (!modelId) return null;
+      return { kind: 'models.select.model', modelId, profileId: null };
+    }
+    if (rest.startsWith('p:')) {
+      // p:<profileId>:<modelId> — profileId is a uuid (no colons), so split on
+      // the first remaining colon yields a clean (profileId, modelId) pair.
+      const sep = rest.indexOf(':', 2);
+      if (sep < 0) return null;
+      const profileId = rest.slice(2, sep);
+      const modelId = rest.slice(sep + 1);
+      if (!profileId || !modelId) return null;
+      return { kind: 'models.select.model', modelId, profileId };
+    }
+    // Legacy callback payloads (pre-union) carried `md:<modelId>` directly.
+    // Treat them as native selections so old buttons in the wild still work.
+    if (!rest) return null;
+    return { kind: 'models.select.model', modelId: rest, profileId: null };
   }
   if (data.startsWith('ed:')) {
     const effort = data.slice(3);
@@ -246,16 +274,46 @@ export function buildAgentsCommandView(bot: Bot, chatId: ChatId): CommandSelecti
 
 interface ModelsDraft {
   modelId: string;
+  /** null = native selection; uuid = BYOK Profile selection. */
+  profileId: string | null;
   effort: string | null;
 }
 
 const modelsDrafts = new Map<string, ModelsDraft>();
 
 async function initModelsDraft(bot: Bot, chatId: ChatId): Promise<ModelsDraft> {
+  const cs = bot.chat(chatId);
   const data = await getModelsListData(bot, chatId);
-  const draft: ModelsDraft = { modelId: data.currentModel, effort: data.effort?.current ?? null };
+  const activeProfileId = bot.activeProfileIdForAgent(cs.agent);
+  const draft: ModelsDraft = {
+    modelId: data.currentModel,
+    profileId: activeProfileId,
+    effort: data.effort?.current ?? null,
+  };
   modelsDrafts.set(String(chatId), draft);
   return draft;
+}
+
+/**
+ * Section headings for the unified picker. The trailing em-dash padding gives
+ * the row a "label" look in Telegram/Feishu — clicking it falls through to a
+ * harmless confirm which is a no-op when nothing has changed.
+ */
+const MODEL_GROUP_LABELS: Record<'native' | 'cloud' | 'local', string> = {
+  native: '— Native —',
+  cloud: '— Cloud Profiles —',
+  local: '— Local Profiles —',
+};
+
+/** Match a picker row against the live draft so the "current" pip is unambiguous. */
+function modelRowMatchesDraft(
+  agent: Agent,
+  row: { id: string; profileId?: string | null; group?: 'native' | 'cloud' | 'local' },
+  draft: ModelsDraft,
+): boolean {
+  if (draft.profileId) return !!row.profileId && row.profileId === draft.profileId;
+  const isNativeRow = (row.group ?? 'native') === 'native';
+  return isNativeRow && modelMatchesSelection(agent, row.id, draft.modelId);
 }
 
 export async function buildModelsCommandView(
@@ -265,23 +323,62 @@ export async function buildModelsCommandView(
 ): Promise<CommandSelectionView> {
   const data = await getModelsListData(bot, chatId);
 
-  // Initialize draft from current state or use the provided one
   const d: ModelsDraft = draft ?? {
     modelId: data.currentModel,
+    profileId: bot.activeProfileIdForAgent(data.agent),
     effort: data.effort?.current ?? null,
   };
   modelsDrafts.set(String(chatId), d);
 
-  const isSelected = (modelId: string) => modelMatchesSelection(data.agent, modelId, d.modelId);
+  // Bucket rows by group while preserving the order resolveAgentModels gave us
+  // (native → cloud → local). We render each non-empty group with a header.
+  const groups: Record<'native' | 'cloud' | 'local', typeof data.models> = {
+    native: [],
+    cloud: [],
+    local: [],
+  };
+  for (const model of data.models) {
+    const g = (model.group ?? 'native') as 'native' | 'cloud' | 'local';
+    groups[g].push(model);
+  }
 
-  const models = [...data.models].sort((a, b) => Number(isSelected(b.id)) - Number(isSelected(a.id)));
-  const modelButtons = models.map(model => ({
-    label: model.alias || model.id,
-    action: { kind: 'models.select.model', modelId: model.id } as CommandAction,
-    state: buttonStateFromFlags({ isCurrent: isSelected(model.id) }),
-    primary: isSelected(model.id),
-  }));
-  const rows = chunkRows(modelButtons, 1);
+  const rows: CommandActionButton[][] = [];
+  for (const group of ['native', 'cloud', 'local'] as const) {
+    const rawItems = groups[group];
+    if (!rawItems.length) continue;
+    // Promote the currently-selected row to the top of its group so the user
+    // sees their active pick first without having to scroll. This matches the
+    // pre-union picker's behaviour, just scoped per-group instead of globally.
+    const items = [...rawItems].sort((a, b) =>
+      Number(modelRowMatchesDraft(data.agent, b, d)) - Number(modelRowMatchesDraft(data.agent, a, d))
+    );
+    rows.push([{
+      label: MODEL_GROUP_LABELS[group],
+      action: { kind: 'models.confirm' } as CommandAction,
+      state: 'default' as CommandItemState,
+      primary: false,
+    }]);
+    for (const model of items) {
+      const selected = modelRowMatchesDraft(data.agent, model, d);
+      const labelBase = model.alias || model.id;
+      // For BYOK rows the alias is the Profile name — include provider tag so
+      // two Profiles sharing a model id (e.g. "Sonnet 4.6 · OpenRouter" vs
+      // "Sonnet 4.6 · Anthropic Direct") stay distinguishable in 1-column mode.
+      const label = group === 'native' || !model.providerName
+        ? labelBase
+        : `${labelBase} · ${model.providerName}`;
+      rows.push([{
+        label,
+        action: {
+          kind: 'models.select.model',
+          modelId: model.id,
+          profileId: model.profileId ?? null,
+        } as CommandAction,
+        state: buttonStateFromFlags({ isCurrent: selected }),
+        primary: selected,
+      }]);
+    }
+  }
 
   if (data.effort) {
     const effortButtons = data.effort.levels.map(level => ({
@@ -290,21 +387,21 @@ export async function buildModelsCommandView(
       state: buttonStateFromFlags({ isCurrent: level.id === d.effort }),
       primary: level.id === d.effort,
     }));
-    // Section label — clicking it is harmless (triggers confirm, which is noop if nothing changed)
     rows.push([{
       label: '— Thinking Effort —',
       action: { kind: 'models.confirm' } as CommandAction,
       state: 'default' as CommandItemState,
       primary: false,
     }]);
-    // ≤3 levels fit in one row; 4+ split into rows of 2 to avoid Feishu truncation
     rows.push(...chunkRows(effortButtons, effortButtons.length <= 3 ? effortButtons.length : 2));
   }
 
-  // Detect whether draft differs from current live values
-  const modelChanged = !modelMatchesSelection(data.agent, d.modelId, data.currentModel);
+  const currentProfileId = bot.activeProfileIdForAgent(data.agent);
+  const profileChanged = (d.profileId || null) !== (currentProfileId || null);
+  const modelChanged = !d.profileId && !currentProfileId
+    && !modelMatchesSelection(data.agent, d.modelId, data.currentModel);
   const effortChanged = !!(data.effort && d.effort !== data.effort.current);
-  const hasChanges = modelChanged || effortChanged;
+  const hasChanges = profileChanged || modelChanged || effortChanged;
 
   rows.push([{
     label: hasChanges ? '✓ Apply' : '✓ OK',
@@ -322,13 +419,13 @@ export async function buildModelsCommandView(
       ...(data.note ? [data.note] : []),
       ...(data.effort ? [`Thinking Effort: ${d.effort}`] : []),
     ],
-    items: models.map(model => ({
+    items: data.models.map(model => ({
       label: model.alias || model.id,
-      detail: model.alias ? model.id : null,
-      state: buttonStateFromFlags({ isCurrent: isSelected(model.id) }),
+      detail: model.providerName || (model.alias ? model.id : null),
+      state: buttonStateFromFlags({ isCurrent: modelRowMatchesDraft(data.agent, model, d) }),
     })),
     emptyText: 'No discoverable models found.',
-    helperText: data.models.length ? 'Select model and effort, then tap Apply.' : null,
+    helperText: data.models.length ? 'Pick a model (native or BYOK), then tap Apply.' : null,
     rows,
   };
 }
@@ -487,6 +584,9 @@ export async function executeCommandAction(
     case 'models.select.model': {
       const draft = modelsDrafts.get(String(chatId)) ?? await initModelsDraft(bot, chatId);
       draft.modelId = action.modelId;
+      // profileId can be null (native pick) or a uuid (BYOK pick). Treating
+      // `undefined` as "leave alone" preserves the action shape's old contract.
+      if (action.profileId !== undefined) draft.profileId = action.profileId;
       return { kind: 'view', view: await buildModelsCommandView(bot, chatId, draft), callbackText: '' };
     }
 
@@ -504,7 +604,10 @@ export async function executeCommandAction(
 
       const currentModel = bot.modelForAgent(chat.agent);
       const currentEffort = bot.effortForAgent(chat.agent);
-      const modelChanged = !modelMatchesSelection(chat.agent, draft.modelId, currentModel);
+      const currentProfileId = bot.activeProfileIdForAgent(chat.agent);
+      const profileChanged = (draft.profileId || null) !== (currentProfileId || null);
+      const modelChanged = profileChanged
+        || (!draft.profileId && !modelMatchesSelection(chat.agent, draft.modelId, currentModel));
       const effortChanged = draft.effort != null && draft.effort !== currentEffort;
 
       if (!modelChanged && !effortChanged) {
@@ -513,8 +616,11 @@ export async function executeCommandAction(
 
       const parts: string[] = [];
       if (modelChanged) {
-        bot.switchModelForChat(chatId, draft.modelId);
-        parts.push(`Model: ${draft.modelId}`);
+        // Pass profileId explicitly: a null clears any active Profile binding,
+        // a uuid binds the picked Profile. switchModelForChat handles both
+        // sides of the dual path so call sites stay agnostic.
+        bot.switchModelForChat(chatId, draft.modelId, draft.profileId ?? null);
+        parts.push(draft.profileId ? `Profile: ${draft.modelId}` : `Model: ${draft.modelId}`);
       }
       if (effortChanged) {
         bot.switchEffortForChat(chatId, draft.effort!);

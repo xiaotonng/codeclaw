@@ -333,8 +333,12 @@ describe('TelegramBot status and session previews', () => {
       expect(replies[0]?.text).toContain('Source: app-server model/list');
       expect(replies[0]?.text).toContain('debug note should stay hidden while models exist');
       const keyboard = replies[0]?.opts?.keyboard?.inline_keyboard || [];
-      expect(keyboard[0]).toEqual([{ text: '● opus', callback_data: 'md:claude-opus-4-7' }]);
-      expect(keyboard[1]).toEqual([{ text: 'sonnet', callback_data: 'md:claude-sonnet-4-6' }]);
+      // Unified picker layout: a group header precedes each non-empty bucket.
+      // With no BYOK Profiles configured the only bucket is `native`, so the
+      // first row is the "— Native —" header, followed by the native models.
+      expect(keyboard[0]).toEqual([{ text: '— Native —', callback_data: 'mc' }]);
+      expect(keyboard[1]).toEqual([{ text: '● opus', callback_data: 'md:n:claude-opus-4-7' }]);
+      expect(keyboard[2]).toEqual([{ text: 'sonnet', callback_data: 'md:n:claude-sonnet-4-6' }]);
       const keyboardJson = JSON.stringify(keyboard);
       expect(keyboardJson).toContain('"callback_data":"ed:high"');
       expect(keyboardJson).toContain('"callback_data":"mc"');

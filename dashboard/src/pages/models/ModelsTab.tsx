@@ -22,7 +22,7 @@ import { Badge, Button, Input, Label, Modal, ModalHeader, Select, Spinner } from
 import { ActionBar, SectionCard } from '../shared';
 import { BrandIcon } from '../../components/BrandIcon';
 import { useStore } from '../../store';
-import { getAgentMeta } from '../../utils';
+import { cn, getAgentMeta } from '../../utils';
 import type { Locale } from '../../i18n';
 import type { LocalBackendStatus } from '../../types';
 
@@ -366,7 +366,7 @@ function brandIdForProvider(p: { kind: ProviderKind; baseURL: string }): string 
   // Local backends — recognised by their default loopback ports so the
   // configured provider card picks up the right brand mark after Connect.
   if ((host.startsWith('127.0.0.1') || host.startsWith('localhost')) && port === '11434') return 'ollama';
-  if ((host.startsWith('127.0.0.1') || host.startsWith('localhost')) && port === '1234') return 'lmstudio';
+  if ((host.startsWith('127.0.0.1') || host.startsWith('localhost')) && port === '8080') return 'mlx';
   if (host.includes('openrouter')) return 'openrouter';
   if (host.includes('anthropic')) return 'anthropic';
   if (host.includes('deepseek')) return 'deepseek';
@@ -408,7 +408,6 @@ interface TileDescriptor {
    *  has an existing matching provider). */
   provider?: ProviderRow;
   template?: ProviderTemplate;
-  boundAgents?: string[];
 }
 
 function ProviderTile({
@@ -422,85 +421,73 @@ function ProviderTile({
   locale: Locale;
   onPick: (desc: TileDescriptor) => void;
 }) {
-  const { provider, template, boundAgents = [] } = desc;
+  const { provider, template } = desc;
   const isBound = !!provider;
   const brand = provider ? brandIdForProvider(provider) : (template?.id ?? 'custom');
   const name = provider?.name
     ?? (template ? (locale === 'zh-CN' ? template.name.zh : template.name.en) : '');
   const blurb = template ? (locale === 'zh-CN' ? template.blurb.zh : template.blurb.en) : '';
 
-  // Unified tile language used across the page. Rule: only render a Badge
-  // when there's *load-bearing* status to share — i.e. the tile has been
-  // configured and the user might care whether it's healthy or broken.
-  // Unconfigured tiles render NO badge: the muted top-right would otherwise
-  // turn every "not yet picked" template into a fake action item, which is
-  // what made the grid feel busy. Connected/healthy uses ok green so it
-  // stands out against the sea of neutral defaults.
+  // Status indicator: a 6px colored dot in front of the provider name carries
+  // ready/invalid/error/unvalidated. The model count moves to a small muted
+  // numeric next to the dot — full label ("可用 N 个模型") is reserved for the
+  // tile's hover tooltip and the edit modal where space is not a concern.
   const validationState = provider?.validation?.state ?? null;
-  const renderBadge = () => {
-    if (!provider) return null;
-    if (validationState === 'ready') {
-      const count = provider.validation?.modelCount;
-      return (
-        <Badge variant="ok">
-          {count != null ? copy.modelsAvailable(count) : copy.validationReady}
-        </Badge>
-      );
-    }
-    if (validationState === 'invalid') return <Badge variant="err">{copy.validationInvalid}</Badge>;
-    if (validationState === 'error') return <Badge variant="warn">{copy.validationError}</Badge>;
-    return <Badge variant="warn">{copy.validationUnvalidated}</Badge>;
-  };
+  const modelCount = provider?.validation?.modelCount;
 
-  // Detail line under the name. Stays a single tight line for all states so
-  // tiles share a consistent typographic rhythm.
-  const renderDetail = () => {
-    if (isBound && boundAgents.length > 0) {
-      return (
-        <div className="flex items-center gap-1.5 text-[11.5px] text-fg-5">
-          <span className="shrink-0">{copy.boundN(boundAgents.length)}</span>
-          <div className="flex items-center gap-0.5">
-            {boundAgents.slice(0, 4).map(a => (
-              <span
-                key={a}
-                className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-edge bg-panel"
-                title={a}
-              >
-                <BrandIcon brand={a} size={10} />
-              </span>
-            ))}
-          </div>
-        </div>
-      );
+  let dotClass: string | null = null;
+  let statusTitle = '';
+  if (provider) {
+    if (validationState === 'ready') {
+      dotClass = 'bg-emerald-500';
+      statusTitle = modelCount != null ? copy.modelsAvailable(modelCount) : copy.validationReady;
+    } else if (validationState === 'invalid') {
+      dotClass = 'bg-rose-500';
+      statusTitle = copy.validationInvalid;
+    } else if (validationState === 'error') {
+      dotClass = 'bg-amber-500';
+      statusTitle = copy.validationError;
+    } else {
+      dotClass = 'bg-fg-6';
+      statusTitle = copy.validationUnvalidated;
     }
-    if (isBound && provider!.validation?.detail && validationState !== 'ready') {
-      return (
-        <div className="truncate text-[11.5px] leading-relaxed text-fg-4" title={provider!.validation.detail}>
-          {provider!.validation.detail}
-        </div>
-      );
-    }
-    return (
-      <div className="truncate text-[11.5px] leading-relaxed text-fg-5" title={blurb}>
-        {blurb}
-      </div>
-    );
-  };
+  }
+
+  // Subtitle below the name. Connected providers without ready validation
+  // surface the failure detail; everything else shows the template blurb.
+  const subtitle = isBound && provider!.validation?.detail && validationState !== 'ready'
+    ? provider!.validation.detail
+    : blurb;
 
   return (
     <button
       type="button"
       onClick={() => onPick(desc)}
-      className="group relative flex h-[104px] flex-col rounded-lg border border-edge bg-panel-alt px-4 py-3.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-edge-strong hover:bg-panel hover:shadow-[0_4px_16px_rgba(15,23,42,0.06)]"
+      className="group relative flex h-[68px] items-center gap-2.5 rounded-lg border border-edge bg-panel-alt px-3 py-2 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-edge-strong hover:bg-panel hover:shadow-[0_4px_16px_rgba(15,23,42,0.06)]"
     >
-      <div className="flex w-full items-start justify-between gap-2">
-        <BrandIcon brand={brand} size={32} />
-        {renderBadge()}
+      <BrandIcon brand={brand} size={26} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          {dotClass && (
+            <span
+              className={cn('inline-block h-[6px] w-[6px] shrink-0 rounded-full', dotClass)}
+              title={statusTitle}
+            />
+          )}
+          <span className="truncate text-[13px] font-semibold tracking-tight text-fg">{name}</span>
+        </div>
+        {subtitle && (
+          <div className="truncate text-[11px] leading-snug text-fg-5" title={subtitle}>{subtitle}</div>
+        )}
       </div>
-      <div className="mt-auto min-w-0">
-        <div className="truncate text-[14px] font-semibold tracking-tight text-fg group-hover:text-fg">{name}</div>
-        <div className="mt-1">{renderDetail()}</div>
-      </div>
+      {validationState === 'ready' && modelCount != null && (
+        <span
+          className="shrink-0 font-mono text-[11px] text-fg-5"
+          title={copy.modelsAvailable(modelCount)}
+        >
+          {modelCount}
+        </span>
+      )}
     </button>
   );
 }
@@ -824,7 +811,7 @@ export default function ModelsSection({
 }: {
   snapshot?: ModelLayerSnapshot;
   /**
-   * Optional list of detected local backends (Ollama / LM Studio). When
+   * Optional list of detected local backends (Ollama / mlx-lm). When
    * provided, a provider card whose baseURL matches a local backend renders
    * the backend's installed-model list inline so users immediately see what's
    * on disk after connecting it.
@@ -833,7 +820,7 @@ export default function ModelsSection({
 } = {}) {
   const localState = useModelLayer();
   const layer = snapshot ?? localState;
-  const { providers, profiles, bindings, reload } = layer;
+  const { providers, reload } = layer;
   const backendsForLookup = localBackends ?? [];
 
   const locale = useStore(s => s.locale);
@@ -845,22 +832,6 @@ export default function ModelsSection({
     | { kind: 'edit'; provider: ProviderRow }
     | null
   >(null);
-
-  // Map provider → list of agent ids that currently have a Profile pointing here.
-  // (Profile is now an internal-only artifact: each agent has at most one,
-  // owned by the agent's BYOK binding modal.)
-  const boundAgentsByProviderId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    const profById = new Map(profiles.map(p => [p.id, p]));
-    for (const [agent, profileId] of Object.entries(bindings)) {
-      if (!profileId) continue;
-      const prof = profById.get(profileId);
-      if (!prof) continue;
-      if (!m.has(prof.providerId)) m.set(prof.providerId, []);
-      m.get(prof.providerId)!.push(agent);
-    }
-    return m;
-  }, [bindings, profiles]);
 
   const remove = useCallback(async (provider: ProviderRow) => {
     if (!confirm(copy.removeConfirm)) return;
@@ -919,26 +890,19 @@ export default function ModelsSection({
       const provider = providerByTemplateId.get(tpl.id);
       if (provider && !providerMatchesLocalBackend(provider, backendsForLookup)) {
         claimedProviderIds.add(provider.id);
-        out.push({
-          template: tpl,
-          provider,
-          boundAgents: boundAgentsByProviderId.get(provider.id) ?? [],
-        });
+        out.push({ template: tpl, provider });
       } else {
         out.push({ template: tpl });
       }
     }
     for (const provider of visibleProviders) {
       if (claimedProviderIds.has(provider.id)) continue;
-      out.push({
-        provider,
-        boundAgents: boundAgentsByProviderId.get(provider.id) ?? [],
-      });
+      out.push({ provider });
     }
     const customTpl = TEMPLATES.find(t => t.id === 'custom');
     if (customTpl) out.push({ template: customTpl });
     return out;
-  }, [providers, providerByTemplateId, backendsForLookup, boundAgentsByProviderId]);
+  }, [providers, providerByTemplateId, backendsForLookup]);
 
   const pickTile = useCallback((desc: TileDescriptor) => {
     if (desc.provider) {

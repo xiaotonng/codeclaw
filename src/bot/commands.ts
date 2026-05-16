@@ -467,6 +467,16 @@ export interface ModelEntry {
   id: string;
   alias: string | null;
   isCurrent: boolean;
+  /**
+   * Grouping for the unified /models picker — `'native'` runs through the
+   * agent CLI's own auth, the others through a BYOK Profile. Default is
+   * `'native'` when omitted, preserving the pre-union picker behaviour.
+   */
+  group?: 'native' | 'cloud' | 'local';
+  /** Profile id when this row is a BYOK entry. */
+  profileId?: string | null;
+  /** Provider display name for non-native entries. */
+  providerName?: string | null;
 }
 
 export interface EffortEntry {
@@ -545,17 +555,33 @@ function buildEffortData(bot: Bot, agent: Agent): ModelsListData['effort'] {
 export async function getModelsListData(bot: Bot, chatId: ChatId): Promise<ModelsListData> {
   const cs = bot.chat(chatId);
   const currentModel = bot.modelForAgent(cs.agent);
+  const activeProfileId = bot.activeProfileIdForAgent(cs.agent);
   const res = await bot.fetchModels(cs.agent, bot.chatWorkdir(chatId));
+  // Match priority:
+  //   - if a Profile is bound, only the row carrying that profileId is current
+  //     (two Profiles can share a modelId, so id-equality alone is ambiguous);
+  //   - otherwise only `'native'` rows are eligible to match against the
+  //     user-config model id.
   return {
     agent: cs.agent,
     currentModel,
     sources: res.sources,
     note: res.note ?? null,
-    models: res.models.map(m => ({
-      id: m.id,
-      alias: m.alias ?? null,
-      isCurrent: modelMatchesSelection(cs.agent, m.id, currentModel),
-    })),
+    models: res.models.map(m => {
+      const group = m.group ?? 'native';
+      const isProfileRow = group !== 'native';
+      const isCurrent = activeProfileId
+        ? !!m.profileId && m.profileId === activeProfileId
+        : !isProfileRow && modelMatchesSelection(cs.agent, m.id, currentModel);
+      return {
+        id: m.id,
+        alias: m.alias ?? null,
+        isCurrent,
+        group,
+        profileId: m.profileId ?? null,
+        providerName: m.providerName ?? null,
+      };
+    }),
     effort: buildEffortData(bot, cs.agent),
   };
 }

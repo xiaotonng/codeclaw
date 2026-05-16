@@ -804,6 +804,8 @@ const HermesDriver: AgentDriver = {
   // hook exists but is unreliable across providers in current Hermes builds, so
   // pikiclaw treats the model as fixed for the session and hides the picker.
   capabilities: { fork: false, modelSwitch: false },
+  // Hermes is BYOK-only — every Profile kind is fair game.
+  acceptedProviderKinds: ['anthropic', 'openai', 'openai-compatible', 'google'],
   doStream: doHermesStream,
   getSessions: getHermesSessions,
   getSessionTail: getHermesSessionTail,

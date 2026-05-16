@@ -1,26 +1,39 @@
 /**
  * Local Models section — sits on the Agents page after `<ModelsSection>`.
  *
- * UX shape mirrors "接入新供应商" deliberately: a flat tile grid of backends
- * (Ollama / LM Studio), each opening a modal that walks the user through
- * detection → model install/verify → connect-to-agents. Once connected, the
- * backend appears in the Model Providers list above as a regular provider
- * (no extra UI here — the provider card carries it from then on).
+ * Two pluggable backends today: Ollama (cross-platform default) and mlx-lm
+ * (Apple Silicon native peak performance). UX shape mirrors the Extensions →
+ * CLI page on purpose:
  *
- * Hardware fit:
- *   The host's total unified memory comes from /api/host (already in the
- *   store). For each curated model we compare against `minRamGb`:
- *     totalGb ≥ minRamGb + 4   → ✅ comfortable
- *     totalGb ≥ minRamGb        → ⚠️ tight
- *     otherwise                 → ❌ won't fit
- *   The +4 GB headroom matches what Ollama recommends for the OS + KV cache.
+ *   1. Tile grid: Ollama + mlx-lm, each opens a modal.
+ *   2. Modal step A — Status: probe + version + brew/pipx install commands
+ *      for the current OS, plus the "start the server" command.
+ *   3. Modal step B — Models: list installed; for the recommended catalog, show
+ *      the user-runnable shell command (`ollama pull <tag>` / `mlx_lm.server
+ *      --model <repo>`) with a copy button. We deliberately do NOT stream
+ *      downloads from the dashboard — they take minutes-to-hours and the user
+ *      is better served running them in a real terminal where Ctrl-C works.
+ *
+ * There is no "connect to agents" step: a detected backend is auto-attached
+ * server-side and shows up as a Provider in the Model Providers list above.
+ * When that happens during a probe, we call `onConnected` so the upper layers
+ * refetch and the agent dropdowns see the new provider without a page reload.
+ *
+ * Hardware fit: host total RAM from /api/host vs each entry's `minRamGb`.
+ *   totalGb ≥ minRamGb + 4   → ok
+ *   totalGb ≥ minRamGb        → tight
+ *   otherwise                 → no-go
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, type OllamaPullEvent } from '../../api';
+import { api } from '../../api';
 import { useStore } from '../../store';
 import type { Locale } from '../../i18n';
-import type { LocalBackendStatus, LocalModelCatalogEntry } from '../../types';
+import type {
+  LocalBackendStatus,
+  LocalBackendOs,
+  LocalModelCatalogEntry,
+} from '../../types';
 import { BrandIcon } from '../../components/BrandIcon';
 import { Badge, Button, Spinner, Modal, ModalHeader } from '../../components/ui';
 import { ActionBar } from '../shared';
@@ -42,30 +55,28 @@ interface Copy {
   // Tile
   tileStatusDetected: string;
   tileStatusNotDetected: string;
-  tileStatusConnected: string;
-  tileBadgeReadyToConnect: string;
-  tileBadgeConnectedWithModels: (n: number) => string;
+  tileStatusUnsupported: string;
+  tileBadgeReady: (n: number) => string;
   tileBlurbOllama: string;
-  tileBlurbLmstudio: string;
-  tileNotDetectedHint: string;
+  tileBlurbMlx: string;
   tileInstalledModels: (n: number) => string;
 
-  // Modal — generic shell
   modalTitle: (label: string) => string;
   modalDescription: (label: string) => string;
   stepStatus: string;
   stepModels: string;
-  stepConnect: string;
 
-  // Step 1 — backend status
   statusRunning: string;
   statusNotRunning: string;
+  statusUnsupportedDesc: (label: string) => string;
   statusRecheck: string;
   statusRechecking: string;
-  statusInstallHint: (label: string) => string;
+  statusInstallHeader: string;
+  statusInstallDocs: string;
+  statusRunHint: string;
   statusHomepageCta: string;
+  statusAutoAttachedHint: (label: string) => string;
 
-  // Step 2 — models
   modelsInstalledHeader: (n: number) => string;
   modelsInstalledEmpty: string;
   modelsRecommendedHeader: string;
@@ -74,39 +85,17 @@ interface Copy {
   fitTight: string;
   fitNoGo: string;
   modelInstalledBadge: string;
-  pullCta: string;
-  pullInProgress: string;
-  pullCancel: string;
-  pullStatusManifest: string;
-  pullStatusVerifying: string;
-  pullStatusWriting: string;
-  pullStatusDone: string;
-  pullFailed: string;
-  pullCommandHint: string;
+  pullPrefix: string;
   copyCommand: string;
   copied: string;
 
-  // Step 3 — connect
-  connectCta: string;
-  connecting: string;
-  connectedBadge: string;
-  connectHint: string;
-  connectAvailableHint: string;
-  connectNeedsBackend: string;
   closeBtn: string;
-  cancelBtn: string;
-
-  // Toasts
-  toastConnected: string;
-  toastAlreadyConnected: string;
-  toastConnectFailed: string;
-  toastPulled: string;
 }
 
 function getCopy(locale: Locale): Copy {
   if (locale === 'zh-CN') {
     return {
-      sectionLabel: '接入本地后端',
+      sectionLabel: '本地后端',
       hostLabel: '本机',
       hostUnknown: '检测中…',
       refresh: '刷新',
@@ -115,65 +104,46 @@ function getCopy(locale: Locale): Copy {
 
       tileStatusDetected: '已运行',
       tileStatusNotDetected: '未检测到',
-      tileStatusConnected: '已接入',
-      tileBadgeReadyToConnect: '可接入',
-      tileBadgeConnectedWithModels: n => `可用 ${n} 个模型`,
-      tileBlurbOllama: '本地一键拉取开源模型，OpenAI 兼容端口',
-      tileBlurbLmstudio: '可视化加载 GGUF 模型，零配置 OpenAI 端口',
-      tileNotDetectedHint: '未在本机检测到，点击查看安装与接入流程',
-      tileInstalledModels: n => `已下载 ${n} 个模型`,
+      tileStatusUnsupported: '不支持当前系统',
+      tileBadgeReady: n => `${n} 个模型已就绪`,
+      tileBlurbOllama: '跨平台默认，CLI 友好，模型下载到本地后常驻',
+      tileBlurbMlx: 'Apple Silicon 原生，性能压榨极限，按需启动',
+      tileInstalledModels: n => `${n} 个模型`,
 
-      modalTitle: label => `接入 ${label}`,
-      modalDescription: label => `按顺序完成 3 步：检测后端、安装/校验模型、接入到智能体。完成后 ${label} 会作为一个供应商出现在上方模型供应商列表中。`,
+      modalTitle: label => `准备 ${label}`,
+      modalDescription: label => `安装 ${label}、下载所需模型、核对运行状态——本地模型的全部配置都在这里完成。`,
       stepStatus: '后端状态',
       stepModels: '模型',
-      stepConnect: '接入智能体',
 
       statusRunning: '已运行',
       statusNotRunning: '未在本机检测到此后端',
+      statusUnsupportedDesc: label => `${label} 不支持当前系统。`,
       statusRecheck: '重新检测',
       statusRechecking: '检测中…',
-      statusInstallHint: label => `安装并启动 ${label}，然后点击重新检测。`,
+      statusInstallHeader: '安装命令',
+      statusInstallDocs: '官方安装文档',
+      statusRunHint: '启动服务（安装后）',
       statusHomepageCta: '官网',
+      statusAutoAttachedHint: label => `本地 ${label} 已在运行；继续在下方下载并核对所需模型。`,
 
-      modelsInstalledHeader: n => `已安装（${n}）`,
-      modelsInstalledEmpty: '尚未下载任何模型。',
-      modelsRecommendedHeader: '推荐安装',
-      modelsBackendOffline: '启动后端后即可在此安装和管理模型。',
+      modelsInstalledHeader: n => `已就绪（${n}）`,
+      modelsInstalledEmpty: '后端在线，但尚未加载任何模型。在终端按下方命令准备一个。',
+      modelsRecommendedHeader: '推荐模型 · 在终端执行以下命令准备',
+      modelsBackendOffline: '启动后端后再返回此处准备模型。',
       fitOk: '推荐',
       fitTight: '勉强可跑',
       fitNoGo: '内存不足',
-      modelInstalledBadge: '已安装',
-      pullCta: '下载',
-      pullInProgress: '下载中',
-      pullCancel: '取消',
-      pullStatusManifest: '获取清单…',
-      pullStatusVerifying: '校验中…',
-      pullStatusWriting: '写入中…',
-      pullStatusDone: '下载完成',
-      pullFailed: '下载失败',
-      pullCommandHint: 'LM Studio 没有 HTTP 拉取接口，请在终端执行：',
-      copyCommand: '复制命令',
+      modelInstalledBadge: '已就绪',
+      pullPrefix: '终端执行',
+      copyCommand: '复制',
       copied: '已复制',
 
-      connectCta: '接入',
-      connecting: '接入中…',
-      connectedBadge: '已接入',
-      connectHint: '接入后会作为一个供应商出现在「模型供应商」中，并可绑定到任意智能体卡片。',
-      connectAvailableHint: '后端已就绪，可立即接入。即使尚未下载模型，也可以稍后再来下载。',
-      connectNeedsBackend: '请先启动后端后再接入。',
       closeBtn: '完成',
-      cancelBtn: '取消',
-
-      toastConnected: '已接入，可在智能体卡片选择该供应商',
-      toastAlreadyConnected: '此后端已接入',
-      toastConnectFailed: '接入失败',
-      toastPulled: '模型已下载',
     };
   }
   return {
-    sectionLabel: 'Connect local backend',
-    hostLabel: 'This Mac',
+    sectionLabel: 'Local backends',
+    hostLabel: 'This machine',
     hostUnknown: 'Detecting…',
     refresh: 'Refresh',
     refreshing: 'Refreshing…',
@@ -181,60 +151,41 @@ function getCopy(locale: Locale): Copy {
 
     tileStatusDetected: 'Running',
     tileStatusNotDetected: 'Not detected',
-    tileStatusConnected: 'Connected',
-    tileBadgeReadyToConnect: 'Ready to connect',
-    tileBadgeConnectedWithModels: n => `${n} models available`,
-    tileBlurbOllama: 'One-click open-source models, OpenAI-compatible endpoint',
-    tileBlurbLmstudio: 'Visual GGUF loader, zero-config OpenAI endpoint',
-    tileNotDetectedHint: 'Not detected on this machine — click to see install + connect steps',
-    tileInstalledModels: n => `${n} models pulled`,
+    tileStatusUnsupported: 'Not supported on this OS',
+    tileBadgeReady: n => `${n} models ready`,
+    tileBlurbOllama: 'Cross-platform default, CLI-friendly, models persist on disk',
+    tileBlurbMlx: 'Apple Silicon native, peak performance, on-demand launch',
+    tileInstalledModels: n => `${n} models`,
 
-    modalTitle: label => `Connect ${label}`,
-    modalDescription: label => `Walk through 3 steps: detect the backend, install/verify models, connect to agents. After connecting, ${label} appears as a provider in the Model Providers list above.`,
+    modalTitle: label => `Prepare ${label}`,
+    modalDescription: label => `Install ${label}, download the models you want, and verify they're running — all the local-model configuration lives in this panel.`,
     stepStatus: 'Backend status',
     stepModels: 'Models',
-    stepConnect: 'Connect to agents',
 
     statusRunning: 'Running',
     statusNotRunning: 'Backend not detected on this machine',
+    statusUnsupportedDesc: label => `${label} does not run on this OS.`,
     statusRecheck: 'Re-check',
     statusRechecking: 'Checking…',
-    statusInstallHint: label => `Install and launch ${label}, then click Re-check.`,
+    statusInstallHeader: 'Install commands',
+    statusInstallDocs: 'Official install docs',
+    statusRunHint: 'Start the server (after install)',
     statusHomepageCta: 'Homepage',
+    statusAutoAttachedHint: label => `Local ${label} is running. Continue below to download and verify the models you need.`,
 
-    modelsInstalledHeader: n => `Installed (${n})`,
-    modelsInstalledEmpty: 'No models pulled yet.',
-    modelsRecommendedHeader: 'Recommended',
-    modelsBackendOffline: 'Launch the backend to install or manage models here.',
+    modelsInstalledHeader: n => `Ready (${n})`,
+    modelsInstalledEmpty: 'Backend is up but no model is loaded. Use the command below to prepare one.',
+    modelsRecommendedHeader: 'Recommended models — run these in your terminal',
+    modelsBackendOffline: 'Start the backend first, then come back to prepare models.',
     fitOk: 'Recommended',
     fitTight: 'Tight fit',
     fitNoGo: 'Not enough RAM',
-    modelInstalledBadge: 'Installed',
-    pullCta: 'Download',
-    pullInProgress: 'Downloading',
-    pullCancel: 'Cancel',
-    pullStatusManifest: 'Fetching manifest…',
-    pullStatusVerifying: 'Verifying…',
-    pullStatusWriting: 'Writing manifest…',
-    pullStatusDone: 'Download complete',
-    pullFailed: 'Download failed',
-    pullCommandHint: 'LM Studio has no HTTP pull API; run this in a terminal:',
+    modelInstalledBadge: 'Ready',
+    pullPrefix: 'Run in terminal',
     copyCommand: 'Copy',
     copied: 'Copied',
 
-    connectCta: 'Connect',
-    connecting: 'Connecting…',
-    connectedBadge: 'Connected',
-    connectHint: 'Once connected, this backend appears as a provider in Model Providers above and can be bound to any agent card.',
-    connectAvailableHint: 'Backend is ready. You can connect now and pull models later.',
-    connectNeedsBackend: 'Start the backend first, then connect.',
     closeBtn: 'Done',
-    cancelBtn: 'Cancel',
-
-    toastConnected: 'Connected — pick it in any agent\'s Provider dropdown',
-    toastAlreadyConnected: 'Backend is already connected',
-    toastConnectFailed: 'Connect failed',
-    toastPulled: 'Model downloaded',
   };
 }
 
@@ -251,10 +202,10 @@ function fitFor(totalGb: number | null, minRamGb: number): Fit {
   return 'no-go';
 }
 
-function pullCommandFor(backend: 'ollama' | 'lmstudio', entry: LocalModelCatalogEntry): string | null {
-  if (backend === 'ollama' && entry.ollamaTag) return `ollama pull ${entry.ollamaTag}`;
-  if (backend === 'lmstudio' && entry.lmstudioId) return `lms get ${entry.lmstudioId}`;
-  return null;
+function pullCommandFor(backend: LocalBackendStatus, entry: LocalModelCatalogEntry): string | null {
+  const id = backend.id === 'ollama' ? entry.ollamaTag : entry.mlxModel;
+  if (!id) return null;
+  return backend.pullCommandTemplate.replace('${model}', id);
 }
 
 function formatGb(bytes: number | undefined | null): string {
@@ -270,14 +221,12 @@ function formatModelSize(bytes: number | undefined): string {
   return `${mb.toFixed(0)} MB`;
 }
 
-/** Filter the catalog to entries relevant to one backend. */
-function catalogFor(backendId: 'ollama' | 'lmstudio', catalog: LocalModelCatalogEntry[]): LocalModelCatalogEntry[] {
-  return catalog.filter(e => backendId === 'ollama' ? !!e.ollamaTag : !!e.lmstudioId);
+function catalogFor(backend: LocalBackendStatus, catalog: LocalModelCatalogEntry[]): LocalModelCatalogEntry[] {
+  return catalog.filter(e => backend.id === 'ollama' ? !!e.ollamaTag : !!e.mlxModel);
 }
 
-/** Whether a catalog entry is satisfied by an installed model on this backend. */
 function entryInstalledOn(entry: LocalModelCatalogEntry, backend: LocalBackendStatus): string | null {
-  const tag = backend.id === 'ollama' ? entry.ollamaTag : entry.lmstudioId;
+  const tag = backend.id === 'ollama' ? entry.ollamaTag : entry.mlxModel;
   if (!tag) return null;
   const base = tag.split(':')[0].toLowerCase();
   for (const m of backend.models) {
@@ -287,51 +236,26 @@ function entryInstalledOn(entry: LocalModelCatalogEntry, backend: LocalBackendSt
 }
 
 // ---------------------------------------------------------------------------
-// Pull progress state
-// ---------------------------------------------------------------------------
-
-interface PullState {
-  status: 'idle' | 'running' | 'done' | 'error';
-  fraction: number | null;
-  phase: string;
-  error: string | null;
-}
-
-const IDLE_PULL: PullState = { status: 'idle', fraction: null, phase: '', error: null };
-
-function describePhase(evt: OllamaPullEvent, copy: Copy): { phase: string; fraction: number | null } {
-  if (evt.error) return { phase: evt.error, fraction: null };
-  const status = (evt.status || '').toLowerCase();
-  if (status.startsWith('pulling manifest')) return { phase: copy.pullStatusManifest, fraction: null };
-  if (status.startsWith('verifying')) return { phase: copy.pullStatusVerifying, fraction: null };
-  if (status.startsWith('writing')) return { phase: copy.pullStatusWriting, fraction: null };
-  if (status === 'success') return { phase: copy.pullStatusDone, fraction: 1 };
-  if (status.startsWith('downloading') && typeof evt.total === 'number' && typeof evt.completed === 'number' && evt.total > 0) {
-    return { phase: `${Math.round((evt.completed / evt.total) * 100)}%`, fraction: evt.completed / evt.total };
-  }
-  return { phase: evt.status || '', fraction: null };
-}
-
-// ---------------------------------------------------------------------------
-// Shared probe hook — used by the section, the modal, and (optionally) by
-// ModelsSection so configured local backends can display their installed models.
+// Shared probe hook
 // ---------------------------------------------------------------------------
 
 export interface LocalBackendsSnapshot {
   backends: LocalBackendStatus[];
   catalog: LocalModelCatalogEntry[];
+  currentOs: LocalBackendOs | null;
   loading: boolean;
   error: string | null;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<{ addedProviderIds: string[] }>;
 }
 
 export function useLocalBackends(): LocalBackendsSnapshot {
   const [backends, setBackends] = useState<LocalBackendStatus[]>([]);
   const [catalog, setCatalog] = useState<LocalModelCatalogEntry[]>([]);
+  const [currentOs, setCurrentOs] = useState<LocalBackendOs | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<{ addedProviderIds: string[] }> => {
     setLoading(true);
     setError(null);
     try {
@@ -339,8 +263,11 @@ export function useLocalBackends(): LocalBackendsSnapshot {
       if (!res.ok) throw new Error(res.error || 'Failed to load local backends');
       setBackends(res.backends || []);
       setCatalog(res.catalog || []);
+      setCurrentOs(res.currentOs ?? null);
+      return { addedProviderIds: res.addedProviderIds ?? [] };
     } catch (e: any) {
       setError(e?.message || String(e));
+      return { addedProviderIds: [] };
     } finally {
       setLoading(false);
     }
@@ -348,11 +275,11 @@ export function useLocalBackends(): LocalBackendsSnapshot {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  return { backends, catalog, loading, error, refresh };
+  return { backends, catalog, currentOs, loading, error, refresh };
 }
 
 // ---------------------------------------------------------------------------
-// Tile card — matches the TemplateCard look used in ModelsSection
+// Tile
 // ---------------------------------------------------------------------------
 
 function BackendTile({
@@ -365,25 +292,17 @@ function BackendTile({
   locale: Locale;
   onClick: () => void;
 }) {
-  const isConnected = !!backend.existingProviderId;
-  const blurb = backend.id === 'ollama' ? copy.tileBlurbOllama : copy.tileBlurbLmstudio;
+  const unsupported = !backend.supportedOnThisOs;
+  const blurb = backend.id === 'ollama' ? copy.tileBlurbOllama : copy.tileBlurbMlx;
 
-  // Same rule as ProviderTile: only show a badge when it's load-bearing.
-  //   ok   — connected & usable (with model count when known)
-  //   warn — running locally but not yet hooked up — there's an action to take
-  //   (no badge) — not detected; this is the default state for a fresh
-  //                machine and shouldn't read as an action item
-  const badge = isConnected
-    ? <Badge variant="ok">{backend.models.length > 0
-        ? copy.tileBadgeConnectedWithModels(backend.models.length)
-        : copy.tileStatusConnected}</Badge>
+  // Single status: detected backends are auto-attached, so the only signal we
+  // need is "running with N models" vs "not detected".
+  const badge = unsupported
+    ? <Badge variant="muted">{copy.tileStatusUnsupported}</Badge>
     : backend.detected
-      ? <Badge variant="warn">{copy.tileBadgeReadyToConnect}</Badge>
+      ? <Badge variant="ok">{copy.tileBadgeReady(backend.models.length)}</Badge>
       : null;
 
-  // Detail line: when the backend is running, show version + model count so
-  // the user immediately knows what's on disk; otherwise show the marketing
-  // blurb so the tile still has a one-liner of copy.
   const detail = backend.detected
     ? `${backend.version ? `v${backend.version} · ` : ''}${copy.tileInstalledModels(backend.models.length)}`
     : blurb;
@@ -407,7 +326,7 @@ function BackendTile({
 }
 
 // ---------------------------------------------------------------------------
-// Modal — install + verify + connect flow for one backend
+// Shared step header / chips / command row
 // ---------------------------------------------------------------------------
 
 function StepHeader({ index, label, done }: { index: number; label: string; done?: boolean }) {
@@ -436,177 +355,128 @@ function InstalledModelChip({ name, sizeBytes }: { name: string; sizeBytes?: num
   );
 }
 
+function CommandRow({
+  label,
+  cmd,
+  copy,
+  onCopy,
+}: {
+  label?: string;
+  cmd: string;
+  copy: Copy;
+  onCopy: (cmd: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <code
+        className="flex-1 truncate rounded-md border border-edge bg-panel px-2.5 py-1.5 font-mono text-[12px] text-fg-3"
+        title={cmd}
+      >
+        {label && <span className="mr-2 text-fg-5">{label}</span>}
+        {cmd}
+      </code>
+      <button
+        type="button"
+        onClick={() => onCopy(cmd)}
+        className="shrink-0 rounded-md border border-edge bg-panel-alt px-2 py-1 text-[11px] text-fg-3 transition hover:border-edge-strong hover:bg-panel"
+      >
+        {copy.copyCommand}
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Catalog row
+// ---------------------------------------------------------------------------
+
 function CatalogRow({
   entry,
   backend,
   totalRamGb,
-  pull,
   copy,
   locale,
-  onStartPull,
-  onCancelPull,
-  onCopyHint,
+  onCopy,
 }: {
   entry: LocalModelCatalogEntry;
   backend: LocalBackendStatus;
   totalRamGb: number | null;
-  pull: PullState;
   copy: Copy;
   locale: Locale;
-  onStartPull: (entry: LocalModelCatalogEntry) => void;
-  onCancelPull: (entry: LocalModelCatalogEntry) => void;
-  onCopyHint: (cmd: string) => void;
+  onCopy: (cmd: string) => void;
 }) {
   const fit = fitFor(totalRamGb, entry.minRamGb);
   const blurb = locale === 'zh-CN' ? entry.descriptionZh : entry.description;
   const installedId = entryInstalledOn(entry, backend);
-  const isOllama = backend.id === 'ollama';
-  const cmd = pullCommandFor(backend.id, entry);
-
-  // Right-side action:
-  //   1) installed → nothing (badge alone is enough)
-  //   2) RAM won't fit → nothing
-  //   3) Ollama backend running + has tag → in-app pull with progress
-  //   4) Ollama backend NOT running → muted "start backend" hint
-  //   5) LM Studio → command copy chip (no HTTP pull API)
-  let action: 'pull' | 'lm-copy' | 'wait' | 'none' = 'none';
-  if (!installedId && fit !== 'no-go') {
-    if (isOllama && backend.detected && entry.ollamaTag) action = 'pull';
-    else if (isOllama && !backend.detected) action = 'wait';
-    else if (!isOllama && cmd) action = 'lm-copy';
-  }
+  const cmd = pullCommandFor(backend, entry);
 
   return (
     <div className="rounded-md border border-edge bg-panel-alt px-3 py-2.5">
-      <div className="flex flex-wrap items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="text-[13px] font-semibold text-fg">{entry.name}</div>
-            <span className="text-[11px] text-fg-5">{entry.publisher}</span>
-            {fit === 'ok' && <Badge variant="ok">{copy.fitOk}</Badge>}
-            {fit === 'tight' && <Badge variant="warn">{copy.fitTight}</Badge>}
-            {fit === 'no-go' && <Badge variant="err">{copy.fitNoGo}</Badge>}
-            {installedId && <Badge variant="accent">{copy.modelInstalledBadge}</Badge>}
-          </div>
-          <div className="mt-1 text-[12px] leading-relaxed text-fg-4">{blurb}</div>
-          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-fg-5">
-            <span>{entry.paramsB}B params</span>
-            <span>{entry.sizeGb} GB on disk</span>
-            <span>≥ {entry.minRamGb} GB RAM</span>
-            {entry.homepage && (
-              <a
-                href={entry.homepage}
-                target="_blank"
-                rel="noreferrer"
-                className="text-accent underline-offset-2 hover:underline"
-              >
-                {locale === 'zh-CN' ? '模型主页' : 'Model card'}
-              </a>
-            )}
-          </div>
-
-          {(pull.status === 'running' || pull.status === 'error') && (
-            <div className="mt-2">
-              <div className="flex items-center justify-between text-[11px] text-fg-4">
-                <span>{pull.status === 'error' ? `${copy.pullFailed}: ${pull.error}` : pull.phase}</span>
-                {pull.status === 'running' && (
-                  <button
-                    type="button"
-                    onClick={() => onCancelPull(entry)}
-                    className="text-[11px] text-fg-5 underline-offset-2 hover:text-fg-3 hover:underline"
-                  >
-                    {copy.pullCancel}
-                  </button>
-                )}
-              </div>
-              <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-panel">
-                <div
-                  className={pull.status === 'error' ? 'h-full bg-rose-500/70' : 'h-full bg-accent'}
-                  style={{
-                    width: pull.fraction !== null
-                      ? `${Math.max(2, Math.round(pull.fraction * 100))}%`
-                      : '12%',
-                    transition: 'width 200ms linear',
-                    animation: pull.fraction === null && pull.status === 'running'
-                      ? 'pulse 1.6s ease-in-out infinite'
-                      : undefined,
-                  }}
-                />
-              </div>
-            </div>
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="text-[13px] font-semibold text-fg">{entry.name}</div>
+          <span className="text-[11px] text-fg-5">{entry.publisher}</span>
+          {fit === 'ok' && <Badge variant="ok">{copy.fitOk}</Badge>}
+          {fit === 'tight' && <Badge variant="warn">{copy.fitTight}</Badge>}
+          {fit === 'no-go' && <Badge variant="err">{copy.fitNoGo}</Badge>}
+          {installedId && <Badge variant="accent">{copy.modelInstalledBadge}</Badge>}
+        </div>
+        <div className="text-[12px] leading-relaxed text-fg-4">{blurb}</div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-fg-5">
+          <span>{entry.paramsB}B params</span>
+          <span>{entry.sizeGb} GB on disk</span>
+          <span>≥ {entry.minRamGb} GB RAM</span>
+          {entry.homepage && (
+            <a
+              href={entry.homepage}
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent underline-offset-2 hover:underline"
+            >
+              {locale === 'zh-CN' ? '模型主页' : 'Model card'}
+            </a>
           )}
         </div>
-
-        <div className="flex shrink-0 items-center gap-2 self-start">
-          {action === 'pull' && (
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={pull.status === 'running'}
-              onClick={() => onStartPull(entry)}
-            >
-              {pull.status === 'running'
-                ? <><Spinner className="h-3 w-3" /> {pull.phase || copy.pullInProgress}</>
-                : copy.pullCta}
-            </Button>
-          )}
-          {action === 'lm-copy' && cmd && (
-            <button
-              type="button"
-              onClick={() => onCopyHint(cmd)}
-              className="rounded-md border border-edge bg-panel px-2 py-1 font-mono text-[11px] text-fg-3 transition hover:border-edge-strong hover:bg-panel-alt"
-              title={copy.copyCommand}
-            >
-              {cmd}
-            </button>
-          )}
-          {action === 'wait' && (
-            <span className="text-[11px] text-fg-5">{copy.connectNeedsBackend}</span>
-          )}
-        </div>
+        {!installedId && fit !== 'no-go' && cmd && (
+          <CommandRow label={copy.pullPrefix} cmd={cmd} copy={copy} onCopy={onCopy} />
+        )}
       </div>
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Modal — status + models. No connect step: detected backends auto-attach.
+// ---------------------------------------------------------------------------
 
 function LocalBackendModal({
   open,
   backend,
   catalog,
   totalRamGb,
+  currentOs,
   copy,
   locale,
-  busyConnect,
   onClose,
-  onConnect,
   onRefresh,
-  onStartPull,
-  onCancelPull,
-  pulls,
-  onCopyHint,
+  onCopy,
 }: {
   open: boolean;
   backend: LocalBackendStatus | null;
   catalog: LocalModelCatalogEntry[];
   totalRamGb: number | null;
+  currentOs: LocalBackendOs | null;
   copy: Copy;
   locale: Locale;
-  busyConnect: boolean;
   onClose: () => void;
-  onConnect: (backend: LocalBackendStatus) => Promise<void>;
-  onRefresh: () => Promise<void>;
-  onStartPull: (entry: LocalModelCatalogEntry) => void;
-  onCancelPull: (entry: LocalModelCatalogEntry) => void;
-  pulls: Record<string, PullState>;
-  onCopyHint: (cmd: string) => void;
+  onRefresh: () => Promise<{ addedProviderIds: string[] }>;
+  onCopy: (cmd: string) => void;
 }) {
   const [rechecking, setRechecking] = useState(false);
   useEffect(() => { setRechecking(false); }, [backend?.detected, backend?.id]);
 
-  // Hooks must run unconditionally — derive a stable empty list when backend
-  // is null and bail out below.
   const backendCatalog = useMemo(
-    () => !backend ? [] : catalogFor(backend.id, catalog).sort((a, b) => {
+    () => !backend ? [] : catalogFor(backend, catalog).sort((a, b) => {
       const fa = fitFor(totalRamGb, a.minRamGb);
       const fb = fitFor(totalRamGb, b.minRamGb);
       const score = (f: Fit) => (f === 'ok' ? 0 : f === 'tight' ? 1 : 2);
@@ -619,8 +489,8 @@ function LocalBackendModal({
   );
 
   if (!backend) return null;
-  const isOllama = backend.id === 'ollama';
-  const isConnected = !!backend.existingProviderId;
+  const unsupported = !backend.supportedOnThisOs;
+  const installCommands = currentOs ? (backend.install[currentOs] || []) : [];
 
   const handleRecheck = async () => {
     setRechecking(true);
@@ -638,7 +508,7 @@ function LocalBackendModal({
         {/* Step 1 — Backend status */}
         <section className="space-y-2">
           <StepHeader index={1} label={copy.stepStatus} done={backend.detected} />
-          <div className="rounded-md border border-edge bg-panel-alt px-3.5 py-3">
+          <div className="space-y-2 rounded-md border border-edge bg-panel-alt px-3.5 py-3">
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-edge bg-panel">
                 <BrandIcon brand={backend.id} size={20} />
@@ -646,44 +516,89 @@ function LocalBackendModal({
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-[13px] font-semibold text-fg">{backend.label}</span>
-                  {backend.detected
-                    ? <Badge variant="ok">{copy.statusRunning}</Badge>
-                    : <Badge variant="muted">{copy.tileStatusNotDetected}</Badge>}
+                  {unsupported
+                    ? <Badge variant="muted">{copy.tileStatusUnsupported}</Badge>
+                    : backend.detected
+                      ? <Badge variant="ok">{copy.statusRunning}</Badge>
+                      : <Badge variant="muted">{copy.tileStatusNotDetected}</Badge>}
                 </div>
                 <div className="mt-1 text-[11px] leading-relaxed text-fg-5">
-                  {backend.detected ? (
+                  {unsupported ? (
+                    <>{copy.statusUnsupportedDesc(backend.label)}</>
+                  ) : backend.detected ? (
                     <>
                       {backend.version && <>v{backend.version} · </>}
                       <span className="font-mono">{backend.baseURL}</span>
                     </>
                   ) : (
-                    <>{copy.statusInstallHint(backend.label)}</>
+                    <>{copy.statusNotRunning}</>
                   )}
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {!backend.detected && backend.installHint.brewFormula && (
-                  <code className="rounded-md border border-edge bg-panel px-2 py-1 text-[11px] text-fg-3">
-                    brew install {backend.installHint.brewFormula}
-                  </code>
+                <a
+                  href={backend.homepage}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[12px] text-accent underline-offset-2 hover:underline"
+                >
+                  {copy.statusHomepageCta}
+                </a>
+                {!unsupported && (
+                  <Button variant="outline" size="sm" disabled={rechecking} onClick={() => void handleRecheck()}>
+                    {rechecking
+                      ? <><Spinner className="h-3 w-3" /> {copy.statusRechecking}</>
+                      : <><span aria-hidden="true">↻</span> {copy.statusRecheck}</>}
+                  </Button>
                 )}
-                {!backend.detected && (
-                  <a
-                    href={backend.installHint.homepage}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[12px] text-accent underline-offset-2 hover:underline"
-                  >
-                    {copy.statusHomepageCta}
-                  </a>
-                )}
-                <Button variant="outline" size="sm" disabled={rechecking} onClick={() => void handleRecheck()}>
-                  {rechecking
-                    ? <><Spinner className="h-3 w-3" /> {copy.statusRechecking}</>
-                    : <><span aria-hidden="true">↻</span> {copy.statusRecheck}</>}
-                </Button>
               </div>
             </div>
+
+            {/* Auto-attached confirmation when the backend is running — gives a
+                clear answer to "did pikiclaw see it?" without making the user
+                click anything. */}
+            {!unsupported && backend.detected && backend.existingProviderId && (
+              <div className="rounded-md border border-emerald-700/20 bg-emerald-700/5 px-2.5 py-1.5 text-[11px] leading-relaxed text-emerald-700 dark:text-emerald-300">
+                {copy.statusAutoAttachedHint(backend.label)}
+              </div>
+            )}
+
+            {/* Install + run commands — CLI-style. Hidden once detected. */}
+            {!unsupported && !backend.detected && (
+              <div className="space-y-2 pt-1">
+                {installCommands.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-fg-5">
+                      {copy.statusInstallHeader}
+                    </div>
+                    {installCommands.map((c, i) => (
+                      <CommandRow key={i} label={c.label} cmd={c.cmd} copy={copy} onCopy={onCopy} />
+                    ))}
+                    {backend.install.docs && (
+                      <a
+                        href={backend.install.docs}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[11px] text-accent underline-offset-2 hover:underline"
+                      >
+                        {copy.statusInstallDocs} →
+                      </a>
+                    )}
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-fg-5">
+                    {copy.statusRunHint}
+                  </div>
+                  <CommandRow
+                    label={backend.runHint.label}
+                    cmd={backend.runHint.cmd}
+                    copy={copy}
+                    onCopy={onCopy}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </section>
 
@@ -697,7 +612,6 @@ function LocalBackendModal({
             </div>
           ) : (
             <div className="space-y-3">
-              {/* Installed */}
               <div className="rounded-md border border-edge bg-panel-alt px-3.5 py-3">
                 <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-fg-5">
                   {copy.modelsInstalledHeader(backend.models.length)}
@@ -713,7 +627,6 @@ function LocalBackendModal({
                 )}
               </div>
 
-              {/* Recommended catalog */}
               {backendCatalog.length > 0 && (
                 <div className="space-y-2">
                   <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-fg-5">
@@ -726,65 +639,21 @@ function LocalBackendModal({
                         entry={entry}
                         backend={backend}
                         totalRamGb={totalRamGb}
-                        pull={pulls[entry.id] ?? IDLE_PULL}
                         copy={copy}
                         locale={locale}
-                        onStartPull={onStartPull}
-                        onCancelPull={onCancelPull}
-                        onCopyHint={onCopyHint}
+                        onCopy={onCopy}
                       />
                     ))}
                   </div>
-                  {!isOllama && (
-                    <div className="text-[11px] leading-relaxed text-fg-5">{copy.pullCommandHint}</div>
-                  )}
                 </div>
               )}
             </div>
           )}
         </section>
-
-        {/* Step 3 — Connect to agents */}
-        <section className="space-y-2">
-          <StepHeader index={3} label={copy.stepConnect} done={isConnected} />
-          <div className="rounded-md border border-edge bg-panel-alt px-3.5 py-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  {isConnected
-                    ? <Badge variant="accent">{copy.connectedBadge}</Badge>
-                    : backend.detected
-                      ? <Badge variant="ok">{copy.statusRunning}</Badge>
-                      : <Badge variant="muted">{copy.tileStatusNotDetected}</Badge>}
-                </div>
-                <div className="mt-1 text-[12px] leading-relaxed text-fg-4">
-                  {isConnected
-                    ? copy.connectHint
-                    : backend.detected
-                      ? copy.connectAvailableHint
-                      : copy.connectNeedsBackend}
-                </div>
-              </div>
-              {!isConnected && (
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={!backend.detected || busyConnect}
-                  onClick={() => void onConnect(backend)}
-                >
-                  {busyConnect ? <><Spinner className="h-3 w-3" /> {copy.connecting}</> : copy.connectCta}
-                </Button>
-              )}
-            </div>
-          </div>
-        </section>
       </div>
 
       <div className="mt-6 border-t border-edge pt-4">
-        <ActionBar
-          primary={{ label: copy.closeBtn, onClick: onClose }}
-          secondary={isConnected ? undefined : { label: copy.cancelBtn, onClick: onClose }}
-        />
+        <ActionBar primary={{ label: copy.closeBtn, onClick: onClose }} />
       </div>
     </Modal>
   );
@@ -799,139 +668,93 @@ export function LocalModelsSection({
   onConnected,
 }: {
   snapshot?: LocalBackendsSnapshot;
+  /**
+   * Called whenever a probe auto-attaches a new local backend as a Provider,
+   * so the host page can refetch upper-layer state (Model Providers, agent
+   * dropdowns) without the user reloading the page.
+   */
   onConnected?: () => void | Promise<void>;
 }) {
   const locale = useStore(s => s.locale);
-  const toast = useStore(s => s.toast);
   const host = useStore(s => s.host);
+  const toast = useStore(s => s.toast);
   const copy = useMemo(() => getCopy(locale), [locale]);
 
   const local = useLocalBackends();
-  // If a parent already owns the probe state (e.g. AgentTab lifting to share
-  // with ModelsSection), prefer that and skip our internal copy. We still
-  // mount the hook unconditionally to keep hook order stable.
   const eff = snapshot ?? local;
-  const { backends, catalog, loading, error, refresh } = eff;
+  const { backends, catalog, currentOs, loading, error, refresh } = eff;
 
-  const [openId, setOpenId] = useState<'ollama' | 'lmstudio' | null>(null);
-  const [connecting, setConnecting] = useState<string | null>(null);
-  const [pulls, setPulls] = useState<Record<string, PullState>>({});
-  const pullCancelsRef = useRef<Record<string, () => void>>({});
-
+  const [openId, setOpenId] = useState<LocalBackendStatus['id'] | null>(null);
   const openBackend = useMemo(
     () => backends.find(b => b.id === openId) ?? null,
     [backends, openId],
   );
 
-  const handleConnect = useCallback(async (b: LocalBackendStatus) => {
-    setConnecting(b.id);
-    try {
-      const res = await api.connectLocalBackend(b.id);
-      if (!res.ok) throw new Error(res.error || copy.toastConnectFailed);
-      toast(res.alreadyConnected ? copy.toastAlreadyConnected : copy.toastConnected);
-      await refresh();
-      if (onConnected) await onConnected();
-    } catch (e: any) {
-      toast(`${copy.toastConnectFailed}: ${e?.message || String(e)}`, false);
-    } finally {
-      setConnecting(null);
+  // Auto-attach happens server-side on every probe. When the probe response
+  // reports new provider ids, ping upper layers exactly once per event.
+  const lastAttachKeyRef = useRef<string>('');
+  useEffect(() => {
+    const ids = backends.map(b => b.existingProviderId || '').join(',');
+    if (ids === lastAttachKeyRef.current) return;
+    lastAttachKeyRef.current = ids;
+    if (onConnected && backends.some(b => b.existingProviderId)) {
+      void onConnected();
     }
-  }, [copy, onConnected, refresh, toast]);
+  }, [backends, onConnected]);
 
-  const handleCopyHint = useCallback((cmd: string) => {
+  const handleRefresh = useCallback(async () => {
+    const r = await refresh();
+    if (onConnected && r.addedProviderIds.length > 0) await onConnected();
+    return r;
+  }, [refresh, onConnected]);
+
+  const handleCopy = useCallback((cmd: string) => {
     void navigator.clipboard?.writeText(cmd);
     toast(copy.copied);
   }, [copy.copied, toast]);
-
-  const updatePull = useCallback((id: string, patch: Partial<PullState>) => {
-    setPulls(prev => ({ ...prev, [id]: { ...(prev[id] ?? IDLE_PULL), ...patch } }));
-  }, []);
-
-  const handleStartPull = useCallback(async (entry: LocalModelCatalogEntry) => {
-    if (!entry.ollamaTag) return;
-    const id = entry.id;
-    updatePull(id, { status: 'running', fraction: null, phase: copy.pullStatusManifest, error: null });
-    const stream = api.pullLocalModel('ollama', entry.ollamaTag);
-    pullCancelsRef.current[id] = stream.cancel;
-    let succeeded = false;
-    try {
-      for await (const evt of stream.events) {
-        if (evt.error) throw new Error(evt.error);
-        const { phase, fraction } = describePhase(evt, copy);
-        updatePull(id, { phase, fraction: fraction ?? null });
-        if (evt.status === 'success') { succeeded = true; }
-      }
-      if (succeeded) {
-        updatePull(id, { status: 'done', fraction: 1, phase: copy.pullStatusDone, error: null });
-        toast(copy.toastPulled);
-        await refresh();
-        // After a successful pull, auto-connect Ollama so the agent dropdown
-        // sees it immediately. The user already opted in by clicking Pull —
-        // no point making them press Connect separately.
-        const ollama = backends.find(b => b.id === 'ollama');
-        if (ollama && !ollama.existingProviderId) {
-          try {
-            await api.connectLocalBackend('ollama');
-            await refresh();
-          } catch { /* surfaced via connect handler if user retries explicitly */ }
-        }
-        if (onConnected) await onConnected();
-      } else {
-        updatePull(id, { status: 'error', error: copy.pullFailed, fraction: null });
-      }
-    } catch (e: any) {
-      const message = e?.name === 'AbortError' ? copy.pullCancel : (e?.message || String(e));
-      updatePull(id, { status: 'error', error: message, fraction: null });
-    } finally {
-      delete pullCancelsRef.current[id];
-    }
-  }, [backends, copy, onConnected, refresh, toast, updatePull]);
-
-  const handleCancelPull = useCallback((entry: LocalModelCatalogEntry) => {
-    const cancel = pullCancelsRef.current[entry.id];
-    if (cancel) cancel();
-  }, []);
-
-  useEffect(() => () => {
-    for (const cancel of Object.values(pullCancelsRef.current)) {
-      try { cancel(); } catch { /* swallow */ }
-    }
-  }, []);
 
   const totalRamGb = host?.totalMem ? host.totalMem / 1024 ** 3 : null;
   const hostSummary = host
     ? `${host.cpuModel || host.arch} · ${formatGb(host.totalMem)} RAM`
     : copy.hostUnknown;
 
-  // Backends always come back in a stable order (Ollama, LM Studio). The
-  // probe may take a moment on first paint — keep the tile grid mounted even
-  // while loading by falling back to placeholder cards.
+  // Two-tile placeholder while the first probe runs.
   const tiles: LocalBackendStatus[] = backends.length > 0
     ? backends
     : [
-        // Loading placeholders — same shape but obviously "not detected" so
-        // the modal copy still applies if the user clicks before probe done.
-        { id: 'ollama', label: 'Ollama', detected: false, baseURL: 'http://127.0.0.1:11434', openAIBaseURL: 'http://127.0.0.1:11434/v1', models: [], existingProviderId: null, installHint: { homepage: 'https://ollama.com/download', brewFormula: 'ollama' } },
-        { id: 'lmstudio', label: 'LM Studio', detected: false, baseURL: 'http://127.0.0.1:1234', openAIBaseURL: 'http://127.0.0.1:1234/v1', models: [], existingProviderId: null, installHint: { homepage: 'https://lmstudio.ai/' } },
+        {
+          id: 'ollama', label: 'Ollama', detected: false,
+          baseURL: 'http://127.0.0.1:11434', openAIBaseURL: 'http://127.0.0.1:11434/v1',
+          models: [], existingProviderId: null,
+          homepage: 'https://ollama.com/',
+          install: {}, runHint: { cmd: 'ollama serve' }, pullCommandTemplate: 'ollama pull ${model}',
+          supportedOnThisOs: true,
+        },
+        {
+          id: 'mlx', label: 'mlx-lm', detected: false,
+          baseURL: 'http://127.0.0.1:8080', openAIBaseURL: 'http://127.0.0.1:8080/v1',
+          models: [], existingProviderId: null,
+          homepage: 'https://github.com/ml-explore/mlx-lm',
+          install: {}, runHint: { cmd: 'mlx_lm.server --port 8080' }, pullCommandTemplate: 'mlx_lm.server --model ${model} --port 8080',
+          supportedOnThisOs: true,
+        },
       ];
 
   return (
     <div className="space-y-3">
-      {/* Host info row — kept compact, paired with refresh */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="text-[12px] text-fg-5">
           <span className="font-semibold uppercase tracking-[0.14em] text-fg-5">{copy.hostLabel}</span>
           <span className="mx-2 text-fg-6">·</span>
           <span className="text-fg-3">{hostSummary}</span>
         </div>
-        <Button variant="ghost" size="sm" onClick={() => void refresh()} disabled={loading}>
+        <Button variant="ghost" size="sm" onClick={() => void handleRefresh()} disabled={loading}>
           {loading
             ? <><Spinner className="h-3 w-3" /> {copy.refreshing}</>
             : <><span aria-hidden="true">↻</span> {copy.refresh}</>}
         </Button>
       </div>
 
-      {/* Tile grid — matches the "接入新供应商" grid in ModelsSection */}
       <div className="space-y-1.5 pt-1">
         <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-fg-5">{copy.sectionLabel}</div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -958,16 +781,12 @@ export function LocalModelsSection({
         backend={openBackend}
         catalog={catalog}
         totalRamGb={totalRamGb}
+        currentOs={currentOs}
         copy={copy}
         locale={locale}
-        busyConnect={!!openBackend && connecting === openBackend.id}
         onClose={() => setOpenId(null)}
-        onConnect={handleConnect}
-        onRefresh={refresh}
-        onStartPull={handleStartPull}
-        onCancelPull={handleCancelPull}
-        pulls={pulls}
-        onCopyHint={handleCopyHint}
+        onRefresh={handleRefresh}
+        onCopy={handleCopy}
       />
     </div>
   );

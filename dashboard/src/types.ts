@@ -224,11 +224,26 @@ export interface HostInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Local model backends (Ollama / LM Studio)
+// Local model backends (Ollama / mlx-lm)
 // ---------------------------------------------------------------------------
 
+export type LocalBackendId = 'ollama' | 'mlx';
+export type LocalBackendOs = 'darwin' | 'linux' | 'win';
+
+export interface LocalBackendInstallCommand {
+  label?: string;
+  cmd: string;
+}
+
+export interface LocalBackendInstallSpec {
+  darwin?: LocalBackendInstallCommand[];
+  linux?: LocalBackendInstallCommand[];
+  win?: LocalBackendInstallCommand[];
+  docs?: string;
+}
+
 export interface LocalBackendStatus {
-  id: 'ollama' | 'lmstudio';
+  id: LocalBackendId;
   label: string;
   detected: boolean;
   version?: string;
@@ -237,7 +252,14 @@ export interface LocalBackendStatus {
   models: Array<{ id: string; sizeBytes?: number }>;
   /** Provider id (in the BYOK layer) already pointing at this backend, if any. */
   existingProviderId: string | null;
-  installHint: { homepage: string; brewFormula?: string };
+  homepage: string;
+  install: LocalBackendInstallSpec;
+  /** How to start the server after install. */
+  runHint: LocalBackendInstallCommand;
+  /** Template for "pull/load a model". `${model}` is substituted client-side. */
+  pullCommandTemplate: string;
+  /** False when the current OS isn't in the backend's supported set (e.g. mlx on Linux). */
+  supportedOnThisOs: boolean;
 }
 
 export interface LocalModelCatalogEntry {
@@ -250,15 +272,20 @@ export interface LocalModelCatalogEntry {
   description: string;
   descriptionZh: string;
   ollamaTag?: string;
-  lmstudioId?: string;
+  mlxModel?: string;
   homepage?: string;
-  installed: { backend: 'ollama' | 'lmstudio'; id: string } | null;
+  installed: { backend: LocalBackendId; id: string } | null;
 }
 
 export interface LocalModelsProbeResponse {
   ok: boolean;
   backends?: LocalBackendStatus[];
   catalog?: LocalModelCatalogEntry[];
+  currentOs?: LocalBackendOs;
+  /** Provider ids that were created during this probe (auto-attach result).
+   *  When non-empty the dashboard should refetch the upper Model Providers
+   *  / agent state so the new local provider appears immediately. */
+  addedProviderIds?: string[];
   error?: string;
 }
 
@@ -377,7 +404,7 @@ export interface SessionMessage {
 }
 
 export interface MessageBlock {
-  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | 'plan' | 'sub_agent';
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | 'plan' | 'sub_agent' | 'system_notice';
   content: string;
   toolName?: string;
   toolId?: string;
