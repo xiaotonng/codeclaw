@@ -2,13 +2,17 @@
  * Channel resolution helpers for CLI startup.
  */
 
-import type { ChannelName, UserConfig } from '../core/config/user-config.js';
+import { applyChannelEnvFallback, type ChannelName, type UserConfig } from '../core/config/user-config.js';
 
 export function hasConfiguredChannelToken(
-  config: Partial<UserConfig>,
+  rawConfig: Partial<UserConfig>,
   channel: ChannelName,
   tokenOverride?: string | null,
 ): boolean {
+  // Channel transports already fall back to env vars at runtime
+  // (e.g. TELEGRAM_BOT_TOKEN). Mirror that here so a docker-only env setup
+  // doesn't make startup think there's nothing configured.
+  const config = applyChannelEnvFallback(rawConfig);
   switch (channel) {
     case 'telegram':
       return !!(config.telegramBotToken || tokenOverride);

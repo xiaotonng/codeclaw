@@ -81,6 +81,13 @@ volumes:
   - ${HOME}/.gemini:/home/piki/.gemini
 ```
 
+This also makes **agent session history sync** between the host and the
+container — codex / claude / gemini each store their per-session transcripts
+under these directories (`~/.codex/sessions/`, `~/.claude/projects/`, …), so a
+conversation you started on the host can be resumed inside the container and
+vice-versa. If you don't bind-mount (i.e. you keep the default named-volume
+layout), each environment keeps its own independent session history.
+
 ⚠️ The container runs as **uid 1000**. If your host user has a different uid,
 either rebuild the image with `--build-arg PUID=<your-uid> --build-arg PGID=<your-gid>`,
 or `chown` the mounted directories.
@@ -134,6 +141,16 @@ docker build \
 
 This is the path we recommend for production — the floating `latest` tags
 of each agent CLI can introduce breaking changes between pikiclaw releases.
+
+Agent CLIs live under `/home/piki/.npm-global` (a per-user npm prefix), so the
+dashboard's auto-updater and `npm install -g <pkg>@latest` from inside the
+container both work without `sudo`. Skills installed via the Extensions tab
+land under `/home/piki/.pikiclaw/skills/` (persisted on the `pikiclaw-config`
+volume) so they also survive restarts and upgrades.
+
+The image bundles **`gh`** (GitHub CLI) for agent skills that lean on it
+(release / PR triage, issue automation, …). Run `docker exec -it pikiclaw gh
+auth login` once to attach a token, or pass `GH_TOKEN` as a container env var.
 
 ## 6. Reverse proxy / TLS
 

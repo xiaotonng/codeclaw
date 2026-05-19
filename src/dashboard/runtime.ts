@@ -11,7 +11,7 @@ import type { Bot } from '../bot/bot.js';
 import type { Agent, AgentDetectOptions } from '../agent/index.js';
 import type { UserConfig } from '../core/config/user-config.js';
 import type { SetupState } from '../cli/onboarding.js';
-import { loadUserConfig, resolveUserWorkdir } from '../core/config/user-config.js';
+import { applyChannelEnvFallback, loadUserConfig, resolveUserWorkdir } from '../core/config/user-config.js';
 import { listAgents } from '../agent/index.js';
 import { collectSetupState } from '../cli/onboarding.js';
 import {
@@ -57,7 +57,11 @@ export interface RuntimePrefs {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildLocalChannelStates(config: Partial<UserConfig>): NonNullable<SetupState['channels']> {
+function buildLocalChannelStates(rawConfig: Partial<UserConfig>): NonNullable<SetupState['channels']> {
+  // Hydrate env-only channel tokens (docker / systemd) so the dashboard
+  // doesn't report "missing" when the operator passed `-e TELEGRAM_BOT_TOKEN=…`
+  // instead of editing setting.json.
+  const config = applyChannelEnvFallback(rawConfig);
   const weixinBaseUrl = String(config.weixinBaseUrl || '').trim();
   const weixinBotToken = String(config.weixinBotToken || '').trim();
   const weixinAccountId = String(config.weixinAccountId || '').trim();
@@ -368,7 +372,8 @@ class Runtime {
     }
   }
 
-  async resolveChannelStates(config: Partial<UserConfig>): Promise<NonNullable<SetupState['channels']>> {
+  async resolveChannelStates(rawConfig: Partial<UserConfig>): Promise<NonNullable<SetupState['channels']>> {
+    const config = applyChannelEnvFallback(rawConfig);
     const now = Date.now();
     const fallback = buildLocalChannelStates(config);
     // Channels listed in the same order as buildLocalChannelStates().
@@ -431,7 +436,7 @@ class Runtime {
 
   getSetupState(config = loadUserConfig(), agentOptions: AgentDetectOptions = {}): SetupState {
     const agents = listAgents(agentOptions).agents;
-    const channels = buildLocalChannelStates(config);
+    const channels = buildLocalChannelStates(applyChannelEnvFallback(config));
     const readyChannel = channels.find(channel => channel.ready)?.channel;
     const configuredChannel = channels.find(channel => channel.configured)?.channel;
     return collectSetupState({

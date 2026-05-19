@@ -157,6 +157,65 @@ const MANAGED_ENV_KEYS = [
   'WECOM_BOT_SECRET',
   'WECOM_ENDPOINT',
 ] as const;
+
+// Snapshot env vars present at module load — these were set externally by the
+// process launcher (docker `-e`, shell `export`, systemd unit, ...) and reflect
+// the operator's intent. `applyUserConfig` with `clearMissing` must never
+// delete them, even if setting.json is silent on the same key. Without this,
+// `docker run -e TELEGRAM_BOT_TOKEN=...` would survive only until the first
+// config sync tick, at which point the token gets wiped from the environment.
+const EXTERNAL_ENV_PRESET = new Set<string>(
+  MANAGED_ENV_KEYS.filter(key => {
+    const value = process.env[key];
+    return typeof value === 'string' && value.trim() !== '';
+  }),
+);
+
+/**
+ * Channel-credential env vars that should hydrate a missing setting.json value
+ * back into the in-memory config. Display surfaces (dashboard channel cards,
+ * setup wizard) and channel resolution all read `config.telegramBotToken`-style
+ * fields, so if the operator only provided env vars (the docker default) the
+ * UI would otherwise show "not configured" even though the bot works fine.
+ */
+const ENV_TO_CONFIG_KEY: ReadonlyArray<readonly [keyof UserConfig, string]> = [
+  ['telegramBotToken', 'TELEGRAM_BOT_TOKEN'],
+  ['telegramAllowedChatIds', 'TELEGRAM_ALLOWED_CHAT_IDS'],
+  ['feishuAppId', 'FEISHU_APP_ID'],
+  ['feishuAppSecret', 'FEISHU_APP_SECRET'],
+  ['weixinBaseUrl', 'WEIXIN_BASE_URL'],
+  ['weixinBotToken', 'WEIXIN_BOT_TOKEN'],
+  ['weixinAccountId', 'WEIXIN_ACCOUNT_ID'],
+  ['slackBotToken', 'SLACK_BOT_TOKEN'],
+  ['slackAppToken', 'SLACK_APP_TOKEN'],
+  ['discordBotToken', 'DISCORD_BOT_TOKEN'],
+  ['dingtalkClientId', 'DINGTALK_CLIENT_ID'],
+  ['dingtalkClientSecret', 'DINGTALK_CLIENT_SECRET'],
+  ['wecomBotId', 'WECOM_BOT_ID'],
+  ['wecomBotSecret', 'WECOM_BOT_SECRET'],
+  ['wecomEndpoint', 'WECOM_ENDPOINT'],
+];
+
+/**
+ * Return a copy of `config` with channel credential fields hydrated from
+ * matching env vars when the setting.json value is empty. The returned object
+ * must NOT be used as input to `saveUserConfig` — that would persist env-only
+ * values into setting.json, which would defeat the purpose of running with
+ * `-e TELEGRAM_BOT_TOKEN=...` (the operator wants the env var to remain the
+ * source of truth across container restarts).
+ */
+export function applyChannelEnvFallback(config: Partial<UserConfig>): Partial<UserConfig> {
+  let next: Partial<UserConfig> | null = null;
+  for (const [key, envName] of ENV_TO_CONFIG_KEY) {
+    const current = String((config as any)[key] || '').trim();
+    if (current) continue;
+    const env = String(process.env[envName] || '').trim();
+    if (!env) continue;
+    if (!next) next = { ...config };
+    (next as any)[key] = env;
+  }
+  return next ?? config;
+}
 const USER_CONFIG_DIRNAME = '.pikiclaw';
 const USER_CONFIG_FILENAME = 'setting.json';
 
@@ -362,7 +421,11 @@ export function applyUserConfig(config: Partial<UserConfig>, _channel?: string, 
     const next = managed[key];
     const prev = process.env[key] ?? '';
     if (!next) {
-      if (clearMissing && key in process.env) {
+      // Never clobber an env var the launcher set externally — that's the
+      // `docker run -e ...` / `export FOO=...` contract. We only clear keys we
+      // know were written by a previous `applyUserConfig` (i.e. *not* in the
+      // boot-time snapshot).
+      if (clearMissing && key in process.env && !EXTERNAL_ENV_PRESET.has(key)) {
         delete process.env[key];
         changedKeys.push(key);
       }

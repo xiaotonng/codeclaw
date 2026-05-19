@@ -73,7 +73,8 @@ ARG GEMINI_CLI_VERSION=latest
 
 # tini reaps zombies and forwards SIGTERM/SIGINT cleanly to the Node process.
 # git + ca-certs are needed by agent CLIs and skill installers.
-# curl is used by HEALTHCHECK.
+# curl is used by HEALTHCHECK and by the gh-cli apt repo install below.
+# gh is a frequent dependency in agent skills (release/PR triage flows).
 # sqlite3 is invoked by codex driver to read the rate-limit usage state DB —
 # omitting it surfaces a harmless "sqlite3: not found" warning to logs.
 RUN apt-get update \
@@ -84,20 +85,14 @@ RUN apt-get update \
         curl \
         dumb-init \
         sqlite3 \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
-
-# Bake the three first-party agent CLIs as root (writes under
-# /usr/local/lib/node_modules) so the non-root runtime user can spawn them.
-# Each CLI is independently optional — a failure to install one must not abort
-# the whole build (e.g. a transient registry hiccup or a yanked version tag).
-RUN set -eux; \
-    for spec in \
-        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-        "@openai/codex@${CODEX_VERSION}" \
-        "@google/gemini-cli@${GEMINI_CLI_VERSION}" ; do \
-        npm install -g --no-audit --no-fund "$spec" || echo "warn: failed to install $spec"; \
-    done; \
-    npm cache clean --force
 
 # Non-root user. uid/gid 1000 keeps host bind-mounts portable on Linux hosts
 # (where the first interactive user is typically 1000). `node:slim` ships a
@@ -109,6 +104,25 @@ RUN if id node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi \
  && if getent group node >/dev/null 2>&1; then groupdel node 2>/dev/null || true; fi \
  && groupadd -g ${PGID} piki \
  && useradd -m -u ${PUID} -g ${PGID} -s /bin/bash piki
+
+# Bake the three first-party agent CLIs into a piki-owned npm prefix. Installing
+# globally to /usr/local would write a root-owned tree, so subsequent
+# `npm install -g <pkg>@latest` from the dashboard / auto-updater would fail
+# with EACCES. A per-user prefix lets piki update them without sudo.
+# Each CLI is independently optional — a failure to install one must not abort
+# the whole build (e.g. a transient registry hiccup or a yanked version tag).
+ENV NPM_CONFIG_PREFIX=/home/piki/.npm-global
+RUN mkdir -p /home/piki/.npm-global && chown -R piki:piki /home/piki/.npm-global
+USER piki
+RUN set -eux; \
+    for spec in \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        "@openai/codex@${CODEX_VERSION}" \
+        "@google/gemini-cli@${GEMINI_CLI_VERSION}" ; do \
+        npm install -g --no-audit --no-fund "$spec" || echo "warn: failed to install $spec"; \
+    done; \
+    npm cache clean --force
+USER root
 
 WORKDIR /app
 
@@ -133,7 +147,7 @@ ENV NODE_ENV=production \
     PIKICLAW_DOCKER=1 \
     PIKICLAW_OPEN_BROWSER=0 \
     PIKICLAW_WORKDIR=/workspace \
-    PATH=/usr/local/bin:/usr/local/lib/node_modules/.bin:/usr/bin:/bin
+    PATH=/home/piki/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 
 EXPOSE 3939
 
