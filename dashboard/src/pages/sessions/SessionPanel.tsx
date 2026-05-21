@@ -536,13 +536,26 @@ export const SessionPanel = memo(function SessionPanel({
     setQueuedTaskIds([]);
     setQueuedTasks([]);
     setInteractions([]);
+    // Reset the previous session's optimistic state (pending bubble, queued
+    // sends, deferred clear flags). Without this, navigating to another
+    // session via onSessionChange — including the fork flow that swaps the
+    // slot in-place — leaves a stale pendingPrompt that renders as a ghost
+    // user bubble in the new session's history. Skip on the new-session
+    // mount path, which seeds pending state from props via useState.
+    if (!isNewSession) {
+      clearPending();
+      clearPendingQueuedSends();
+      localStreamPendingRef.current = false;
+      clearPendingOnLoadRef.current = false;
+      clearLiveStreamOnLoadRef.current = false;
+    }
     stickToBottomRef.current = true;
     scrollToBottomRef.current = true;
     if (!isNewSession) {
       loadLatestTurns({ keepOlder: false, force: true }).finally(() => { if (!c) setLoading(false); });
     }
     return () => { c = true; };
-  }, [loadLatestTurns, session.agent, session.sessionId, workdir, sk]);
+  }, [loadLatestTurns, session.agent, session.sessionId, workdir, sk, clearPending, clearPendingQueuedSends]);
 
   // Persist history snapshot for stale-while-revalidate on re-mount
   useEffect(() => {
