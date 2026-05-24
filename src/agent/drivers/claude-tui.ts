@@ -168,6 +168,11 @@ process.stdin.on("end", () => {
       tool_name: typeof payload.tool_name === "string" ? payload.tool_name : null,
       tool_input: payload.tool_input || null,
       tool_response: payload.tool_response || null,
+      // Claude Code tags sub-agent tool calls with agent_id so the parent can
+      // tell them apart from main-thread calls. Forwarding it lets the driver
+      // route the hook to the right sub-agent card instead of the parent's
+      // 执行 list.
+      agent_id: typeof payload.agent_id === "string" ? payload.agent_id : null,
     }) + "\\n";
     try { fs.appendFileSync(toolEventsFile, line); } catch (_) {}
     process.stdout.write(JSON.stringify({ continue: true }) + "\\n");
@@ -322,6 +327,27 @@ function applyHookToolEvent(ev: any, s: any): boolean {
   const toolUseId = String(ev?.tool_use_id || '').trim();
   const toolName = String(ev?.tool_name || '').trim();
   if (!toolName || !toolUseId) return false;
+
+  // Sub-agent tool calls fire the parent's Pre/PostToolUse hooks too (one
+  // hook pipeline per CLI process). Claude Code tags those payloads with
+  // `agent_id`; route them to the matching sub-agent's tool list instead of
+  // appending to the parent's recentActivity. Without this every Task spawn
+  // floods the parent's 执行 card with the children's tool stream while the
+  // sub-agent cards sit empty until the sidecar JSONL flushes at Stop.
+  const subAgentId = typeof ev?.agent_id === 'string' && ev.agent_id ? ev.agent_id : '';
+  if (subAgentId) {
+    if (ev.event === 'PreToolUse') {
+      const parentToolUseId = s.subAgentIdToParent?.get(subAgentId);
+      const sub = parentToolUseId ? s.subAgents?.get(parentToolUseId) : undefined;
+      if (sub && !sub.tools.some((t: any) => t.id === toolUseId)) {
+        const summary = toolName === 'TodoWrite'
+          ? 'Update plan'
+          : summarizeClaudeToolUse(toolName, ev.tool_input || {});
+        sub.tools.push({ id: toolUseId, name: toolName, summary });
+      }
+    }
+    return true;
+  }
 
   if (ev.event === 'PreToolUse') {
     if (s.seenClaudeToolIds.has(toolUseId)) return false;
@@ -854,6 +880,13 @@ export async function doClaudeTuiStream(opts: StreamOpts): Promise<StreamResult>
       if (!trimmed || trimmed[0] !== '{') continue;
       let ev: any;
       try { ev = JSON.parse(trimmed); } catch { continue; }
+      // A Task PreToolUse and the first sub-agent tool PreToolUse can land in
+      // the same tick batch. If the sub-agent's hook arrives before we've
+      // discovered its sidecar (and thus before s.subAgentIdToParent knows
+      // its agent_id), refresh discovery so the hook resolves its parent on
+      // this pass instead of leaking through unattributed.
+      const subAgentId = typeof ev?.agent_id === 'string' ? ev.agent_id : '';
+      if (subAgentId && !s.subAgentIdToParent?.has(subAgentId)) tryDiscoverSubAgents();
       try { if (applyHookToolEvent(ev, s)) any = true; }
       catch (e: any) { agentWarn(`[claude-tui] hook tool event apply threw: ${e?.message || e}`); }
     }
@@ -892,6 +925,14 @@ export async function doClaudeTuiStream(opts: StreamOpts): Promise<StreamResult>
       if (!s.subAgents.has(parentToolUseId)) continue;
       const sidecarPath = path.join(sidecarDir, `${stem}.jsonl`);
       trackedSubAgents.set(stem, { sidecarPath, offset: 0, parentToolUseId });
+      // `stem` is "agent-<id>"; Claude Code's hook payload `agent_id` carries
+      // just the raw id. Keep both keys so applyHookToolEvent can attribute
+      // sub-agent tool hooks to the parent's Task tool_use no matter which
+      // form arrives.
+      const rawAgentId = stem.startsWith('agent-') ? stem.slice('agent-'.length) : stem;
+      if (!s.subAgentIdToParent) s.subAgentIdToParent = new Map<string, string>();
+      s.subAgentIdToParent.set(rawAgentId, parentToolUseId);
+      s.subAgentIdToParent.set(stem, parentToolUseId);
       agentLog(`[claude-tui] subagent sidecar discovered ${stem} parent=${parentToolUseId.slice(0, 14)}`);
     }
   };
