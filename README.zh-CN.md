@@ -24,7 +24,7 @@ npx pikiclaw@latest
 <a href="README.md">English</a> | <b>简体中文</b>
 </p>
 
-<img src="docs/promo-dashboard-workspace.png" alt="工作区" width="780">
+<img src="docs/promo-orchestrator.png" alt="Pikiclaw —— AI-Native Agent 编排器" width="820">
 
 </div>
 
@@ -36,29 +36,14 @@ npx pikiclaw@latest
 
 核心产品就是这个编排器，其它所有组件都可拔插。**更酷的是，这个编排器是由它自己构建出来的** —— pikiclaw 就是我们用来开发 pikiclaw 的工具。
 
-```
-   终端层    Telegram · 飞书 · 微信 · Slack · Discord · 钉钉 · 企业微信 · Web Dashboard
-                              \__________________________|__________________________/
-                                                         v
-                                          ┌──────────────────────────────┐
-                                          │     pikiclaw 编排器           │
-                                          └──────────────────────────────┘
-                                                         |
-                ┌────────────────────────────────────────┼────────────────────────────────────────┐
-                v                                        v                                        v
-           Agent 层                                   模型层                                    工具层
-   Claude Code · Codex · Gemini · Hermes      Claude · GPT · Gemini · DeepSeek            Skills · MCP · CLI
-   (driver registry · ACP · 任意 Agent)       豆包 · MiMo · MiniMax · OpenRouter         (全局 × 工作区)
-                                              · 任意 OpenAI 兼容代理 · …
-                                                         |
-                                                         v
-                                                  你的电脑
-```
+上面这张架构图勾勒出我们缝合在一起的四层结构：
 
-- **终端层 (Terminal)** —— Telegram、飞书、微信、Slack、Discord、钉钉、企业微信以及 Web Dashboard 都是一等公民入口。新的终端形态可以随时接入。
-- **Agent 层** —— 官方的 Claude Code / Codex / Gemini / Hermes CLI 作为底层驱动 (driver)。其中 Hermes 使用 ACP (Agent Client Protocol，客户端协议)；注册表机制允许无缝接入任何其他的 Agent。
-- **模型层 (Model)** —— Claude / GPT / Gemini、国产系列 (DeepSeek、豆包、MiMo、MiniMax)，外加 OpenRouter 以及任何兼容 OpenAI 接口的代理服务。提供商 (Providers) 与配置项 (Profiles) 是一等公民模块，自带凭据保险箱、models.dev 目录以及面向各个 Agent 专属的环境变量注入能力。
-- **工具层 (Tool)** —— Skills、MCP 服务器和 CLI 工具。它们会在全局和工作区两个层级进行智能合并，并被自动注入到每一次会话之中。
+- **入口层 (Entry Points)** —— Telegram、飞书、微信、Slack、Discord、钉钉、企业微信、Web Dashboard，以及本地 API / CLI，都是一等公民级别、地位完全对等的终端。新增任意一个新终端，对其它通道完全无感。
+- **可插拔 Agent (Pluggable Agents)** —— Claude Code、Codex、Gemini、Hermes 均作为内置驱动。Hermes 走 ACP (Agent Client Protocol) 协议；任何 CLI 或 ACP 形态的 Agent 都可通过相同的 `AgentDriver` 契约接入注册表。
+- **模型路由 (Model Routing)** —— 前沿系列（Claude · GPT · Gemini）、国产矩阵（DeepSeek · 豆包 · MiMo · MiniMax · Qwen）、本地推理（Ollama，以及 Apple Silicon 上的 mlx-lm）、OpenRouter，以及任意 OpenAI 兼容代理。Providers + Profiles 作为一等公民的凭据保险箱，自带只读的 `models.dev` 目录与启动时的逐 Agent 环境变量注入。
+- **工具网 (Tool Mesh)** —— Skills、MCP 服务器、CLI 工具、Web Search、桌面自动化等，会在「全局 × 工作区」两个维度智能合并，并悄悄注入到每一次会话之中。
+
+这一切的正中央，是 **Pikiclaw Orchestration Core** —— 由它来统一管理路由、记忆、可观测性和 Bot 生命周期，从而保证任何终端都能借助任意工具，让任意 Agent 跑在任意模型上。
 
 ---
 
@@ -98,7 +83,7 @@ npx pikiclaw@latest
 
 <p align="center"><img src="docs/promo-demo.gif" alt="演示：从 Telegram 发起任务，Agent 在本地执行，结果回到聊天" width="780"></p>
 
-> **Web Dashboard** —— 多面板工作区，包含会话列表、对话流、工具调用轨迹以及输入区域（支持 1 / 2 / 3 / 6 面板布局）。
+> **Web Dashboard** —— 多面板工作区，集成会话列表、实时对话流、工具调用轨迹、文件/图片附件、排队任务芯片以及统一的输入框（支持 1 / 2 / 3 / 6 面板布局、深浅色主题与中英双语 i18n）。
 
 <p align="center"><img src="docs/promo-dashboard-workspace.png" alt="Web Dashboard 工作区" width="780"></p>
 
@@ -113,13 +98,13 @@ npx pikiclaw@latest
 
 <img src="docs/promo-dashboard-im.png" alt="IM 接入" width="780">
 
-> **Agent 管理** —— 已安装的 Agent CLI 列表、默认 Agent 设定，以及各自独立的模型 / 推理强度配置。
+> **Agent 管理** —— 已安装的 Agent CLI 列表、默认 Agent 设定，以及各 Agent 独立的模型 / 推理强度配置；可绑定 Profile 让 Agent 跑在非原生模型上。
 
 <img src="docs/promo-dashboard-agents.png" alt="Agent" width="780">
 
-> **模型配置** —— 整合了 Provider + Profile 的凭据库（涵盖 Claude、GPT、Gemini、DeepSeek、豆包、MiMo、MiniMax、OpenRouter 及任何兼容 OpenAI 接口的代理），支持通过 models.dev 目录进行验证，并为指定的 Agent 独立进行底层环境变量注入。
+> **模型配置** —— 整合了 Provider + Profile 的凭据库（涵盖 Claude、GPT、Gemini、DeepSeek、豆包、MiMo、MiniMax、Qwen、OpenRouter 及任何 OpenAI 兼容代理），支持通过只读 `models.dev` 目录进行验证，并在 Agent 启动时定向注入对应环境变量；探测到 Ollama / mlx-lm（Apple Silicon）等本地后端时会自动挂载为 Provider。
 
-> **扩展工具** —— 统一管理全局 MCP 服务器、社区版 Skills、内置托管的浏览器环境及 macOS 桌面（Peekaboo）自动化能力。
+> **扩展工具** —— 统一管理全局 MCP 服务器、社区版 Skills、内置托管的浏览器环境及 macOS 桌面（Peekaboo）自动化能力，支持通过 stdio、HTTP，或带动态客户端注册的 OAuth 2.1 接入服务。
 
 <img src="docs/promo-dashboard-extensions.png" alt="扩展" width="780">
 
@@ -150,8 +135,6 @@ npx pikiclaw@latest
 cd your-workspace
 npx pikiclaw@latest
 ```
-
-<p align="center"><img src="docs/promo-install.gif" alt="一行命令安装" width="780"></p>
 
 这条命令会在 `http://localhost:3939` 自动唤起 **Web Dashboard**。随后，你就可以在浏览器里驱动任何会话、接入需要的 IM 渠道、灵活配置 Agent 和模型、快速安装 MCP 服务器与技能 (Skills)，并统筹所有的系统权限。其他一切功能，尽在一键之遥。
 
@@ -192,8 +175,9 @@ docker run -d --name pikiclaw -p 3939:3939 \
 - **自包含的闭环开发** —— pikiclaw 就是用 pikiclaw 自己开发出来的。这套开发流本身就是这款产品最原始的面貌：甚至可以在外用手机操作编排器，让 Agent 写代码、发布版本并不断迭代。
 - **挂机式编程 (Walk-away coding)** —— 发起一个耗时极长的大型重构任务，合上笔记本，外出时直接用手机通过 Telegram 进行监控和控制。Agent 始终在本地机器上运行，结果则会流式实时推回聊天界面中。
 - **同工作区多 Agent 接力** —— 先让 Claude Code 写一版功能草稿，无缝切给 Codex 去做深度 Review，最后再交给 Gemini 提供截然不同视角的优化建议。所有这些操作都在同一份代码目录和相同的历史会话中完成。
-- **灵活的国产模型路由方案** —— 当你的任务对延迟、成本或合规有硬性要求时，通过模型驱动包装层，可以直接让 Claude Code 跑在实惠又快速的 DeepSeek 或豆包模型之上。
+- **灵活的国产 / 本地模型路由** —— 当你的任务对延迟、成本或合规有硬性要求时，通过模型注入层，可以让 Claude Code 直接跑在 DeepSeek、豆包、Qwen，甚至完全离线的 Ollama / mlx-lm 上。
 - **群聊协作级 Agent** —— 把 pikiclaw 拉入飞书 / Slack / Discord / 企业微信群聊内；整个团队可以共享这同一个编排器、统一的项目工作区和一系列团队专属技能。
+- **随手让 Codex 生图** —— 让 Codex 出张海报、出个示意图、画个 UI 草图，结果会作为真正的图片附件流回到聊天里，并附带一个可展开的「生图 Prompt」让你随时查看模型实际收到的指令。下一次迭代只需要继续聊，而不必再切回浏览器。
 - **完全受控的 Computer-use 能力** —— 开启内置的 Chrome 浏览器托管（基于 Playwright）和 macOS 桌面环境托管（基于 Peekaboo，通过辅助功能和 ScreenCaptureKit）。Agent 瞬间获得「视力」(`see`)、可以自由点击、打字，并管理窗口、菜单栏和 Dock，而你依然可以通过手机远程精准操控它。无论是帮你预定一场会议、抓取某个数据面板信息、跑一通端到端自动测试，还是驱动任何原生的 macOS 本地应用，全都不在话下。
 - **基于 Skill 体系的自动化工作流** —— 一次性安装好社区提供的常用技能（例如 `promote`、`snipe`、`review`、`security-review` 等），往后只需在任何连接的终端里输入 `/sk_<name>` 即可实现一键触发。
 
@@ -203,45 +187,46 @@ docker run -d --name pikiclaw -p 3939:3939 \
 
 ### 终端层 (Terminal)
 
-- **支持七大主流 IM** —— 全面集成 Telegram、飞书、微信（个人号）、Slack、Discord、钉钉和企业微信。你可以只开启其中一个，也可以多开齐上。底层代码中每个渠道都做到绝对隔离；即使后续再添加新渠道（如 WhatsApp、自有移动 App 等），也丝毫不会影响现有逻辑的稳定性。
-- **Web Dashboard 面板** —— 直接在网页浏览器中驱动所有会话，获得与 IM 完全一致的自然对话、工具调用轨迹跟踪和极速的流式反馈体验。面板提供 1 / 2 / 3 / 6 多窗口并发布局、深色/浅色自适应主题，以及纯正的中英文 (i18n) 双语支持。
-- **实时流式预览** —— 每当 Agent 开始思考，消息都会实时在原地进行刷新；遇到超长文本能自动进行友好分段；生成的图片与文件也会即刻原样推回前端界面。
+- **支持七大主流 IM** —— Telegram、飞书、微信（个人号）、Slack、Discord、钉钉与企业微信。开一个、开几个、全开都可以。底层每个渠道在代码上是物理隔离的；后续接入新通道（WhatsApp、自研移动 App、语音终端）也不会牵动其它通道。
+- **Web Dashboard 面板** —— 直接在浏览器里驱动所有会话，对话流、工具调用轨迹和流式反馈都与 IM 完全一致。提供 1 / 2 / 3 / 6 面板布局、深浅色主题与中英双语 i18n。
+- **实时流式预览** —— Agent 一边思考、消息一边原地更新；超长文本自动分段；思考过程、工具调用、Plan 都被分别折叠成卡片；图片与文件也会实时原样推回前端。
+- **排队 / 操控统一在一个输入框** —— 上一条还在跑，你就能继续发；新消息以排队 chip 出现，可以预览、撤回，也可以让 Agent 立刻插队执行；一键即可同时停掉当前任务与所有排队任务。
 
 ### Agent 层
 
-- **官方 CLI 作为原生底层驱动** —— 内置接入 Claude Code、Codex CLI、Gemini CLI 以及 Hermes (通过 ACP 协议)。我们坚决拒绝自己「造一套套壳的 Agent 引擎」——只要上游核心推出了任何更新功能，你就可以在第一时间无损享用。
-- **原生拥抱 ACP 协议** —— Hermes 的接入完全基于 [Agent Client Protocol](https://agentclientprotocol.com) 协议，通过系统标准的 JSON-RPC (输入/输出流) 唤起 `hermes acp`。这意味着在未来，任何兼容 ACP 协议的新 Agent 也能立刻无缝空降至平台。
-- **自由可插拔的注册表机制** —— 在整套代码库中，这部分唯一的强制契约只有 `src/agent/driver.ts`。不论是基于传统 CLI 还是新兴 ACP 协议开发的各类新 Agent，都能随时加入注册表，与现有的四大核心内置引擎并肩作战。
-- **无感会话级 Agent 切换** —— 你甚至不用离开当前代码工作区，就能在会话途中随时顺畅地帮 AI 更换一颗不同特性的「大脑」。
-- **接管与干预 (Steer) 控制** —— 你可以随心所欲中断正在执行的繁重任务，让排队的紧急新消息直接插队至最前方处理。
-- **Codex 人机协同机制 (Human-in-the-loop)** —— 当 Codex 需要你确认操作细节时，这些提示请求会自动转化发送为 IM 中的互动询问消息。你只需在平常用的聊天框内简单答复，暂停的任务就会完美接续运作。
-- **长效目标系统 (Persistent goals)** —— 允许使用 `/goal` 指令，为指定的会话设定出伴有明确 Token 预算的长效终止目标。任务支持智能暂停/恢复，只有当 Agent 靠自行审计判定达到目标要求后，它才会结束自身当前进程。
+- **官方 CLI 作为原生底层驱动** —— 内置接入 Claude Code、Codex CLI、Gemini CLI 以及 Hermes（通过 ACP 协议）。我们坚决不自己「造一套套壳的 Agent 引擎」—— 上游核心一旦更新，你立刻就能享用。
+- **原生拥抱 ACP 协议** —— Hermes 完全基于 [Agent Client Protocol](https://agentclientprotocol.com) 协议接入，通过 JSON-RPC stdio 唤起 `hermes acp`。未来任何兼容 ACP 的新 Agent 也能立刻无缝空降。
+- **可插拔的驱动注册表** —— 整个代码库中唯一的契约只有 `src/agent/driver.ts`。无论是 CLI 还是 ACP 形态，新 Agent 都能落地，与四大内置引擎并肩。
+- **会话级 Agent 切换** —— 不需要离开当前工作区，就能在会话中途给 AI 换一颗「大脑」，历史上下文继续生效。
+- **接管与干预 (Steer)** —— 随时中断正在执行的重任务，让排队的紧急消息插到最前；或者一键停掉整个会话。
+- **Codex 人机协同 (Human-in-the-loop)** —— Codex 需要确认操作时，提示会被自动转发到你的活跃终端（IM 或 Dashboard）。在原地回一句话，被暂停的任务就会继续。
+- **持久化目标系统，按 Agent 路由** —— `/goal <objective>` 会让会话持续工作直到 Agent 自审满足条件。Codex 走原生 `thread/goal/*` RPC，可选 `budget=N` Token 预算并支持暂停 / 恢复；Claude 走原生 Stop hook + Haiku 评审，目标完成后自动清除；其它 Agent 走 pikiclaw 自带的可移植 continuation。
+- **图片生成全链路接管** —— Codex 内置的 `image_gen`（以及 Claude MCP / Gemini Imagen）产出的图，会以真实的图片附件落到聊天里 —— 不再是一坨 base64。Agent 实际发给图模型的 `revised_prompt` 会作为可点开展开的「**生图 Prompt**」挂在图片旁；图片生成中时还会有「Generating image…」chip 在助手回复下闪烁，告诉你这一轮为什么慢。
 
 ### 模型层
 
-- **全面涵盖前沿顶流、国产之光与各类代理** —— 囊括 Claude 家族系列、强大的 GPT-5 / Codex 以及 Gemini；国内优秀梯队的 DeepSeek、豆包 (Doubao)、MiMo 与 MiniMax；同时原生兼容 OpenRouter 和任意支持 OpenAI 通用接口格式的第三方代理服务。
-- **Providers & Profiles 凭据专属保险箱** —— 构建了高标准隔离的数据保护模型，API 凭据会被单独加密存放在 `~/.pikiclaw/setting.json` 专属区域。你能在只读的 models.dev 目录进行便捷浏览、调用最真实的 API 探针来严谨验证密钥的有效性，最终再把这份 Profile 与指定的任意 Agent 相绑定，从而实现运行阶段环境变量参数的自动隔离注入。
-- **极度自由的会话级配置选取** —— 无论是模型本体还是针对特定高难度任务的推理强度，你都能在友好的 Dashboard 界面中，或者直接发送指令 `/models` 与 `/mode` 来即时动态切选。
-- **Agent 级别底层强制注入** —— 核心流函数 `resolveAgentInjection(agentId)` 在启动的最初阶段就会将对应的环境变量强行覆盖进去。这意味着，你竟然可以直接指令 Claude Code，让它全程跑在超高性价比的 DeepSeek 或是豆包核心大模型上，并且全程无需去改动其原本上游客户端里任何一行深层配置代码。
+- **前沿 + 国产 + 本地 + 各类代理** —— 前沿系列（Claude · GPT-5 / Codex · Gemini）、国产矩阵（DeepSeek · 豆包 · MiMo · MiniMax · Qwen）、本地推理（Ollama，以及 Apple Silicon 上的 mlx-lm）、OpenRouter，以及任意 OpenAI 兼容代理。
+- **Providers & Profiles 凭据保险箱** —— API 凭据隔离存放在 `~/.pikiclaw/setting.json` 中。在只读的 `models.dev` 目录里浏览模型、通过真实的 Provider 探针验证密钥，再把 Profile 与某个 Agent 绑定，启动时自动注入对应环境变量。
+- **本地模型零配置接入** —— 探测到 Ollama 或 mlx-lm 后端时会自动挂载为 Provider，不需要额外配置。Dashboard 上的卡片会展示状态、`brew/pipx` 安装命令、对应的 `ollama pull` / `mlx_lm.server` 拉模型命令，以及对照本机内存的 RAM 余量提示。
+- **会话级模型 / 推理强度切换** —— 在 Dashboard、`/models` 或 `/mode` 中实时切换。推理强度按 Agent 提供（Claude：low → max；Codex：low → very high；Hermes：minimal → very high）。
+- **Agent 级深度环境注入** —— `resolveAgentInjection(agentId)` 在启动时强制写入绑定 Profile 的环境变量。这意味着你可以让 Claude Code 全程跑在 DeepSeek、豆包，甚至本地 Ollama 上，而完全不动上游 CLI 的配置。
 
 ### 工具层
 
-- **强大的技能系统 (Skills)** —— 这个系统让每一个工程专属技能被稳稳地存放在 `.pikiclaw/skills/*/SKILL.md` 内（同时也全面向下兼容标准的 `.claude/commands/*.md` 描述格式）。支持快速指定从 GitHub 的公开仓库（`owner/repo`）中实现极速的一键远程拉取并安装；或者去随便逛逛我们收录整理的精选套件包（比如备受好评的 Anthropic 官方包、或是好用的 Vercel Agent Skills 包等）。平时直接发个 `/skills` 探查当前载入的所有技能，挑准目标直接用 `/sk_<name>` 便可秒速触发。
-- **最广泛主流的 MCP 服务器加持** —— 可以直接浏览接入 [MCP Registry](https://registry.modelcontextprotocol.io) 全球库或者自由手工增加本地 stdio 和网端 HTTP 服务；框架严格支持实机硬核握手健康侦测机制与 OAuth 2.1 高级动态客户端安全注册，且能精细拆分控制启用哪些作用域范围。目前精选优化的目录已毫无压力地涵盖 GitHub、Atlassian、Notion、Linear、Sentry、Cloudflare、Slack、飞书/Lark、Stripe、Hugging Face、Gamma、Brave Search、Perplexity、本地系统深度文件探测、SQLite 甚至专业的 PostgreSQL。此外，系统更逆天地内置附赠了两个重磅级的强力 Computer-use 级别核心服务（一个是基于大名鼎鼎的 Playwright 来暴躁驱动底层 Chrome 浏览器的 `pikiclaw-browser`；另一个则是依托极客向 Peekaboo 纯正血统，操控整个底层 macOS GUI 交互视窗的超级 `peekaboo` 工具）。
-- **无缝衔接各类流行 CLI 神器** —— 底层逻辑强悍地支持自动探测各类版本兼容性并精准校验出授权登入状态。特别是遇到基于浏览器鉴权登录判定的 CLI，我们底层支持 OAuth-web 授权无缝接力。最后统统由 Agent 最原生的调用接口无缝唤起执行操作。
-- **全局会话级的 MCP 底层桥接** —— `im_list_files`、`im_send_file`、`im_ask_user` 这些基建指令，再叠加前述的内置浏览器与 macOS 桌面自动化控制工具包（只要一旦开启安全开关），统统都会被全面自动注入进你的每一场会话里。
-- **双域极简权限合并机制** —— 所有工具作用范围授权，永远只需遵循这条策略：`全局 (global) < 当前工作区 (workspace) < 内建 (built-in)`。底层引擎每次都能自动执行合并，并丝滑生效进后续发起的对话之中。
-
-<p align="center"><img src="docs/promo-dashboard-extensions-add.png" alt="添加 MCP server" width="780"></p>
+- **强大的技能系统 (Skills)** —— 项目专属技能存放在 `.pikiclaw/skills/*/SKILL.md` 中（也兼容旧的 `.claude/commands/*.md` 格式）。可以从 GitHub（`owner/repo`）一键安装社区包，或挑选我们精选的官方包（Anthropic Official、Vercel Agent Skills 等）。在任何终端里发 `/skills` 浏览，`/sk_<name>` 一键触发。
+- **海量 MCP 生态加持** —— 浏览 [MCP Registry](https://registry.modelcontextprotocol.io)、手工增加 stdio / HTTP 服务、强制真实握手健康探测、支持带动态客户端注册的 OAuth 2.1。精选目录涵盖 GitHub、Atlassian、Notion、Linear、Sentry、Cloudflare、Slack、飞书/Lark、Stripe、Hugging Face、Gamma、Brave Search、Perplexity、Filesystem、SQLite 与 PostgreSQL —— 加上我们自带的两个 computer-use 服务：`pikiclaw-browser`（Playwright 驱动的 Chrome）与 `peekaboo`（Peekaboo 驱动的 macOS GUI）。
+- **无缝接入主流 CLI 工具** —— 自动探测版本与登录态（gh、brew、npm、uv 等），OAuth-web 浏览器授权流程在 Agent 调用面上无缝衔接。
+- **会话级 MCP 桥接** —— `im_list_files`、`im_send_file`、`im_ask_user`、`goal_get`、`goal_update` 等基础工具，加上启用后的浏览器与 macOS 桌面工具，会被自动注入到每一场会话里。
+- **三层合并规则** —— 工具作用域永远遵循：`全局 (global) < 当前工作区 (workspace) < 内建 (built-in)`。引擎自动合并后无感生效。
 
 ### 运行环境与开发者体验 (Runtime & DX)
 
-- **独享会话级项目工作区** —— 每开启一次新的交锋会话，底层引擎都会为它开辟出单独专属的实体文件隔离目录，附件直接落在那里。
-- **多轮会话回溯管控** —— 随便怎么恢复、切换，还配上了贴心的语义会话分类体系（快速分为解答、提案、实现，阻塞等清晰状态标识归类）。
-- **基建工具流自注入** —— 强悍的 `im_list_files`、`im_send_file`、以及 `im_ask_user`，加上目标追踪管理工具等，会在启动前夕自动挂载。
-- **Computer-use (浏览器引擎层)** —— 系统底层内置了 `pikiclaw-browser` MCP。这是二次封装了 `@playwright/mcp` 实现的，使其拥有进程级 Supervisor 监管机制，且达成了跨任务进程共享独立 Chrome 配置。只需要登录认证一次常用网站；在未来的任何任务里，这个工具将直接一键继承数据免签直连！
-- **Computer-use (macOS 桌面控制层)** —— 当你在扩展面板启用 `peekaboo` MCP 并在系统设置授予终端“辅助功能”与“屏幕录制”权限后（仅限 macOS）；你即可借助 [Peekaboo](https://peekaboo.sh/) 框架的加持瞬间获得暴露在外的各种工具：视力 (`see`)；精准点击 (`click`)；虚空打字输入 (`type`)；操作滚轮 (`scroll`)；以及操作全系统窗口 (`window`)；主菜单 (`menu`)；程序生命周期 (`app`)；甚至是 Dock (`dock`) 等这一整套系统控制工具集。
-- **长效任务坚固防线** —— 核心内置了防休眠系统、看门狗守护模块、异常自动重启涅槃机制、守护进程模式；还有渠道 Supervisor 督军服务。这豪华阵容保证你哪怕挂机跑极其漫长的任务，也能极度稳如磐石！
+- **独立的会话工作区** —— 每一次会话都有专属的隔离目录；上传的文件以及 Agent 生成的产物（含图片）都会落在那里。
+- **可恢复 / 可切换 / 自动分类** —— 多轮会话随意恢复与切换，自动按语义分类（answer / proposal / implementation / blocked），工作区会话列表按最近活动时间排序，覆盖所有已安装 Agent。
+- **基础工具自动注入** —— `im_*`（列文件 / 发文件 / 问用户）与 `goal_*` 在每一条流里都默认可用 —— Agent 不需要任何配置就能把文件回推到你的 IM、或者卡在中途反过来问你一句。
+- **Computer-use（浏览器层）** —— 内置的 `pikiclaw-browser` MCP 把 `@playwright/mcp` 包装上进程级 Supervisor 和一个共享的、隔离的 Chrome Profile。常用站点登录一次，所有后续任务都直接复用登录态。
+- **Computer-use（macOS 桌面层）** —— 启用 `peekaboo` MCP（仅 macOS），即可调用 [Peekaboo](https://peekaboo.sh/) 提供的整套桌面控制工具：`see`、`click`、`type`、`scroll`、`window`、`menu`、`app`、`dock`，以及面向目标自主控制的 `agent` 子代理。需要在系统设置中授予终端「辅助功能」与「屏幕录制」权限。
+- **为长任务硬化的运行时** —— 防休眠、看门狗、自动重启、守护进程模式、渠道 Supervisor 一应俱全；当还有任务在跑时主动阻止重启，保证你的马拉松作业不会被一次热加载弄崩。
 
 ---
 
@@ -252,7 +237,7 @@ docker run -d --name pikiclaw -p 3939:3939 \
 | **操作终端** | 7 大 IM + Web + 持续扩展 | 仅限 IDE 内部 | 局限在专属网页端 | 死绑在单个 IM 内的单个 Bot |
 | **Agent 运行地** | 完全在你自己的本地机器上 | 你的本地机器 | 厂商分配的云端沙盒里 | 往往在厂商服务器端 |
 | **Agent 的选择** | Claude Code · Codex · Gemini · Hermes (ACP) · …（任你选） | 深度绑定没得选 | 单一 | 单一 |
-| **底层模型抉择** | 国外前沿大模型 + 国产全系 + 任何兼容 OpenAI 接口的模型 | 平台控制 | 厂商绑定 | 单一无脑没得换 |
+| **底层模型抉择** | 前沿 · 国产 · 本地（Ollama / mlx-lm）· OpenAI 兼容代理 | 平台控制 | 厂商绑定 | 单一无脑没得换 |
 | **并发能力** | **N 个 Agent × N 个窗口 × N 个工作区** | 每个 IDE 窗口只能同时运行一个 | 串行排队 | 单一线程 |
 | **文件与工具掌控** | 你主机上的所有本地文件、MCP 资源库、以及本地 CLI 系统 | 本地文件 | 沙盒受限环境 | 极度受限 |
 | **接入新终端渠道** | 随便写个 `Channel` 基础实现类就能打通 | 无法实现 | 无法实现 | 需要 Fork 整个项目 |
@@ -304,13 +289,7 @@ docker run -d --name pikiclaw -p 3939:3939 \
 
 ## 产品路线图 (Roadmap)
 
-我们已交付：Hermes 驱动支持 · ACP (Agent Client Protocol) 协议底层集成 · Provider/Profile 模型保险箱机制 · 七大 IM 渠道打通 · Computer-use 的落地（Playwright 浏览器托管 + Peekaboo macOS 桌面托管）。
-
-- **接入更多 ACP Agent** —— 确保任何新的兼容 ACP 协议的 Agent 都能免代码零配置顺滑接入。
-- **拓展终端生态** —— 将支持 WhatsApp、独立的移动端 App 以及语音交互模块。
-- **深化模型层包装** —— 构建基于任意模型的通用 Agent Wrapper，以便无缝驱动更多优秀的国产模型。
-- **完善工具生态** —— 推出官方推荐的 MCP 插件合集、Skill 模版库及社区应用市场。
-- **全平台的 Computer-use** —— 在已有的 macOS Peekaboo 驱动之外，加入适配 Windows / Linux 操作系统的桌面控制支持。
+- **SupporterAgent** —— 在现有「终端 × Agent × 模型 × 工具」编排栈之上再加一层 high-level 元代理，统一管理整个复杂任务的生命周期：从拆解与规划，到把合适的子 Agent 调度到合适的模型与工具上，再到全程盯着各路 stream，发现子 Agent 卡壳、走偏或与计划冲突时主动介入校正。目标是把 pikiclaw 在长时序、多 Agent 协作上的稳定性拉到新一档，让人不再需要逐轮盯着每个子任务。
 
 ---
 

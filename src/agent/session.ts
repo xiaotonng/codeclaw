@@ -281,7 +281,11 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     title: typeof raw?.title === 'string' && raw.title.trim() ? raw.title.trim() : null,
     model: typeof raw?.model === 'string' && raw.model.trim() ? raw.model.trim() : null,
     thinkingEffort: typeof raw?.thinkingEffort === 'string' && raw.thinkingEffort.trim() ? raw.thinkingEffort.trim() : null,
+    profileId: typeof raw?.profileId === 'string' && raw.profileId.trim() ? raw.profileId.trim() : null,
     stagedFiles: Array.isArray(raw?.stagedFiles) ? dedupeStrings(raw.stagedFiles.filter((v: unknown) => typeof v === 'string')) : [],
+    lastUserAttachments: Array.isArray(raw?.lastUserAttachments)
+      ? dedupeStrings(raw.lastUserAttachments.filter((v: unknown) => typeof v === 'string'))
+      : [],
     runState: normalizeSessionRunState(raw?.runState),
     runDetail: normalizeSessionRunDetail(raw?.runState, raw?.runDetail),
     runUpdatedAt: normalizeSessionRunUpdatedAt(raw?.runUpdatedAt, typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : new Date().toISOString()),
@@ -619,7 +623,7 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
       workspacePath: sessionWorkspacePath(workdir, opts.agent, sessionId),
       threadId,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      title: summarizePromptTitle(opts.title) || null, model: null, thinkingEffort: null, stagedFiles: [],
+      title: summarizePromptTitle(opts.title) || null, model: null, thinkingEffort: null, profileId: null, stagedFiles: [], lastUserAttachments: [],
       runState: 'completed', runDetail: null, runUpdatedAt: new Date().toISOString(),
       runPid: null,
       classification: null, userStatus: null, userNote: null,
@@ -658,6 +662,7 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     threadId: record.threadId,
     model: record.model,
     thinkingEffort: record.thinkingEffort,
+    profileId: record.profileId ?? null,
     createdAt: record.createdAt,
     title,
     running: record.runState === 'running',
@@ -793,12 +798,17 @@ export async function deleteAgentSession(opts: DeleteAgentSessionOpts): Promise<
 }
 
 /**
- * Look up the persisted model and thinkingEffort for an existing session.
- * Returns null values when the session is not found or fields are not set.
+ * Look up the persisted model, thinkingEffort, and bound profileId for an
+ * existing session. Returns null values when the session is not found or
+ * fields are not set.
  */
-export function getSessionStoredConfig(workdir: string, agent: Agent, sessionId: string): { model: string | null; thinkingEffort: string | null } {
+export function getSessionStoredConfig(workdir: string, agent: Agent, sessionId: string): { model: string | null; thinkingEffort: string | null; profileId: string | null } {
   const record = findPikiclawSession(workdir, agent, sessionId);
-  return { model: record?.model ?? null, thinkingEffort: record?.thinkingEffort ?? null };
+  return {
+    model: record?.model ?? null,
+    thinkingEffort: record?.thinkingEffort ?? null,
+    profileId: record?.profileId ?? null,
+  };
 }
 
 export function ensureManagedSession(opts: EnsureManagedSessionOpts): SessionInfo {
@@ -811,6 +821,12 @@ export function ensureManagedSession(opts: EnsureManagedSessionOpts): SessionInf
   });
   if (!session.record.title && opts.title) session.record.title = summarizePromptTitle(opts.title);
   if (!session.record.model && opts.model) session.record.model = opts.model.trim() || null;
+  if (!session.record.thinkingEffort && opts.thinkingEffort) {
+    session.record.thinkingEffort = opts.thinkingEffort.trim().toLowerCase() || null;
+  }
+  if (!session.record.profileId && opts.profileId) {
+    session.record.profileId = opts.profileId.trim() || null;
+  }
   saveSessionRecord(opts.workdir, session.record);
   return managedRecordToSessionInfo(session.record);
 }

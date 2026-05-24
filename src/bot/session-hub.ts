@@ -202,23 +202,88 @@ export async function querySessions(opts: SessionQueryOpts): Promise<SessionQuer
 // Session detail queries
 // ---------------------------------------------------------------------------
 
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
+const MIME_BY_EXT: Record<string, string> = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.svg': 'image/svg+xml',
+};
+
+/** Build image MessageBlocks from a session record's `lastUserAttachments`
+ *  (relative paths under `workspacePath`). Used by fallback paths so the
+ *  dashboard can still render the user's image bubble while the agent CLI
+ *  has not yet flushed the turn to its own session file. Non-image
+ *  attachments are skipped — the fallback is text-first and doesn't try to
+ *  reconstruct generic file references. */
+function imageBlocksFromManagedRecord(record: { workspacePath: string; lastUserAttachments?: string[] }): MessageBlock[] {
+  const attachments = record.lastUserAttachments;
+  if (!attachments?.length) return [];
+  const blocks: MessageBlock[] = [];
+  for (const rel of attachments) {
+    const ext = path.extname(rel).toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(ext)) continue;
+    const abs = path.isAbsolute(rel) ? rel : path.join(record.workspacePath, rel);
+    blocks.push({
+      type: 'image',
+      // `file://` sentinel — `rewriteImageBlocksForTransport` (dashboard
+      // response layer) converts it to a proper /attachment URL.
+      content: `file://${abs}`,
+      imagePath: abs,
+      imageMime: MIME_BY_EXT[ext] || 'application/octet-stream',
+    });
+  }
+  return blocks;
+}
+
 /**
  * Build a 1-2 message fallback transcript from the pikiclaw session record
  * for runs that crashed before the agent could write its own transcript file
  * (e.g. gemini auth failure, codex spawn failure). Without this the dashboard
  * detail panel would render blank for clearly-failed sessions.
+ *
+ * Returns both plain `messages` (text only — legacy callers) and full
+ * `richMessages` (text + image blocks) so the dashboard's first-turn image
+ * bubble survives the period before the agent CLI flushes its session file.
  */
+interface ManagedFallback {
+  messages: TailMessage[];
+  richMessages: RichMessage[];
+}
+
 function tailFallbackFromManagedRecord(opts: SessionTailOpts): SessionTailResult | null {
+  const fb = managedFallbackContent(opts);
+  if (!fb) return null;
+  const limit = Math.max(1, opts.limit ?? fb.messages.length);
+  return { ok: true, messages: fb.messages.slice(-limit), error: null };
+}
+
+function managedFallbackContent(opts: SessionTailOpts): ManagedFallback | null {
   const record = findPikiclawSession(opts.workdir, opts.agent, opts.sessionId);
   if (!record) return null;
   const messages: TailMessage[] = [];
-  if (record.lastQuestion) messages.push({ role: 'user', text: record.lastQuestion });
+  const richMessages: RichMessage[] = [];
+
+  if (record.lastQuestion) {
+    const text = record.lastQuestion;
+    messages.push({ role: 'user', text });
+    const blocks: MessageBlock[] = text ? [{ type: 'text', content: text }] : [];
+    blocks.push(...imageBlocksFromManagedRecord(record));
+    if (blocks.length) richMessages.push({ role: 'user', text, blocks, usage: null });
+  }
+
   const failureText = record.lastAnswer
     || (record.runState === 'incomplete' ? record.runDetail : null);
-  if (failureText) messages.push({ role: 'assistant', text: failureText });
+  if (failureText) {
+    messages.push({ role: 'assistant', text: failureText });
+    richMessages.push({
+      role: 'assistant',
+      text: failureText,
+      blocks: [{ type: 'text', content: failureText }],
+      usage: null,
+    });
+  }
+
   if (!messages.length) return null;
-  const limit = Math.max(1, opts.limit ?? messages.length);
-  return { ok: true, messages: messages.slice(-limit), error: null };
+  return { messages, richMessages };
 }
 
 /** Get recent messages from a session (tail). */
@@ -266,17 +331,20 @@ function collapseSkillPromptsInResult(result: SessionMessagesResult): SessionMes
 export async function querySessionMessages(opts: SessionMessagesOpts & { agent: Agent }): Promise<SessionMessagesResult> {
   const result = await _getSessionMessages(opts);
   if (!result.ok || !result.messages.length) {
-    const fallback = tailFallbackFromManagedRecord({
+    const fb = managedFallbackContent({
       agent: opts.agent,
       sessionId: opts.sessionId,
       workdir: opts.workdir,
-      limit: result.messages.length || undefined,
     });
-    if (fallback) {
+    if (fb) {
+      const totalTurns = fb.messages.filter(m => m.role === 'user').length;
       return collapseSkillPromptsInResult({
         ok: true,
-        messages: fallback.messages.map(m => ({ role: m.role, text: m.text })),
-        totalTurns: fallback.messages.filter(m => m.role === 'user').length,
+        messages: fb.messages.map(m => ({ role: m.role, text: m.text })),
+        // Always emit richMessages so the dashboard can render image blocks
+        // for the first user turn while the agent CLI is still spinning up.
+        richMessages: fb.richMessages,
+        totalTurns,
         error: null,
       });
     }

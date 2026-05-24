@@ -196,8 +196,11 @@ export async function buildSessionsCommandView(
   pageSize = 5,
 ): Promise<CommandSelectionView> {
   const data = await getSessionsPageData(bot, chatId, page, pageSize);
-  const sessionButtons = data.sessions.map(session => [{
-    label: session.title,
+  // Multi-row: one button per session on its own line, prefixed with the
+  // agent badge so a mixed workspace list reads cleanly. Avoid cramming
+  // multiple buttons onto one row (some IM clients truncate).
+  const sessionButtons: CommandActionButton[][] = data.sessions.map(session => [{
+    label: `[${session.agent}] ${session.title} · ${session.time}`,
     action: { kind: 'session.switch', sessionId: session.key } as CommandAction,
     state: buttonStateFromFlags({ isCurrent: session.isCurrent, isRunning: session.isRunning }),
     primary: session.isCurrent,
@@ -207,20 +210,28 @@ export async function buildSessionsCommandView(
   navRow.push({ label: '+ New', action: { kind: 'session.new' } });
   if (data.page < data.totalPages - 1) navRow.push({ label: `p${data.page + 2} ▶`, action: { kind: 'sessions.page', page: data.page + 1 } });
 
+  const agentChips = Object.entries(data.agentTotals)
+    .sort((a, b) => b[1] - a[1])
+    .map(([agent, count]) => `${agent}:${count}`)
+    .join(' · ');
+  const headerDetail = data.workspaceName
+    ? (agentChips ? `${data.workspaceName} · ${agentChips}` : data.workspaceName)
+    : (agentChips || null);
+
   return {
     kind: 'sessions',
     title: 'Sessions',
-    detail: data.agent,
+    detail: headerDetail,
     metaLines: [`${data.total} total · p${data.page + 1}/${data.totalPages}`],
     items: data.sessions.map(session => ({
-      label: session.title,
+      label: `[${session.agent}] ${session.title}`,
       detail: session.time,
       state: buttonStateFromFlags({ isCurrent: session.isCurrent, isRunning: session.isRunning }),
     })),
-    emptyText: 'No sessions found.',
+    emptyText: 'No sessions found in this workspace.',
     helperText: data.totalPages > 1
-      ? `Use the controls below to switch or turn pages.`
-      : 'Use the controls below to switch or start a new session.',
+      ? `Pick a row to resume (agent/model/effort restore automatically).`
+      : 'Pick a row to resume, or start a new session.',
     rows: navRow.length ? [...sessionButtons, navRow] : sessionButtons,
   };
 }
@@ -499,22 +510,43 @@ export async function executeCommandAction(
 
     case 'session.switch': {
       const chat = bot.chat(chatId);
-      const result = await bot.fetchSessions(chat.agent, bot.chatWorkdir(chatId));
+      // Workspace-wide lookup (no agent filter) so a row from any agent can be
+      // resumed directly from a single mixed list.
+      const result = await bot.fetchSessions(undefined, bot.chatWorkdir(chatId));
       if (!result.ok) return { kind: 'noop', message: 'Failed to load sessions' };
 
       const session = result.sessions.find(entry => entry.sessionId === action.sessionId);
       if (!session) return { kind: 'noop', message: 'Session not found' };
 
+      const prevAgent = chat.agent;
       const runtime = bot.adoptExistingSessionForChat(chatId, session);
+      // Restore the agent's persistent model / effort / Profile binding so the
+      // next stream — and the IM picker chips — match the resumed session.
+      if (session.model) {
+        bot.switchModelForChat(chatId, session.model, session.profileId ?? null);
+      } else if (session.profileId !== undefined) {
+        // Session was native (profileId === null) — explicitly clear any
+        // active Profile so we don't run with a stale BYOK binding.
+        bot.switchModelForChat(chatId, bot.modelForAgent(session.agent), null);
+      }
+      if (session.thinkingEffort) {
+        bot.switchEffortForChat(chatId, session.thinkingEffort);
+      }
       const displayId = session.sessionId || action.sessionId;
       const sessionStatus = getSessionStatusForChat(bot, chat, session);
+      const runDetail = summarizeSessionRun({ ...session, running: sessionStatus.isRunning }).noticeDetail;
+      const restoreParts: string[] = [];
+      if (prevAgent !== session.agent) restoreParts.push(`agent → ${session.agent}`);
+      if (session.model) restoreParts.push(`model → ${session.model}`);
+      if (session.thinkingEffort) restoreParts.push(`effort → ${session.thinkingEffort}`);
+      const detail = restoreParts.length ? `${runDetail} · ${restoreParts.join(' · ')}` : runDetail;
       return {
         kind: 'notice',
         callbackText: `Switched: ${displayId.slice(0, 12)}`,
         notice: {
           title: 'Session Switched',
           value: displayId,
-          detail: summarizeSessionRun({ ...session, running: sessionStatus.isRunning }).noticeDetail,
+          detail,
           valueMode: 'code',
         },
         session: runtime,

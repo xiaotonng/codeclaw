@@ -402,7 +402,7 @@ describe('TelegramBot status and session previews', () => {
 
       expect(ctx.editReply).toHaveBeenCalledWith(
         ctx.messageId,
-        `<b>Session Switched</b>\n<code>${sessionId}</code>\n<i>Status: unfinished · Timed out before completion.</i>`,
+        `<b>Session Switched</b>\n<code>${sessionId}</code>\n<i>Status: unfinished · Timed out before completion. · agent → claude · model → claude-opus-4-7</i>`,
         { parseMode: 'HTML' },
       );
       expect(bot.chat(ctx.chatId).sessionId).toBe(sessionId);

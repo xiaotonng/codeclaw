@@ -12,7 +12,7 @@ import { terminateProcessTree } from '../core/process-control.js';
 import { AGENT_DETECT_TIMEOUTS, AGENT_STREAM_HARD_KILL_GRACE_MS } from '../core/constants.js';
 import { getDriver, allDrivers, getAcceptedProviderKinds } from './driver.js';
 import {
-  resolveAgentInjection, getActiveProfile, getProvider, updateProfile, listProfiles,
+  resolveAgentInjection, getActiveProfile, getActiveProfileId, getProvider, updateProfile, listProfiles,
 } from '../model/index.js';
 import type {
   Agent, AgentDetectOptions, AgentInfo, AgentListResult,
@@ -373,6 +373,11 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
   // Capture staged files for MCP bridge before clearing
   const stagedFiles = [...session.record.stagedFiles];
   session.record.stagedFiles = [];
+  // Remember this turn's attachments so dashboard fallbacks (called while the
+  // agent CLI hasn't yet flushed the user event to its native session file)
+  // can still render the user's image bubble. Cleared/overwritten at the
+  // start of the NEXT turn — always reflects the turn currently in flight.
+  session.record.lastUserAttachments = [...attachmentRelPaths];
   if (!session.record.title) session.record.title = summarizePromptTitle(displayPrompt) || null;
   session.record.lastQuestion = shortValue(displayPrompt, 500);
   session.record.lastMessageText = shortValue(displayPrompt, 500);
@@ -410,6 +415,13 @@ function finalizeStreamResult(result: StreamResult, workdir: string, prompt: str
   if (result.sessionId) syncManagedSessionIdentity(session, workdir, result.sessionId);
   session.record.model = result.model || session.record.model;
   if (result.thinkingEffort) session.record.thinkingEffort = result.thinkingEffort;
+  // Capture the BYOK Profile that was in effect for this run so a future
+  // `session.switch` can re-bind it (null = native CLI auth).
+  try {
+    session.record.profileId = getActiveProfileId(session.record.agent);
+  } catch {
+    /* model layer not initialised in tests — leave profileId untouched */
+  }
   const displayPrompt = collapseSkillPrompt(prompt) ?? prompt;
   if (!session.record.title) session.record.title = summarizePromptTitle(displayPrompt);
   session.record.lastQuestion = shortValue(displayPrompt, 500);

@@ -223,6 +223,8 @@ function truncate(text: string, max: number): string {
 
 export interface SessionEntry {
   key: string;
+  /** Owning agent of this session — multi-agent IM lists need this per row. */
+  agent: Agent;
   title: string;
   time: string;
   isCurrent: boolean;
@@ -232,7 +234,10 @@ export interface SessionEntry {
 }
 
 export interface SessionsPageData {
-  agent: Agent;
+  /** Workspace name resolved by querySessions (basename of workdir when unnamed). */
+  workspaceName: string;
+  /** Per-agent totals across the whole workspace — useful for header chips. */
+  agentTotals: Record<string, number>;
   total: number;
   page: number;
   totalPages: number;
@@ -275,12 +280,18 @@ export function summarizeSessionRun(session: Pick<SessionInfo, 'running' | 'runS
 
 export async function getSessionsPageData(bot: Bot, chatId: ChatId, page: number, pageSize = 5): Promise<SessionsPageData> {
   const cs = bot.chat(chatId);
-  const res = await bot.fetchSessions(cs.agent, bot.chatWorkdir(chatId));
+  // Workspace-wide: drop the cs.agent filter so the list matches what the
+  // dashboard shows for this workspace (all installed agents, sorted by
+  // most-recent activity).
+  const res = await bot.fetchSessions(undefined, bot.chatWorkdir(chatId));
   const sessions = res.ok ? res.sessions : [];
   const total = sessions.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const pg = Math.max(0, Math.min(page, totalPages - 1));
   const slice = sessions.slice(pg * pageSize, (pg + 1) * pageSize);
+
+  const agentTotals: Record<string, number> = {};
+  for (const s of sessions) agentTotals[s.agent] = (agentTotals[s.agent] || 0) + 1;
 
   const entries: SessionEntry[] = [];
   for (const s of slice) {
@@ -293,12 +304,13 @@ export async function getSessionsPageData(bot: Bot, chatId: ChatId, page: number
       runDetail: s.runDetail,
     });
     const displayText = sessionListDisplayTitle(s);
-    const title = displayText ? displayText.replace(/\n/g, ' ').slice(0, 20) : sessionKey.slice(0, 20);
+    const title = displayText ? displayText.replace(/\n/g, ' ').slice(0, 28) : sessionKey.slice(0, 28);
     const time = s.createdAt
       ? new Date(s.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
       : '?';
     entries.push({
       key: sessionKey,
+      agent: s.agent,
       title,
       time: `${time} · ${runSummary.shortLabel}`,
       isCurrent: status.isCurrent,
@@ -308,7 +320,14 @@ export async function getSessionsPageData(bot: Bot, chatId: ChatId, page: number
     });
   }
 
-  return { agent: cs.agent, total, page: pg, totalPages, sessions: entries };
+  return {
+    workspaceName: res.workspaceName || '',
+    agentTotals,
+    total,
+    page: pg,
+    totalPages,
+    sessions: entries,
+  };
 }
 
 export function extractLastSessionTurn(

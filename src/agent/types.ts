@@ -324,7 +324,29 @@ export interface ManagedSessionRecord {
   title: string | null;
   model: string | null;
   thinkingEffort: string | null;
+  /**
+   * The BYOK Profile bound to the agent when this session ran. Null when the
+   * native (CLI's own auth) model was used. Restored on session resume so
+   * model+credentials match the original run.
+   */
+  profileId: string | null;
   stagedFiles: string[];
+  /**
+   * Attachments associated with the **most recent** user turn — typically image
+   * paths the dashboard uploaded for that turn. Relative to `workspacePath`.
+   *
+   * Why this exists: the agent CLI's own session file (Claude JSONL / Codex
+   * rollout / …) does not contain the user event until the agent starts
+   * responding. Until then, the dashboard's `/messages` query falls back to
+   * `lastQuestion` from the managed record — which carries only text. Without
+   * a separate per-turn attachment list, the user's image bubble disappears
+   * mid-stream and only reappears after the run completes.
+   *
+   * Cleared at the start of each turn in `prepareStreamOpts` *before*
+   * `stagedFiles` is consumed, so it always describes the turn currently in
+   * flight (or the most recent one when idle).
+   */
+  lastUserAttachments?: string[];
   runState: SessionRunState;
   runDetail: string | null;
   runUpdatedAt: string | null;
@@ -400,6 +422,7 @@ export interface SessionInfo {
   threadId?: string | null;
   model: string | null;
   thinkingEffort?: string | null;
+  profileId?: string | null;
   createdAt: string | null;
   title: string | null;
   running: boolean;
@@ -568,6 +591,8 @@ export interface EnsureManagedSessionOpts {
   sessionId: string;
   title?: string | null;
   model?: string | null;
+  thinkingEffort?: string | null;
+  profileId?: string | null;
   threadId?: string | null;
 }
 

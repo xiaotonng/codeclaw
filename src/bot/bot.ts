@@ -945,7 +945,7 @@ export class Bot {
     if (opts?.clearWorkdir) cs.workdir = null;
   }
 
-  protected adoptSession(cs: ChatState, session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model' | 'title' | 'threadId'>) {
+  protected adoptSession(cs: ChatState, session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model' | 'title' | 'threadId' | 'thinkingEffort' | 'profileId'>) {
     if (!session.sessionId) {
       this.applySessionSelection(cs, null);
       return;
@@ -956,6 +956,8 @@ export class Bot {
       workdir: 'workdir' in session && session.workdir ? session.workdir : this.workdir,
       title: session.title ?? null,
       model: session.model ?? null,
+      thinkingEffort: session.thinkingEffort ?? null,
+      profileId: session.profileId ?? null,
       threadId: session.threadId ?? null,
     });
     const runtime = this.hydrateSessionRuntime({
@@ -965,11 +967,16 @@ export class Bot {
       workspacePath: managed.workspacePath ?? session.workspacePath ?? null,
       threadId: managed.threadId ?? session.threadId ?? null,
       modelId: session.model ?? managed.model ?? null,
+      thinkingEffort: session.thinkingEffort ?? managed.thinkingEffort ?? null,
     });
     if (!runtime) {
       this.applySessionSelection(cs, null);
       return;
     }
+    // Adopting an existing session is an explicit user pick — drop any
+    // queued handover from a prior agent toggle so we don't accidentally
+    // prepend the wrong context to the resumed session's next turn.
+    cs.pendingHandoverFrom = null;
     this.applySessionSelection(cs, runtime);
   }
 
@@ -2081,11 +2088,34 @@ export class Bot {
 
   adoptExistingSessionForChat(
     chatId: ChatId,
-    session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model' | 'title' | 'threadId'>,
+    session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model' | 'title' | 'threadId' | 'thinkingEffort' | 'profileId'>,
   ): SessionRuntime | null {
     const cs = this.chat(chatId);
     this.adoptSession(cs, session);
     return this.getSelectedSession(cs);
+  }
+
+  /**
+   * Resume an existing session in a chat and restore the agent's persistent
+   * model / effort / BYOK Profile binding so the next stream — and the IM
+   * picker chips — match the session that was just adopted. This is the
+   * shared "click a row from the workspace list" path used by both the
+   * interactive selector and the text-command `/sessions <#>` flow.
+   */
+  resumeSessionForChat(
+    chatId: ChatId,
+    session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model' | 'title' | 'threadId' | 'thinkingEffort' | 'profileId'>,
+  ): SessionRuntime | null {
+    const runtime = this.adoptExistingSessionForChat(chatId, session);
+    if (session.model) {
+      this.switchModelForChat(chatId, session.model, session.profileId ?? null);
+    } else if (session.profileId !== undefined) {
+      this.switchModelForChat(chatId, this.modelForAgent(session.agent), null);
+    }
+    if (session.thinkingEffort) {
+      this.switchEffortForChat(chatId, session.thinkingEffort);
+    }
+    return runtime;
   }
 
   switchAgentForChat(chatId: ChatId, agent: Agent): boolean {
@@ -2224,7 +2254,7 @@ export class Bot {
     return { model: model || null, effort };
   }
 
-  fetchSessions(agent: Agent, workdir?: string): Promise<SessionQueryResult> {
+  fetchSessions(agent: Agent | undefined, workdir?: string): Promise<SessionQueryResult> {
     return querySessions({ agent, workdir: workdir || this.workdir });
   }
 

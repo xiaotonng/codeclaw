@@ -373,11 +373,11 @@ export class SlackBot extends Bot {
       const d = await getSessionsPageData(this, ctx.chatId, 0, 100);
       const target = d.sessions[idx - 1];
       if (target) {
-        const result = await this.fetchSessions(this.chat(ctx.chatId).agent, this.chatWorkdir(ctx.chatId));
+        const result = await this.fetchSessions(undefined, this.chatWorkdir(ctx.chatId));
         const session = result.sessions.find(s => s.sessionId === target.key);
         if (session) {
-          this.adoptExistingSessionForChat(ctx.chatId, session);
-          await ctx.reply(`Switched to session ${target.title}`);
+          this.resumeSessionForChat(ctx.chatId, session);
+          await ctx.reply(`Switched to [${session.agent}] ${target.title}`);
         } else {
           await ctx.reply('Session not found.');
         }
@@ -392,7 +392,7 @@ export class SlackBot extends Bot {
     d.sessions.forEach((s, i) => {
       const mark = s.isCurrent ? ' ←' : '';
       const running = s.isRunning ? ' [running]' : '';
-      lines.push(`${i + 1}. ${s.title} · ${s.time}${mark}${running}`);
+      lines.push(`${i + 1}. [${s.agent}] ${s.title} · ${s.time}${mark}${running}`);
     });
     lines.push('', 'Usage: /sessions new | /sessions <#>');
     await ctx.reply(lines.join('\n'));

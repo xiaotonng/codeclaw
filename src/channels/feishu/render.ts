@@ -383,8 +383,15 @@ export function renderStart(d: StartData): string {
 }
 
 export function renderSessionsPage(d: SessionsPageData): string {
+  const agentChips = Object.entries(d.agentTotals)
+    .sort((a, b) => b[1] - a[1])
+    .map(([agent, count]) => `${agent}:${count}`)
+    .join(' · ');
+  const header = d.workspaceName
+    ? (agentChips ? `${d.workspaceName} · ${agentChips}` : d.workspaceName)
+    : (agentChips || 'sessions');
   const lines = [
-    `**${d.agent} sessions** (${d.total})  p${d.page + 1}/${d.totalPages}`,
+    `**${header}** (${d.total})  p${d.page + 1}/${d.totalPages}`,
     '',
   ];
 
@@ -394,7 +401,7 @@ export function renderSessionsPage(d: SessionsPageData): string {
     for (let i = 0; i < d.sessions.length; i++) {
       const s = d.sessions[i];
       const icon = s.isRunning ? '🟢' : s.isCurrent ? '●' : '○';
-      lines.push(`${icon} **${i + 1}.** ${s.title}  ${s.time}${s.isCurrent ? ' ← current' : ''}`);
+      lines.push(`${icon} **${i + 1}.** [${s.agent}] ${s.title}  ${s.time}${s.isCurrent ? ' ← current' : ''}`);
     }
     lines.push('');
     lines.push('*Use the controls below to switch, or reply with session number / "new".*');
