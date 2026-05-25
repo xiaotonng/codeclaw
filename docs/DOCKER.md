@@ -88,6 +88,35 @@ conversation you started on the host can be resumed inside the container and
 vice-versa. If you don't bind-mount (i.e. you keep the default named-volume
 layout), each environment keeps its own independent session history.
 
+> ⚠️ **Codex SQLite corruption risk.** The Codex CLI keeps its state in a
+> SQLite database under `~/.codex/`. SQLite does **not** tolerate concurrent
+> writers from different processes when the file lives on a docker bind mount,
+> nor does it tolerate two binaries of different versions opening the same db.
+> If you mount `~/.codex` into the container, you **must** treat it as a
+> single-writer file:
+>
+> - Do not run the host's Codex desktop app while the docker container is
+>   also running with codex active. Stop one before using the other.
+> - When you `docker pull` a newer pikiclaw image, the codex CLI baked into
+>   the image (see §5) may be newer than the host's. Either pin the
+>   `CODEX_VERSION` build-arg to match the host, or upgrade the host's codex
+>   at the same time.
+> - If you only need OAuth credentials (and don't need to share session
+>   history), mount **just** the auth file read-only — this avoids the db
+>   entirely:
+>
+>   ```yaml
+>   volumes:
+>     - ${HOME}/.codex/auth.json:/home/piki/.codex/auth.json:ro
+>   ```
+>
+> Symptoms of a corrupted db: when launching Codex desktop you see
+> `database disk image is malformed` / `error returned from database: (code: 11)`.
+> Recovery: stop both the container and Codex desktop, back up `~/.codex/`,
+> remove the corrupted `*.db` and `*.db-*` files, then relaunch — Codex will
+> rebuild a clean database (session history will be lost; the backup is your
+> only chance to recover it manually).
+
 ⚠️ The container runs as **uid 1000**. If your host user has a different uid,
 either rebuild the image with `--build-arg PUID=<your-uid> --build-arg PGID=<your-gid>`,
 or `chown` the mounted directories.
@@ -314,6 +343,29 @@ volumes:
   - ${HOME}/.codex:/home/piki/.codex
   - ${HOME}/.gemini:/home/piki/.gemini
 ```
+
+> ⚠️ **Codex SQLite 损坏风险。** Codex CLI 把状态写在 `~/.codex/` 下的
+> SQLite 数据库里。SQLite 不支持跨 docker bind mount 的并发写入，也不
+> 支持两个不同版本的 codex 同时打开同一个 db。如果你挂载了 `~/.codex`：
+>
+> - 不要在容器跑着的时候同时打开宿主机的 Codex desktop。要用哪个，
+>   先把另一个关掉。
+> - `docker pull` 拉到新版镜像后，镜像里 baked 的 codex CLI 版本
+>   （见 §5）可能跟宿主版本不一致。请用 `--build-arg CODEX_VERSION=`
+>   把版本钉死，或者同步升级宿主机的 codex。
+> - 如果你只是需要复用 OAuth 凭证、不需要共享会话历史，可以**只**
+>   挂载凭证文件，以只读方式挂载，这样可以完全绕开 db：
+>
+>   ```yaml
+>   volumes:
+>     - ${HOME}/.codex/auth.json:/home/piki/.codex/auth.json:ro
+>   ```
+>
+> db 损坏的典型表现：宿主机打开 Codex desktop 时弹出
+> `database disk image is malformed` / `error returned from database: (code: 11)`。
+> 恢复方法：先把容器和 Codex desktop 都停掉，备份 `~/.codex/`，删掉损坏的
+> `*.db` 和 `*.db-*` 文件，再启动 codex，它会重建一个干净的数据库
+> （会话历史会丢失，备份是你手动恢复历史的唯一机会）。
 
 容器内默认 uid 是 1000，与宿主机 uid 不一致时请用 `--build-arg PUID=…`
 重建，或对挂载目录执行 `chown`。
