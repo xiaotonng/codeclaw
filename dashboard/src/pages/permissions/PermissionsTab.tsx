@@ -2,8 +2,7 @@ import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import { api } from '../../api';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import { Badge, Button } from '../../components/ui';
-import { SettingRowAction, SettingRowCard, SettingRowField, SettingRowLead } from '../shared';
+import { Button, Row, RowGroup, StatusPill, type StatusState } from '../../components/ui';
 
 type PermissionKey = 'screenRecording' | 'fullDiskAccess';
 
@@ -38,8 +37,8 @@ const PERMISSIONS: PermissionMeta[] = [
   {
     key: 'screenRecording',
     labelKey: 'perm.screenRecording',
-    reasonZh: '允许读取屏幕内容，用于截图和界面分析。',
-    reasonEn: 'Allows reading the screen for screenshots and UI inspection.',
+    reasonZh: '用于截图与界面分析',
+    reasonEn: 'For screenshots and UI inspection',
     guidePathKey: 'perm.pathScreenRecording',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -52,8 +51,8 @@ const PERMISSIONS: PermissionMeta[] = [
   {
     key: 'fullDiskAccess',
     labelKey: 'perm.fullDiskAccess',
-    reasonZh: '允许访问桌面、下载等受保护目录。',
-    reasonEn: 'Allows access to protected folders like Desktop and Downloads.',
+    reasonZh: '访问桌面、下载等受保护目录',
+    reasonEn: 'Access to Desktop, Downloads and other protected folders',
     guidePathKey: 'perm.pathFullDiskAccess',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -166,76 +165,68 @@ export function PermissionsTab() {
         </Button>
       </div>
 
-      {rows.map(row => {
-        const permission = row.permission;
-        const granted = !!permission?.granted;
-        const checkable = !!permission && permission.checkable;
-        const statusLabel = loading
-          ? copy.loading
-          : !permission
-            ? copy.needsGrant
+      <RowGroup>
+        {rows.map(row => {
+          const permission = row.permission;
+          const granted = !!permission?.granted;
+          const checkable = !!permission && permission.checkable;
+          const statusLabel = loading
+            ? copy.loading
             : granted
               ? copy.granted
               : copy.needsGrant;
-        const statusVariant: 'ok' | 'warn' | 'accent' | 'muted' = loading
-          ? 'muted'
-          : granted
-            ? 'ok'
-            : 'warn';
-        const statusDescription = loading
-          ? copy.loading
-          : granted
-            ? (hostApp ? copy.hostGranted.replace('{hostApp}', hostApp) : copy.hostGrantedFallback)
-            : checkable
-              ? copy.needsGrantDetail
-              : copy.needsSettingsDetail;
-        const actionLabel = loading
-          ? copy.checking
-          : granted
-            ? copy.refreshState
+          const statusState: StatusState = loading
+            ? 'idle'
+            : granted
+              ? 'ok'
+              : 'warn';
+          const statusDescription = loading
+            ? copy.loading
+            : granted
+              ? (hostApp ? copy.hostGranted.replace('{hostApp}', hostApp) : copy.hostGrantedFallback)
+              : checkable
+                ? copy.needsGrantDetail
+                : copy.needsSettingsDetail;
+          const actionLabel = loading
+            ? copy.checking
             : checkable
               ? copy.authorize
               : copy.openSettings;
-        const onAction = granted
-          ? handleRefresh
-          : () => void handleRequest(row.key);
 
-        return (
-          <SettingRowCard key={row.key}>
-            <SettingRowLead
-              icon={row.icon}
-              title={t(row.labelKey)}
-              subtitle={locale === 'zh-CN' ? row.reasonZh : row.reasonEn}
-            />
+          return (
+            <Row key={row.key}>
+              <Row.Lead
+                icon={row.icon}
+                title={t(row.labelKey)}
+                subtitle={locale === 'zh-CN' ? row.reasonZh : row.reasonEn}
+              />
 
-            <SettingRowField label={copy.status}>
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Badge variant={statusVariant}>{statusLabel}</Badge>
-              </div>
-              <div className="mt-1 text-[13px] leading-relaxed text-fg-3">
-                {statusDescription}
-              </div>
-            </SettingRowField>
+              <Row.Status>
+                <StatusPill state={statusState} label={statusLabel} />
+              </Row.Status>
 
-            <SettingRowField label={copy.summary}>
-              <div className="break-words text-[13px] leading-relaxed text-fg-3">
-                {t(row.guidePathKey)}
-              </div>
-            </SettingRowField>
+              <Row.Field>{t(row.guidePathKey)}</Row.Field>
 
-            <SettingRowAction>
-              <Button
-                variant={granted ? 'outline' : 'primary'}
-                size="sm"
-                disabled={loading || !!requesting}
-                onClick={onAction}
-              >
-                {requesting === row.key ? copy.checking : actionLabel}
-              </Button>
-            </SettingRowAction>
-          </SettingRowCard>
-        );
-      })}
+              <Row.Action>
+                {!granted && (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={loading || !!requesting}
+                    onClick={() => void handleRequest(row.key)}
+                  >
+                    {requesting === row.key ? copy.checking : actionLabel}
+                  </Button>
+                )}
+              </Row.Action>
+
+              {statusDescription && statusDescription !== statusLabel && (
+                <Row.Description>{statusDescription}</Row.Description>
+              )}
+            </Row>
+          );
+        })}
+      </RowGroup>
     </div>
   );
 }

@@ -43,7 +43,31 @@ import { cn } from '../../utils';
 
 const ROW_GRID_VAR = '--row-grid';
 
-const DEFAULT_GRID = 'minmax(180px,1.1fr) minmax(140px,auto) minmax(180px,1.5fr) auto';
+/**
+ * Column tracks: lead | status | summary | action.
+ *
+ *   - Lead and status are **fixed-width** so column 3 (summary) starts at
+ *     the same x coordinate across every row. Using `auto` or `fr` for
+ *     these tracks lets each row measure independently (every <Row> is its
+ *     own grid container), which makes the summary column visibly drift
+ *     left/right row-by-row.
+ *   - Summary takes the remaining space via `minmax(0,1fr)`; the `0` min
+ *     lets long values truncate instead of forcing horizontal scroll.
+ *   - Action is `auto` so the button hugs the right edge.
+ */
+const DEFAULT_GRID = '260px 120px minmax(0,1fr) auto';
+
+/**
+ * Tailwind v4 JIT scans source files for literal class names. Building the
+ * grid-cols utility via template-literal interpolation (e.g.
+ * `lg:grid-cols-[var(${ROW_GRID_VAR},${DEFAULT_GRID})]`) produces a runtime
+ * string the scanner never sees, so the rule is silently dropped from the
+ * compiled CSS and the table layout never activates. Keep this as a single
+ * static literal — Tailwind converts `_` into spaces inside arbitrary values
+ * so the fallback list still parses correctly.
+ */
+const GRID_COLS_CLASS =
+  'lg:grid-cols-[var(--row-grid,260px_120px_minmax(0,1fr)_auto)]';
 
 /* ─────────────────────────────────────────────────────────────
  * RowGroup — vertical stack of Rows sharing one bordered shell and
@@ -115,8 +139,13 @@ export function Section({
 
 /* ─────────────────────────────────────────────────────────────
  * Row — single data line. Grid:
- *   xl: 4 columns, items-center, min-h-[64px]
- *   below xl: stack vertically with the same children in order.
+ *   lg: 4 columns, items-center, min-h-[64px]
+ *   below lg: stack vertically with the same children in order.
+ *
+ * The breakpoint is `lg` (≥1024px) rather than `xl` because the
+ * dashboard content area is capped at `max-w-[1120px]` — using `xl`
+ * (≥1280px) means the table layout never activated inside the
+ * dashboard's own container at common laptop viewports.
  * ─────────────────────────────────────────────────────────── */
 interface RowComposition {
   Lead: typeof RowLead;
@@ -145,8 +174,8 @@ const RowImpl = forwardRef<HTMLDivElement, RowProps>(function Row(
         'grid gap-x-5 gap-y-2 px-4 py-3 min-h-[64px]',
         // Inherit the column tracks from the enclosing RowGroup. Fallback
         // to the canonical 4-track grid if the row stands alone.
-        `xl:grid-cols-[var(${ROW_GRID_VAR},${DEFAULT_GRID})]`,
-        'xl:items-center',
+        GRID_COLS_CLASS,
+        'lg:items-center',
         'transition-[background] duration-200 hover:bg-[var(--surface-3)]',
         inline
           ? ''
@@ -175,9 +204,9 @@ function RowHeader({
   return (
     <div
       className={cn(
-        'hidden xl:grid gap-x-5 px-4 py-2',
-        `xl:grid-cols-[var(${ROW_GRID_VAR},${DEFAULT_GRID})]`,
-        'xl:items-center',
+        'hidden lg:grid gap-x-5 px-4 py-2',
+        GRID_COLS_CLASS,
+        'lg:items-center',
         'bg-[var(--surface-1)]',
         className,
       )}
@@ -291,7 +320,7 @@ Row.Status = RowStatus;
 /* ─────── Row.Action — right-aligned actions (Button, IconButton) ─────── */
 function RowAction({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <div className={cn('flex shrink-0 items-center gap-2 justify-start xl:justify-end', className)}>
+    <div className={cn('flex shrink-0 items-center gap-2 justify-start lg:justify-end', className)}>
       {children}
     </div>
   );
@@ -314,7 +343,7 @@ function RowDescription({
   return (
     <div
       className={cn(
-        'col-span-full xl:col-span-full',
+        'col-span-full lg:col-span-full',
         'text-[12.5px] leading-relaxed text-fg-4',
         'pl-12', // indent past the lead icon
         '-mt-1',

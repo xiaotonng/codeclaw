@@ -364,7 +364,6 @@ export function IMAccessTab(props: IMAccessTabProps) {
   return (
     <div className="animate-in">
       <RowGroup>
-        <Row.Header columns={[copy.status === '状态' ? '通道' : 'Channel', copy.status, copy.summary, '']} />
         {rows.map(row => (
           <ChannelRow key={row.key} meta={row} />
         ))}

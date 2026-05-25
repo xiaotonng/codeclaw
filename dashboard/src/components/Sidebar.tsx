@@ -43,11 +43,10 @@ export function Sidebar({
   const confirming = restartPhase === 'confirm';
 
   return (
-    // Dim-chrome treatment: sidebar sits on surface[1], one notch darker than
-    // the content surface[0] below. Linear March 2026 refresh — "main content
-    // area takes precedence, sidebar a few notches dimmer". The hairline at
-    // the bottom is the only visual divider.
-    <header className="sticky top-0 z-40 border-b border-[var(--edge-subtle)] bg-[var(--surface-1)] backdrop-blur-[20px] [backdrop-filter:blur(20px)_saturate(1.1)]">
+    // Glass-chrome top bar. `--th-sidebar` is intentionally semi-transparent
+    // (rgba 0.78 / 0.9) so the backdrop blur + saturate produces a visible
+    // frosted effect over the page surface below.
+    <header className="sticky top-0 z-40 border-b border-edge bg-[var(--th-sidebar)] backdrop-blur-[20px] [backdrop-filter:blur(20px)_saturate(1.2)]">
       <div className="mx-auto flex min-h-13 max-w-[1180px] flex-wrap items-center gap-2.5 px-4 py-2">
         {/* Logo — quieter, no gradient text, single icon tile */}
         <div className="mr-1.5 flex items-center gap-2.5 shrink-0">
