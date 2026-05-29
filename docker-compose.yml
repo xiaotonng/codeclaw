@@ -78,6 +78,13 @@ services:
       # Uncomment to reuse a host-side OAuth login for an agent CLI. The host
       # path's uid must match PUID (default 1000) or the agent CLI will refuse
       # to read the token file.
+      #
+      # ⚠️ Codex stores its state in a SQLite db under ~/.codex/. Mounting the
+      # whole dir while the host's Codex desktop is also running can corrupt
+      # the db (errno 11 / "database disk image is malformed"). If you only
+      # need OAuth, mount just the auth file read-only:
+      #     - ${HOME}/.codex/auth.json:/home/piki/.codex/auth.json:ro
+      # See docs/DOCKER.md §3-B for full guidance.
       # - ${HOME}/.claude:/home/piki/.claude
       # - ${HOME}/.codex:/home/piki/.codex
       # - ${HOME}/.gemini:/home/piki/.gemini
