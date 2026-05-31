@@ -392,13 +392,15 @@ class FeishuChannel extends Channel {
         url: '/open-apis/bot/v3/info',
         data: {},
       });
+      this._log(`[connect] bot info resp: ${JSON.stringify(resp)}`, 'info');
       const info = (resp as any)?.bot;
       this.bot = {
         id: info?.open_id || this.appId,
         username: info?.app_name || 'pikiclaw',
         displayName: info?.app_name || 'pikiclaw',
       };
-    } catch {
+    } catch (e: any) {
+      this._log(`[connect] bot info failed: ${e?.message || e}`, 'warn');
       this.bot = { id: this.appId, username: 'pikiclaw', displayName: 'pikiclaw' };
     }
     return this.bot;
@@ -499,8 +501,12 @@ class FeishuChannel extends Channel {
   }
 
   private async _handleMessageEvent(event: any) {
+    this._log(`[recv] raw event received: ${JSON.stringify(event)}`, 'info');
     const msg = event?.message;
-    if (!msg) return;
+    if (!msg) {
+      this._log(`[recv] event has no message object`, 'warn');
+      return;
+    }
 
     const chatId = msg.chat_id as string;
     const messageId = msg.message_id as string;
@@ -520,7 +526,7 @@ class FeishuChannel extends Channel {
       this._seenMessageIds.delete(this._seenMessageIdQueue.shift()!);
     }
 
-    if (!this._isAllowed(chatId)) { this._debug(`[recv] blocked: chat=${chatId} not allowed`); return; }
+    if (!this._isAllowed(chatId)) { this._log(`[recv] blocked: chat=${chatId} not allowed`, 'warn'); return; }
     this._trackChat(chatId);
 
     const sender = event.sender;
@@ -537,9 +543,12 @@ class FeishuChannel extends Channel {
     if (from.openId) this._openIdToChat.set(from.openId, chatId);
 
     // Group: require @mention
-    if (chatType === 'group' && !this._isBotMentioned(msg)) {
-      this._debug(`[recv] skipped: not mentioned in group ${chatId}`);
-      return;
+    if (chatType === 'group') {
+      this._log(`[recv] group check mention: bot=${JSON.stringify(this.bot)}, mentions=${JSON.stringify(msg.mentions)}`, 'info');
+      if (!this._isBotMentioned(msg)) {
+        this._log(`[recv] skipped: not mentioned in group ${chatId}`, 'info');
+        return;
+      }
     }
 
     const parentId = typeof msg.parent_id === 'string' && msg.parent_id ? msg.parent_id : null;

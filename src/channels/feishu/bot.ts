@@ -191,7 +191,11 @@ export class FeishuBot extends Bot {
     }
     // Restore chats persisted across restarts so sendStartupNotice can greet
     // them even when the env-based hand-off was lost (crash-style respawn).
-    for (const id of loadKnownChatIds('feishu')) this.allowedChatIds.add(id);
+    for (const id of loadKnownChatIds('feishu')) {
+      // Do NOT add to allowedChatIds, as that would lock out new chats
+      // if the user didn't explicitly configure an allowlist.
+      // The channel will load these into its own knownChats later.
+    }
 
     this.appId = String(config.feishuAppId || process.env.FEISHU_APP_ID || '').trim();
     this.appSecret = String(config.feishuAppSecret || process.env.FEISHU_APP_SECRET || '').trim();

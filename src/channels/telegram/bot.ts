@@ -143,7 +143,7 @@ export class TelegramBot extends Bot {
     // Restore chats persisted across restarts so sendStartupNotice can greet
     // them even when the env-based hand-off was lost (crash-style respawn).
     for (const id of loadKnownChatIds('telegram')) {
-      for (const parsed of parseAllowedChatIds(id)) this.allowedChatIds.add(parsed);
+      // Do NOT add to allowedChatIds
     }
     this.token = String(config.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || '').trim();
     if (!this.token) throw new Error('Missing Telegram token. Configure via dashboard or set TELEGRAM_BOT_TOKEN');
