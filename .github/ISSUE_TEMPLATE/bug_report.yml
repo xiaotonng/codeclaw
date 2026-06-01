@@ -7,6 +7,14 @@ body:
       value: |
         Thanks for taking the time to report a bug! Please fill out the sections below so we can reproduce and fix it.
 
+  - type: checkboxes
+    id: scope_ack
+    attributes:
+      label: Before you start
+      options:
+        - label: "This is a technical bug report — not an accusation, a complaint about the project/maintainer, or a meta/opinion post. 这是技术问题，不是对项目或维护者的指控、舆论或元讨论帖。"
+          required: true
+
   - type: input
     id: version
     attributes:

@@ -7,6 +7,14 @@ body:
       value: |
         Thanks for suggesting a feature! Please describe what you'd like and why.
 
+  - type: checkboxes
+    id: scope_ack
+    attributes:
+      label: Before you start
+      options:
+        - label: "This is a genuine feature request — not an accusation, a complaint about the project/maintainer, or a meta/opinion post. 这是真实的功能建议，不是对项目或维护者的指控、舆论或元讨论帖。"
+          required: true
+
   - type: textarea
     id: problem
     attributes:

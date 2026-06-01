@@ -1,0 +1,86 @@
+name: Issue reputation guard
+
+# Auto-screens NEWLY OPENED issues from accounts with zero GitHub footprint and
+# no prior interaction with this repo, then closes + labels them for maintainer
+# review.
+#
+# Design notes (deliberately conservative to minimise false positives):
+#   * Owners / members / collaborators / past contributors are skipped entirely.
+#   * It only acts when the author has 0 public repos AND 0 followers AND has
+#     never opened an issue/PR here before. Any real track record => untouched.
+#   * Flagged issues are closed + labelled but NOT locked, so a genuine newcomer
+#     caught by mistake can simply comment to appeal and a maintainer reopens.
+#   * Account age is logged but intentionally NOT used as a gate: the accounts
+#     this targets pre-age themselves, so footprint/interaction is the signal.
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.issue.author_association != 'OWNER' &&
+      github.event.issue.author_association != 'MEMBER' &&
+      github.event.issue.author_association != 'COLLABORATOR' &&
+      github.event.issue.author_association != 'CONTRIBUTOR'
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            const login = issue.user.login;
+
+            const { data: user } = await github.rest.users.getByUsername({ username: login });
+
+            // Prior issues/PRs authored in THIS repo (excluding the one just opened).
+            const prior = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'all', creator: login, per_page: 100,
+            });
+            const priorCount = prior.filter(i => i.number !== issue.number).length;
+
+            const repos = user.public_repos;
+            const followers = user.followers;
+            const ageDays = Math.floor((Date.now() - new Date(user.created_at).getTime()) / 86400000);
+
+            core.info(`author=${login} repos=${repos} followers=${followers} ageDays=${ageDays} priorIssues=${priorCount} assoc=${issue.author_association}`);
+
+            // Conservative gate: zero footprint AND zero prior interaction here.
+            const looksThrowaway = repos === 0 && followers === 0 && priorCount === 0;
+            if (!looksThrowaway) {
+              core.info('Author has footprint or prior interaction — leaving issue untouched.');
+              return;
+            }
+
+            const label = 'pending-maintainer-review';
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (e) {
+              await github.rest.issues.createLabel({
+                owner, repo, name: label, color: 'BFBFBF',
+                description: 'Auto-flagged: opened by a zero-footprint account; awaiting maintainer review',
+              });
+            }
+            await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: [label] });
+
+            const body = [
+              '👋 This issue was **automatically closed** by an anti-spam guard because it was opened by a GitHub account with **no public repositories, no followers, and no prior activity in this repository**.',
+              '',
+              'If you are a real user with a genuine report, sorry for the friction — just **leave a comment below explaining your situation** and a maintainer will reopen it.',
+              '',
+              '---',
+              '本 issue 由反刷屏自动规则关闭:提交账号在 GitHub 上**无公开仓库、无粉丝、且从未与本仓库互动**。如果你是真实用户,请**在下方留言说明**,维护者会重新开启。',
+            ].join('\n');
+            await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body });
+
+            await github.rest.issues.update({
+              owner, repo, issue_number: issue.number,
+              state: 'closed', state_reason: 'not_planned',
+            });
+
+            core.info(`Flagged & closed #${issue.number} from zero-footprint account ${login}.`);
