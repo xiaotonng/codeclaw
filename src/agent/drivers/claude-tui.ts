@@ -286,6 +286,45 @@ function makeTuiStreamBuffer(): TuiStreamBuffer {
   return { trueText: '', displayedLen: 0, timer: null };
 }
 
+function extractTextBlocks(content: any): string {
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((block: any) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block: any) => block.text)
+    .join('\n')
+    .trim();
+}
+
+function normalizedNoticeLines(text: string): string[] {
+  return stripAnsiEscapes(text)
+    .split(/\r?\n/)
+    .map(line => line.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, ''))
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function limitNoticeFromText(text: string | null | undefined): string | null {
+  if (!text) return null;
+  const patterns = [
+    /you(?:'|’)ve hit your (?:session|usage) limit/i,
+    /you have hit your (?:session|usage) limit/i,
+    /(?:session|usage) limit (?:reached|exceeded)/i,
+    /(?:session|usage) limit.{0,100}resets?/i,
+    /(?:rate limit|rate limited).{0,100}(?:try again|resets?|later)/i,
+    /(?:try again|resets?|later).{0,100}(?:rate limit|rate limited)/i,
+  ];
+  for (const line of normalizedNoticeLines(text)) {
+    if (patterns.some(pattern => pattern.test(line))) return line.slice(0, 240);
+  }
+  return null;
+}
+
+export function detectClaudeTuiTerminalLimitNotice(msgOrText: any): string | null {
+  if (typeof msgOrText === 'string') return limitNoticeFromText(msgOrText);
+  if (!msgOrText || msgOrText.model !== '<synthetic>') return null;
+  return limitNoticeFromText(extractTextBlocks(msgOrText.content));
+}
+
 /**
  * Extract text / thinking blocks from an assistant JSONL event and route them:
  * text → the chunked stream buffer (slow drain), thinking → `s.thinking`
@@ -725,9 +764,28 @@ export async function doClaudeTuiStream(opts: StreamOpts): Promise<StreamResult>
   let processExited = false;
   let exitCode: number | null = null;
   let exitSignal: number | null = null;
+  let terminalLimitNotice: string | null = null;
+  let proc: PtyProcess;
 
   const emit = () => {
     try { opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), s.plan); } catch {}
+  };
+
+  const killProc = (signal: string, after = 5000) => {
+    try { proc.kill(signal); } catch {}
+    setTimeout(() => {
+      if (!processExited) { try { proc.kill('SIGKILL'); } catch {} }
+    }, after);
+  };
+
+  const markTerminalLimitNotice = (notice: string): void => {
+    if (terminalLimitNotice) return;
+    terminalLimitNotice = notice;
+    s.stopReason = 'rate_limit';
+    s.errors = [notice];
+    agentWarn(`[claude-tui] terminal limit notice detected: ${notice}`);
+    emit();
+    if (!processExited) killProc('SIGTERM', 1500);
   };
 
   // Simulated streaming. See TuiStreamBuffer / applyAssistantStreaming above.
@@ -785,7 +843,6 @@ export async function doClaudeTuiStream(opts: StreamOpts): Promise<StreamResult>
   const claudeBin = whichSync('claude') || 'claude';
   agentLog(`[claude-tui] spawning ${claudeBin} TUI session=${activeSessionId} model=${model || '(default)'} prompt=${fullPrompt.length}ch resume=${isResume} fork=${isFork}`);
 
-  let proc: PtyProcess;
   try {
     proc = pty.spawn(claudeBin, claudeArgs, {
       cwd: opts.workdir,
@@ -821,16 +878,12 @@ export async function doClaudeTuiStream(opts: StreamOpts): Promise<StreamResult>
     if (stderrCapture.length < 4096) {
       stderrCapture += stripAnsiEscapes(data);
       if (stderrCapture.length > 4096) stderrCapture = stderrCapture.slice(0, 4096);
+      const notice = detectClaudeTuiTerminalLimitNotice(stderrCapture);
+      if (notice) markTerminalLimitNotice(notice);
     }
   });
 
   // 7. Abort handling.
-  const killProc = (signal: string, after = 5000) => {
-    try { proc.kill(signal); } catch {}
-    setTimeout(() => {
-      if (!processExited) { try { proc.kill('SIGKILL'); } catch {} }
-    }, after);
-  };
   const abortStream = () => {
     if (interrupted || processExited) return;
     interrupted = true;
@@ -1010,6 +1063,12 @@ export async function doClaudeTuiStream(opts: StreamOpts): Promise<StreamResult>
         // own sub-agent routing handles them.
         const isSubAgentEvent = typeof ev.parent_tool_use_id === 'string' && ev.parent_tool_use_id;
         if (!isSubAgentEvent && ev.type === 'assistant') {
+          const notice = detectClaudeTuiTerminalLimitNotice(ev.message);
+          if (notice) {
+            markTerminalLimitNotice(notice);
+            touched = true;
+            continue;
+          }
           applyAssistantStreaming(s, ev.message, streamBuf);
           applyAssistantUsage(s, ev.message);
           if (ev.message?.model && ev.message.model !== '<synthetic>' && typeof ev.message.model === 'string') {
@@ -1092,6 +1151,12 @@ export async function doClaudeTuiStream(opts: StreamOpts): Promise<StreamResult>
       try { ev = JSON.parse(trimmed); } catch { continue; }
       const isSubAgentEvent = typeof ev.parent_tool_use_id === 'string' && ev.parent_tool_use_id;
       if (!isSubAgentEvent && ev.type === 'assistant') {
+        const notice = detectClaudeTuiTerminalLimitNotice(ev.message);
+        if (notice) {
+          markTerminalLimitNotice(notice);
+          touched = true;
+          continue;
+        }
         applyAssistantStreaming(s, ev.message, streamBuf);
         applyAssistantUsage(s, ev.message);
         if (ev.message?.model && ev.message.model !== '<synthetic>' && typeof ev.message.model === 'string') {

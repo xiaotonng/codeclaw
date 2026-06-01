@@ -284,12 +284,17 @@ function buildPreviewMarkdown(input: StreamPreviewRenderInput, options?: { inclu
   }
 
   if (data.thinkDisplay && !data.display) {
-    parts.push(`**${data.label}**\n${stripCodeFences(data.thinkDisplay)}`);
+    const header = data.thinkingTokensText ? `${data.label} · ${data.thinkingTokensText}` : data.label;
+    parts.push(`**${header}**\n${stripCodeFences(data.thinkDisplay)}`);
   } else if (data.display) {
     if (data.rawThinking) {
       parts.push(`**${data.label}**\n${stripCodeFences(data.thinkSnippet)}`);
     }
     parts.push(ensureBalancedCodeFences(data.preview));
+  } else if (data.thinkingTokensText) {
+    // Pre-text extended-thinking phase: no thinking/body text yet, but output
+    // tokens are accruing — show "{thinkLabel} · <n>" so the card isn't blank.
+    parts.push(`**${data.label} · ${data.thinkingTokensText}**`);
   }
 
   if (options?.includeFooter !== false) {

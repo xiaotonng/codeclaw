@@ -151,6 +151,13 @@ export const SessionPanel = memo(function SessionPanel({
   const clearLiveStreamOnLoadRef = useRef<{ taskId: string | null } | true | false>(false);
   const initialPendingConsumedRef = useRef(false);
   const promotingRef = useRef(false);
+  // The composer owns the per-session model/effort pick (local state that never
+  // touches session.model or the global runtime). Mirror its resolved selection
+  // here so "rerun" sends with the user's current choice, not the stale runtime.
+  const composerSelectionRef = useRef<{ model: string | null; effort: string | null }>({ model: null, effort: null });
+  const handleComposerSelectionChange = useCallback((sel: { model: string | null; effort: string | null }) => {
+    composerSelectionRef.current = sel;
+  }, []);
 
   // Consume initialPendingPrompt/initialPendingImageUrls from new-session flow.
   // State (pendingPrompt, pendingImageUrls, loading, localStreamPendingRef) is already initialized
@@ -777,7 +784,14 @@ export const SessionPanel = memo(function SessionPanel({
                   onResend={(txt) => {
                     scrollToBottomRef.current = true;
                     handleSendStart(txt);
-                    api.sendSessionMessage(workdir, session.agent || '', session.sessionId, txt)
+                    // Send with the composer's current pick (mirrored via
+                    // onSelectionChange); fall back to the session/global model
+                    // and effort so we never regress to omitting them entirely.
+                    const sel = composerSelectionRef.current;
+                    api.sendSessionMessage(workdir, session.agent || '', session.sessionId, txt, {
+                      model: sel.model || displayModel || undefined,
+                      effort: sel.effort || displayEffort || undefined,
+                    })
                       .then((res) => { if (res.ok) requestStreamPolling(); })
                       .catch(() => { clearPending(); });
                   }}
@@ -845,6 +859,7 @@ export const SessionPanel = memo(function SessionPanel({
         onStopAll={handleStopAll}
         editDraft={editDraft}
         onEditDraftConsumed={() => setEditDraft(null)}
+        onSelectionChange={handleComposerSelectionChange}
       />
 
       {/* ── Fork composer modal ── */}

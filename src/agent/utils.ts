@@ -201,7 +201,8 @@ export function detectClaudeApiError(text: string | null | undefined): string | 
  */
 export function isRetryableClaudeApiError(reason: string): boolean {
   const r = reason.toLowerCase();
-  return /overloaded|overload|timeout|timed out|rate limit|500|502|503|504|529|temporar|gateway|connection|network|internal (server )?error/i.test(r);
+  if (/rate limit|rate limited|quota|usage limit|session limit/i.test(r)) return false;
+  return /overloaded|overload|timeout|timed out|500|502|503|504|529|temporar|gateway|connection|network|internal (server )?error/i.test(r);
 }
 
 export function appendSystemPrompt(base: string | undefined, extra: string): string {

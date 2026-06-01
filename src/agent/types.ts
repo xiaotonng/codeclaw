@@ -191,6 +191,14 @@ export interface StreamOpts {
   claudePermissionMode?: string;
   claudeAppendSystemPrompt?: string;
   claudeExtraArgs?: string[];
+  /**
+   * Permit Claude's multi-agent Workflow orchestration this turn. When falsy
+   * (the default), the driver passes `--disallowed-tools Workflow` so the tool
+   * is absent from the toolset entirely — a hard gate that holds even under
+   * `--permission-mode bypassPermissions`. When true the tool is left enabled
+   * and a standing opt-in directive is injected via the system prompt.
+   */
+  claudeWorkflowEnabled?: boolean;
   // gemini
   geminiModel?: string;
   geminiApprovalMode?: string;
@@ -273,6 +281,13 @@ export interface AgentDriverCapabilities {
    * profile-binding time and is not switchable per-session via ACP today).
    */
   modelSwitch: boolean;
+  /**
+   * Driver can run multi-agent Workflow orchestrations (fan-out / pipeline /
+   * adversarial verify). Gates whether the IM/dashboard expose the workflow
+   * toggle and whether the bot threads `claudeWorkflowEnabled` into the stream.
+   * Only claude advertises this today.
+   */
+  workflow: boolean;
 }
 
 /** Result returned by a completed agent stream. */

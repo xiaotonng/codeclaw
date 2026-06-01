@@ -4,6 +4,7 @@
 
 import type { Bot, ChatId, Agent, SessionRuntime } from './bot.js';
 import { normalizeAgent } from './bot.js';
+import { getDriverCapabilities } from '../agent/driver.js';
 import { getSessionStatusForChat } from './session-status.js';
 import {
   getAgentsListData,
@@ -33,7 +34,8 @@ export type CommandAction =
   | { kind: 'models.select.effort'; effort: string }
   | { kind: 'models.confirm' }
   | { kind: 'skill.run'; command: string }
-  | { kind: 'mode.switch'; mode: string };
+  | { kind: 'mode.switch'; mode: string }
+  | { kind: 'workflow.toggle'; enabled: boolean };
 
 export type CommandItemState = 'default' | 'current' | 'running' | 'unavailable';
 
@@ -116,6 +118,8 @@ export function encodeCommandAction(action: CommandAction): string {
       return `skr:${action.command}`;
     case 'mode.switch':
       return `pm:${action.mode}`;
+    case 'workflow.toggle':
+      return `wf:${action.enabled ? 1 : 0}`;
   }
 }
 
@@ -185,6 +189,11 @@ export function decodeCommandAction(data: string): CommandAction | null {
     const mode = data.slice(3);
     if (!mode) return null;
     return { kind: 'mode.switch', mode };
+  }
+  if (data.startsWith('wf:')) {
+    const flag = data.slice(3);
+    if (flag !== '0' && flag !== '1') return null;
+    return { kind: 'workflow.toggle', enabled: flag === '1' };
   }
   return null;
 }
@@ -465,21 +474,40 @@ export function buildSkillsCommandView(bot: Bot, chatId: ChatId): CommandSelecti
 
 export function buildModeCommandView(bot: Bot, chatId: ChatId): CommandSelectionView {
   const cs = bot.chat(chatId);
-  const isPlanMode = cs.agent === 'claude' && bot.claudePermissionMode === 'plan';
+  const isClaude = cs.agent === 'claude';
+  const isPlanMode = isClaude && bot.claudePermissionMode === 'plan';
+  const supportsWorkflow = getDriverCapabilities(cs.agent).workflow;
+  const workflowOn = supportsWorkflow && bot.workflowEnabledForAgent(cs.agent);
+
+  const rows: CommandActionButton[][] = [
+    [
+      { label: 'Code', action: { kind: 'mode.switch', mode: 'bypassPermissions' },
+        state: isPlanMode ? 'default' : 'current', primary: !isPlanMode },
+      { label: 'Plan', action: { kind: 'mode.switch', mode: 'plan' },
+        state: isPlanMode ? 'current' : 'default', primary: isPlanMode },
+    ],
+  ];
+
+  const metaLines: string[] = [];
+  if (!isClaude && !supportsWorkflow) metaLines.push('Permission mode is only available for Claude.');
+  if (supportsWorkflow) {
+    metaLines.push(`Workflow orchestration: ${workflowOn ? 'On' : 'Off'} — multi-agent fan-out for large tasks.`);
+    rows.push([
+      { label: 'Workflow On', action: { kind: 'workflow.toggle', enabled: true },
+        state: workflowOn ? 'current' : 'default', primary: workflowOn },
+      { label: 'Workflow Off', action: { kind: 'workflow.toggle', enabled: false },
+        state: workflowOn ? 'default' : 'current', primary: !workflowOn },
+    ]);
+  }
+
   return {
     kind: 'mode',
     title: 'Agent Mode',
-    detail: `Current: ${isPlanMode ? 'Plan (read-only)' : 'Code (full access)'}`,
-    metaLines: cs.agent !== 'claude' ? ['Only available for Claude agent'] : [],
+    detail: `Current: ${isPlanMode ? 'Plan (read-only)' : 'Code (full access)'}`
+      + (supportsWorkflow ? ` · Workflow ${workflowOn ? 'On' : 'Off'}` : ''),
+    metaLines,
     items: [],
-    rows: [
-      [
-        { label: 'Code', action: { kind: 'mode.switch', mode: 'bypassPermissions' },
-          state: isPlanMode ? 'default' : 'current', primary: !isPlanMode },
-        { label: 'Plan', action: { kind: 'mode.switch', mode: 'plan' },
-          state: isPlanMode ? 'current' : 'default', primary: isPlanMode },
-      ],
-    ],
+    rows,
   };
 }
 
@@ -695,6 +723,28 @@ export async function executeCommandAction(
         kind: 'notice',
         callbackText: `Mode: ${label}`,
         notice: { title: 'Agent Mode', value: label },
+      };
+    }
+
+    case 'workflow.toggle': {
+      const cs = bot.chat(chatId);
+      if (!getDriverCapabilities(cs.agent).workflow) {
+        return { kind: 'noop', message: `${cs.agent} does not support workflow orchestration` };
+      }
+      if (bot.workflowEnabledForAgent(cs.agent) === action.enabled) {
+        return { kind: 'noop', message: `Workflow already ${action.enabled ? 'on' : 'off'}` };
+      }
+      bot.switchWorkflowForChat(chatId, action.enabled);
+      return {
+        kind: 'notice',
+        callbackText: `Workflow ${action.enabled ? 'On' : 'Off'}`,
+        notice: {
+          title: 'Workflow Orchestration',
+          value: action.enabled ? 'On' : 'Off',
+          detail: action.enabled
+            ? `${cs.agent} · multi-agent fan-out enabled · takes effect next message`
+            : `${cs.agent} · Workflow tool disabled · takes effect next message`,
+        },
       };
     }
   }

@@ -43,7 +43,7 @@ function brandIdForProvider(p: { kind: string; baseURL: string }): string {
   return 'custom';
 }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, onRecall, onSteer, onStopAll, editDraft, onEditDraftConsumed }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingQueuedSends, onRecall, onSteer, onStopAll, editDraft, onEditDraftConsumed, onSelectionChange }: {
   session: SessionInfo;
   workdir: string;
   onStreamQueued: () => void;
@@ -67,6 +67,11 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   onStopAll?: () => void | Promise<void>;
   editDraft?: string | null;
   onEditDraftConsumed?: () => void;
+  /** Reports the composer's currently-resolved model + effort (the per-session
+   *  cascade pick, or the agent's global default) so actions owned by the parent
+   *  — e.g. the message "rerun" button — can send with the same selection the
+   *  user sees in the chip instead of the stale session-runtime values. */
+  onSelectionChange?: (sel: { model: string | null; effort: string | null }) => void;
 }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -561,6 +566,11 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const currentEffort = effectiveAgent === 'gemini'
     ? ''
     : (selectedEffort || currentAgent?.selectedEffort || '');
+  // Surface the resolved selection to the parent so the rerun action sends with
+  // the model/effort the user currently sees, not the stale session runtime.
+  useEffect(() => {
+    onSelectionChange?.({ model: currentModel || null, effort: currentEffort || null });
+  }, [currentModel, currentEffort, onSelectionChange]);
   const effortLevels = EFFORT_OPTIONS[cascadeAgentId as keyof typeof EFFORT_OPTIONS] || [];
   const previewAttachment = previewImageId ? imageAttachments.find(item => item.id === previewImageId) || null : null;
   const activePreview: LightboxSource | null = previewAttachment

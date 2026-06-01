@@ -96,7 +96,7 @@ export function shutdownAllDrivers() {
   for (const d of drivers.values()) d.shutdown();
 }
 
-const DEFAULT_CAPABILITIES: AgentDriverCapabilities = { fork: false, modelSwitch: true };
+const DEFAULT_CAPABILITIES: AgentDriverCapabilities = { fork: false, modelSwitch: true, workflow: false };
 
 export function getDriverCapabilities(id: string): AgentDriverCapabilities {
   const d = drivers.get(id);

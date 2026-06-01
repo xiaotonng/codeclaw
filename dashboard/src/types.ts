@@ -57,13 +57,15 @@ export interface AgentRuntimeStatus extends AgentInfo {
    *  initial value of the native-mode model field. */
   nativeSelectedModel?: string | null;
   nativeSelectedEffort?: string | null;
+  /** Whether multi-agent Workflow orchestration is enabled for this agent. */
+  workflowEnabled?: boolean;
   isDefault: boolean;
   models: ModelInfo[];
   usage: UsageResult | null;
   /** Driver-supplied snapshot of the agent's external config, when applicable. */
   nativeConfig?: AgentNativeConfig | null;
   /** Static driver capability flags, e.g. fork support. */
-  capabilities?: { fork?: boolean; modelSwitch?: boolean };
+  capabilities?: { fork?: boolean; modelSwitch?: boolean; workflow?: boolean };
   /** BYOK provider name (e.g. "OpenRouter") when this agent has a Profile
    *  bound; null otherwise. Drives the dashboard "via <provider>" tag on
    *  turns where the bound model id matches the saved turn's model. */

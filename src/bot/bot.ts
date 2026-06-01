@@ -29,7 +29,7 @@ import {
   querySessions, querySessionTail, updateSession,
   type SessionQueryResult,
 } from './session-hub.js';
-import { getDriver, hasDriver, allDriverIds } from '../agent/driver.js';
+import { getDriver, hasDriver, allDriverIds, getDriverCapabilities } from '../agent/driver.js';
 import { resolveGuiIntegrationConfig } from '../agent/mcp/bridge.js';
 import { terminateProcessTree } from '../core/process-control.js';
 import { expandTilde } from '../core/platform.js';
@@ -129,6 +129,19 @@ function buildBrowserAutomationPrompt(browserEnabled: boolean): string {
     'A Playwright MCP browser server is already configured to use the local Chrome channel with a persistent profile.',
     'Do not call browser_install unless a browser tool explicitly reports that Chrome or the browser is missing.',
     'If you need a new tab, use browser_tabs with action="new".',
+  ].join('\n');
+}
+
+function buildWorkflowOptInPrompt(): string {
+  // Standing opt-in injected only when the user explicitly enabled workflow
+  // orchestration for this agent. The Workflow tool is left enabled (not
+  // disallowed) in this mode; this directive tells the model it may reach for
+  // it proactively on genuinely large work, while preserving the default
+  // single-agent behaviour for everything else (no baseline regression).
+  return [
+    '[Multi-agent Workflow]',
+    'Workflow orchestration is enabled for this session. For substantial multi-step work — broad research, large refactors or audits, fan-out reviews across many files — you may proactively author and run a Workflow to decompose and parallelise it.',
+    'Keep it proportional: do NOT orchestrate trivial or single-file tasks. When a workflow would not add value, just answer directly as a single agent. Workflows can spawn many sub-agents and consume significant tokens, so reserve them for work whose scale genuinely warrants the fan-out.',
   ].join('\n');
 }
 
@@ -340,6 +353,12 @@ export interface SubmitSessionTaskOpts {
   attachments?: string[];
   modelId?: string | null;
   thinkingEffort?: string | null;
+  /**
+   * Per-turn opt-in to Claude's multi-agent Workflow orchestration. A deliberate
+   * per-send choice (dashboard composer), NOT a persisted default. When omitted
+   * the run falls back to the agent's in-memory flag (IM /mode). Defaults off.
+   */
+  workflowEnabled?: boolean;
   sourceMessageId?: number | string;
   chatId?: ChatId;
   /**
@@ -438,6 +457,7 @@ export class Bot {
   set claudeModel(v: string) { this.agentConfigs.claude.model = v; }
   get claudePermissionMode(): string { return this.agentConfigs.claude?.permissionMode || 'bypassPermissions'; }
   get claudeExtraArgs(): string[] { return this.agentConfigs.claude?.extraArgs || []; }
+  get claudeWorkflowEnabled(): boolean { return this.agentConfigs.claude?.workflowEnabled ?? false; }
   get geminiApprovalMode(): string { return this.agentConfigs.gemini?.approvalMode || 'yolo'; }
   get geminiSandbox(): boolean { return this.agentConfigs.gemini?.sandbox ?? false; }
   get geminiExtraArgs(): string[] { return this.agentConfigs.gemini?.extraArgs || []; }
@@ -769,6 +789,9 @@ export class Bot {
         model: resolveAgentModel(config, 'claude'),
         reasoningEffort: resolveAgentEffort(config, 'claude') || 'high',
         permissionMode: (process.env.CLAUDE_PERMISSION_MODE || 'bypassPermissions').trim(),
+        // Workflow orchestration is a per-session/per-turn choice (composer
+        // toggle / IM /mode), never a persisted default — always boot off.
+        workflowEnabled: false,
         extraArgs: shellSplit(process.env.CLAUDE_EXTRA_ARGS || ''),
       },
       gemini: {
@@ -1715,7 +1738,9 @@ export class Bot {
           this.createInteractionHandler(chatId, taskId),
           undefined,
           undefined,
-          opts.forkOf ? { forkOf: opts.forkOf } : undefined,
+          (opts.forkOf || opts.workflowEnabled !== undefined)
+            ? { ...(opts.forkOf ? { forkOf: opts.forkOf } : {}), ...(opts.workflowEnabled !== undefined ? { workflowEnabled: opts.workflowEnabled } : {}) }
+            : undefined,
         );
         this.emitStreamDone(taskId, session.key, {
           sessionId: result.sessionId || session.sessionId,
@@ -2206,6 +2231,24 @@ export class Bot {
     }
   }
 
+  /**
+   * Toggle multi-agent Workflow orchestration for the chat's current agent.
+   * Unlike permission-mode it does NOT reset the conversation — the tool set is
+   * resolved per-invocation, so the change cleanly takes effect on the next
+   * turn without invalidating the session transcript. No-op for agents whose
+   * driver doesn't advertise the capability.
+   */
+  switchWorkflowForChat(chatId: ChatId, enabled: boolean) {
+    const cs = this.chat(chatId);
+    if (!getDriverCapabilities(cs.agent).workflow) {
+      this.log(`workflow toggle ignored: ${cs.agent} does not support orchestration`);
+      return;
+    }
+    this.setWorkflowEnabledForAgent(cs.agent, enabled);
+    this.persistAgentPreference(cs.agent, 'workflow', enabled ? '1' : '0');
+    this.log(`workflow ${enabled ? 'enabled' : 'disabled'} for ${cs.agent} chat=${chatId}`);
+  }
+
   modelForAgent(agent: Agent): string {
     // For agents whose CLIs cannot switch model via flags (Hermes uses ACP
     // session/set_model, which only fires when a BYOK Profile is bound), the
@@ -2296,12 +2339,29 @@ export class Bot {
     this.log(`effort for ${agent} changed to ${effort}`);
   }
 
-  private persistAgentPreference(agent: Agent, kind: 'model' | 'effort', value: string) {
+  workflowEnabledForAgent(agent: Agent): boolean {
+    return this.agentConfigs[agent]?.workflowEnabled ?? false;
+  }
+
+  setWorkflowEnabledForAgent(agent: Agent, enabled: boolean) {
+    const config = this.agentConfigs[agent];
+    if (config) config.workflowEnabled = enabled;
+    this.log(`workflow for ${agent} changed to ${enabled}`);
+  }
+
+  private persistAgentPreference(agent: Agent, kind: 'model' | 'effort' | 'workflow', value: string) {
     try {
       // Hermes model writes go to the active BYOK Profile (the runtime's only
       // model-switching surface). Falls through to the legacy `hermesModel`
       // user-config field when no Profile is bound.
       if (kind === 'model' && agent === 'hermes' && setAgentBoundModelId('hermes', value)) return;
+
+      // Workflow orchestration opt-in is a boolean field, and only claude
+      // advertises the capability, so it bypasses the string patch below.
+      if (kind === 'workflow') {
+        if (agent === 'claude') updateUserConfig({ claudeWorkflowEnabled: value === '1' });
+        return;
+      }
 
       const patch: Record<string, string> = {};
       if (kind === 'model') {
@@ -2485,6 +2545,9 @@ export class Bot {
         if (opts.initial) this.agentConfigs[agent].reasoningEffort = nextEffort;
         else this.setEffortForAgent(agent, nextEffort);
       }
+      // Workflow is intentionally NOT reconciled from config here: it's an
+      // in-memory per-session toggle (composer / IM /mode), so a config-sync
+      // tick must not clobber a deliberate in-session choice.
     }
 
     if (!opts.initial) this.onManagedConfigChange(config, opts);
@@ -2499,7 +2562,7 @@ export class Bot {
     onInteraction?: (request: AgentInteraction) => Promise<Record<string, any> | null>,
     onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void,
     onCodexTurnReady?: (control: CodexTurnControl) => void,
-    extras?: { forkOf?: { parentSessionId: string; atTurn: number } },
+    extras?: { forkOf?: { parentSessionId: string; atTurn: number }; workflowEnabled?: boolean },
   ): Promise<StreamResult> {
     const agentConfig = this.agentConfigs[cs.agent] || {};
     // Session-level config stored on disk — used as fallback between explicit override and global defaults
@@ -2552,12 +2615,19 @@ export class Bot {
         this.warn(`[runStream] handover threw: ${e?.message || e}; proceeding without prior context`);
       }
     }
+    // Per-turn workflow opt-in (dashboard composer passes it explicitly);
+    // falls back to the agent's in-memory flag (IM /mode) when unspecified.
+    // Default off — never read from a persisted config default.
+    const workflowEnabled = cs.agent === 'claude' && (extras?.workflowEnabled ?? this.claudeWorkflowEnabled);
     const mcpSystemPrompt = appendExtraPrompt(
       appendExtraPrompt(
-        mcpSendFile ? buildMcpDeliveryPrompt() : '',
-        onInteraction && cs.agent === 'claude' ? buildClaudeAskUserPrompt() : '',
+        appendExtraPrompt(
+          mcpSendFile ? buildMcpDeliveryPrompt() : '',
+          onInteraction && cs.agent === 'claude' ? buildClaudeAskUserPrompt() : '',
+        ),
+        buildBrowserAutomationPrompt(browserEnabled),
       ),
-      buildBrowserAutomationPrompt(browserEnabled),
+      workflowEnabled ? buildWorkflowOptInPrompt() : '',
     );
     // mcpSystemPrompt carries behaviour directives (use im_ask_user instead of
     // built-in AskUserQuestion, browser automation status, artifact delivery)
@@ -2596,6 +2666,7 @@ export class Bot {
       // claude-specific
       claudeModel: cs.agent === 'claude' ? resolvedModel : this.claudeModel,
       claudePermissionMode: this.claudePermissionMode,
+      claudeWorkflowEnabled: workflowEnabled,
       claudeAppendSystemPrompt: effectiveSystemPrompt || undefined,
       claudeExtraArgs: this.claudeExtraArgs.length ? this.claudeExtraArgs : undefined,
       // gemini-specific

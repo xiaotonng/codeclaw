@@ -2100,6 +2100,26 @@ echo '{"type":"result","session_id":"s-no"}'`;
     expect(withoutAttachments.ok).toBe(true);
     expect(fs.readFileSync(emptyArgsFile, 'utf-8')).not.toContain('--input-format');
   });
+
+  it('hard-disables the Workflow tool by default and re-enables it only when claudeWorkflowEnabled is set', async () => {
+    const argsFile = path.join(tmpDir, 'claude-wf-args.txt');
+    const script = `#!/bin/sh
+echo "$@" > ${argsFile}
+echo '{"type":"system","session_id":"s-wf"}'
+echo '{"type":"result","session_id":"s-wf"}'`;
+    fs.writeFileSync(path.join(fakeBin, 'claude'), script, { mode: 0o755 });
+
+    // Default (workflow off): the Workflow tool is dropped from the toolset so a
+    // bare "workflow" keyword can't auto-spawn sub-agents under bypassPermissions.
+    const off = await doClaudeStream(baseOpts('claude', { prompt: 'a' }));
+    expect(off.ok).toBe(true);
+    expect(fs.readFileSync(argsFile, 'utf-8')).toContain('--disallowed-tools Workflow');
+
+    // Explicitly enabled: the tool is left available (no disallow).
+    const on = await doClaudeStream(baseOpts('claude', { prompt: 'b', claudeWorkflowEnabled: true }));
+    expect(on.ok).toBe(true);
+    expect(fs.readFileSync(argsFile, 'utf-8')).not.toContain('--disallowed-tools Workflow');
+  });
 });
 
 describe('listModels, getUsage, and getSessionTail', () => {

@@ -36,6 +36,8 @@ describe('CommandAction codec', () => {
     { kind: 'skill.run', command: 'sk_review' },
     { kind: 'mode.switch', mode: 'plan' },
     { kind: 'mode.switch', mode: 'bypassPermissions' },
+    { kind: 'workflow.toggle', enabled: true },
+    { kind: 'workflow.toggle', enabled: false },
   ];
 
   it('round-trips every CommandAction kind', () => {
@@ -53,6 +55,8 @@ describe('CommandAction codec', () => {
     expect(decodeCommandAction('ag:notAnAgent')).toBeNull();
     expect(decodeCommandAction('sp:-1')).toBeNull();   // negative page
     expect(decodeCommandAction('sp:abc')).toBeNull();  // non-numeric page
+    expect(decodeCommandAction('wf:')).toBeNull();     // missing flag
+    expect(decodeCommandAction('wf:2')).toBeNull();    // non-boolean flag
   });
 
   it('keeps encoded payloads short enough for IM button callbacks (<= 64 bytes)', () => {

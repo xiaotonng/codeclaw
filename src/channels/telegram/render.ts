@@ -401,12 +401,17 @@ export function buildStreamPreviewHtml(input: StreamPreviewRenderInput): string 
   }
 
   if (data.thinkDisplay && !data.display) {
-    parts.push(`<blockquote><b>${escapeHtml(data.label)}</b>\n${escapeHtml(data.thinkDisplay)}</blockquote>`);
+    const header = data.thinkingTokensText ? `${data.label} · ${data.thinkingTokensText}` : data.label;
+    parts.push(`<blockquote><b>${escapeHtml(header)}</b>\n${escapeHtml(data.thinkDisplay)}</blockquote>`);
   } else if (data.display) {
     if (data.rawThinking) {
       parts.push(`<blockquote><b>${escapeHtml(data.label)}</b>\n${escapeHtml(data.thinkSnippet)}</blockquote>`);
     }
     parts.push(mdToTgHtml(data.preview));
+  } else if (data.thinkingTokensText) {
+    // Pre-text extended-thinking phase: no thinking/body text yet, but output
+    // tokens are accruing — show "{thinkLabel} · <n>" so the card isn't blank.
+    parts.push(`<blockquote><b>${escapeHtml(`${data.label} · ${data.thinkingTokensText}`)}</b></blockquote>`);
   }
 
   parts.push(formatPreviewFooterHtml(input.agent, input.elapsedMs, input.meta ?? null, {

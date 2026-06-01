@@ -15,6 +15,17 @@ vi.mock('node:child_process', async importOriginal => {
   };
 });
 
+describe('Claude API retry classification', () => {
+  it('retries transient overloads but not quota/rate-limit exhaustion', async () => {
+    const { isRetryableClaudeApiError } = await import('../src/agent/utils.ts');
+    expect(isRetryableClaudeApiError('Overloaded')).toBe(true);
+    expect(isRetryableClaudeApiError('Gateway timeout 504')).toBe(true);
+    expect(isRetryableClaudeApiError('Rate limit exceeded')).toBe(false);
+    expect(isRetryableClaudeApiError('Usage limit reached')).toBe(false);
+    expect(isRetryableClaudeApiError('session limit resets later')).toBe(false);
+  });
+});
+
 describe('Claude usage resolution', () => {
   const originalHome = process.env.HOME;
   let homeDir = '';

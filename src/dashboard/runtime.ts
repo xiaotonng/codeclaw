@@ -32,8 +32,10 @@ import {
   DEFAULT_AGENT_MODELS,
   resolveAgentEffort,
   resolveAgentModel,
+  resolveAgentWorkflowEnabled,
   setAgentEffortEnv,
   setAgentModelEnv,
+  setAgentWorkflowEnv,
 } from '../core/config/runtime-config.js';
 
 // ---------------------------------------------------------------------------
@@ -51,6 +53,8 @@ export interface RuntimePrefs {
   defaultAgent?: Agent;
   models: Partial<Record<Agent, string>>;
   efforts: Partial<Record<Agent, string>>;
+  /** Multi-agent Workflow orchestration toggle, per agent (claude today). */
+  workflow: Partial<Record<Agent, boolean>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +197,7 @@ export interface DashboardEvent {
 
 class Runtime {
   private botRef: Bot | null = null;
-  readonly runtimePrefs: RuntimePrefs = { models: {}, efforts: {} };
+  readonly runtimePrefs: RuntimePrefs = { models: {}, efforts: {}, workflow: {} };
 
   /** Dashboard event bus — WebSocket connections subscribe to this. */
   readonly events = new EventEmitter();
@@ -235,6 +239,9 @@ class Runtime {
     }
     for (const [agent, effort] of Object.entries(this.runtimePrefs.efforts)) {
       if (this.isAgent(agent) && typeof effort === 'string' && effort.trim()) bot.setEffortForAgent(agent, effort);
+    }
+    for (const [agent, enabled] of Object.entries(this.runtimePrefs.workflow)) {
+      if (this.isAgent(agent) && typeof enabled === 'boolean') bot.setWorkflowEnabledForAgent(agent, enabled);
     }
     // Wire stream snapshots → dashboard WebSocket
     const prevPhases = new Map<string, string | null>();
@@ -284,6 +291,10 @@ class Runtime {
     setAgentEffortEnv(agent, value);
   }
 
+  setWorkflowEnv(agent: Agent, value: boolean): void {
+    setAgentWorkflowEnv(agent, value);
+  }
+
   getRuntimeModel(agent: Agent, config = loadUserConfig()): string {
     if (this.botRef) return this.botRef.modelForAgent(agent) || this.defaultModels[agent];
     return String(this.runtimePrefs.models[agent] || resolveAgentModel(config, agent)).trim();
@@ -293,6 +304,13 @@ class Runtime {
     if (this.botRef) return this.botRef.effortForAgent(agent);
     const value = String(this.runtimePrefs.efforts[agent] || resolveAgentEffort(config, agent) || '').trim().toLowerCase();
     return value || null;
+  }
+
+  getRuntimeWorkflowEnabled(agent: Agent, config = loadUserConfig()): boolean {
+    if (this.botRef) return this.botRef.workflowEnabledForAgent(agent);
+    const pref = this.runtimePrefs.workflow[agent];
+    if (typeof pref === 'boolean') return pref;
+    return resolveAgentWorkflowEnabled(config, agent);
   }
 
   // -- Channel state cache --

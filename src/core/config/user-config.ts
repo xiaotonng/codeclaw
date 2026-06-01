@@ -75,6 +75,13 @@ export interface UserConfig {
   agentAutoUpdate?: boolean;
   claudeModel?: string;
   claudeReasoningEffort?: string;
+  /**
+   * Enable Claude's multi-agent Workflow orchestration for this agent. Default
+   * OFF — when false/unset the claude driver hard-disables the Workflow tool
+   * (`--disallowed-tools Workflow`) so it can't be triggered accidentally.
+   * Orthogonal to reasoning effort; only claude advertises the capability.
+   */
+  claudeWorkflowEnabled?: boolean;
   codexModel?: string;
   codexReasoningEffort?: string;
   geminiModel?: string;

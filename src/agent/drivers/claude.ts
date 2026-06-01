@@ -92,6 +92,13 @@ function claudeCmd(o: StreamOpts): string[] {
     if (o.attachments?.length) o._stdinOverride = buildClaudeUserMessage(o.prompt, o.attachments);
   }
   if (o.thinkingEffort) args.push('--effort', o.thinkingEffort);
+  // Multi-agent Workflow gate. The Workflow tool is always present in the
+  // toolset and triggers on a bare "workflow" keyword — combined with the
+  // bypassPermissions mode pikiclaw runs by default, that means an offhand
+  // mention could auto-spawn a fleet of sub-agents. Unless orchestration is
+  // explicitly enabled, drop the tool entirely so it can't fire at all. When
+  // enabled, the bot injects a standing opt-in directive via the system prompt.
+  if (!o.claudeWorkflowEnabled) args.push('--disallowed-tools', 'Workflow');
   if (o.claudeAppendSystemPrompt) args.push('--append-system-prompt', o.claudeAppendSystemPrompt);
   if (o.mcpConfigPath) args.push('--mcp-config', o.mcpConfigPath);
   if (o.claudeExtraArgs?.length) args.push(...o.claudeExtraArgs);
@@ -2089,7 +2096,7 @@ class ClaudeDriver implements AgentDriver {
   readonly id = 'claude';
   readonly cmd = 'claude';
   readonly thinkLabel = 'Thinking';
-  readonly capabilities = { fork: true, modelSwitch: true };
+  readonly capabilities = { fork: true, modelSwitch: true, workflow: true };
   // Claude Code BYOK routes through ANTHROPIC_BASE_URL — accepts both
   // first-party Anthropic and any openai-compatible provider that exposes an
   // Anthropic-protocol-shaped endpoint (OpenRouter `/api/v1`, DeepSeek

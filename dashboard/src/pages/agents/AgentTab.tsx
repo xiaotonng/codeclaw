@@ -212,6 +212,10 @@ type CopyPack = {
   rowProvider: string;
   rowModel: string;
   rowEffort: string;
+  rowWorkflow: string;
+  workflowOn: string;
+  workflowOff: string;
+  workflowHint: string;
   providerNative: string;
   providerNativeFromAgent: string;
   effortDefault: string;
@@ -239,6 +243,8 @@ type CopyPack = {
   rowSummaryNative: string;
   rowSummaryNoModel: string;
   rowSummaryNoEffort: string;
+  rowWorkflowChipOn: string;
+  rowWorkflowChipOff: string;
 };
 
 function getCopy(locale: Locale): CopyPack {
@@ -280,6 +286,10 @@ function getCopy(locale: Locale): CopyPack {
       rowProvider: '供应商',
       rowModel: '模型',
       rowEffort: '推理强度',
+      rowWorkflow: '多智能体编排',
+      workflowOn: '开启',
+      workflowOff: '关闭（默认）',
+      workflowHint: '开启后，遇到大型多步任务（广度调研、大规模重构 / 审计、跨多文件评审）智能体可自行编排多个子智能体并行处理。关闭时彻底禁用 Workflow 工具，普通对话不受影响。',
       providerNative: '官方（CLI 内置认证）',
       providerNativeFromAgent: '智能体自身配置',
       effortDefault: '默认',
@@ -305,6 +315,8 @@ function getCopy(locale: Locale): CopyPack {
       rowSummaryNative: '官方认证',
       rowSummaryNoModel: '未选模型',
       rowSummaryNoEffort: '默认强度',
+      rowWorkflowChipOn: '编排开',
+      rowWorkflowChipOff: '编排关',
     };
   }
   return {
@@ -344,6 +356,10 @@ function getCopy(locale: Locale): CopyPack {
     rowProvider: 'Provider',
     rowModel: 'Model',
     rowEffort: 'Effort',
+    rowWorkflow: 'Multi-agent Workflow',
+    workflowOn: 'On',
+    workflowOff: 'Off (default)',
+    workflowHint: 'When on, the agent may orchestrate multiple sub-agents in parallel for large multi-step work (broad research, big refactors/audits, cross-file reviews). Off fully disables the Workflow tool; ordinary chat is unaffected.',
     providerNative: 'Native (CLI auth)',
     providerNativeFromAgent: "agent's own config",
     effortDefault: 'default',
@@ -369,6 +385,8 @@ function getCopy(locale: Locale): CopyPack {
     rowSummaryNative: 'Native auth',
     rowSummaryNoModel: 'No model',
     rowSummaryNoEffort: 'Default effort',
+    rowWorkflowChipOn: 'Workflow on',
+    rowWorkflowChipOff: 'Workflow off',
   };
 }
 
@@ -423,6 +441,8 @@ interface ConfigDraft {
   profileId: string | null;
   /** Agent-level effort override. Stored in runtime config regardless of kind. */
   effort: string;
+  /** Multi-agent Workflow orchestration toggle. Agent-level, kind-independent. */
+  workflow: boolean;
 }
 
 function makeInitialDraft(
@@ -436,6 +456,7 @@ function makeInitialDraft(
       modelId: boundInfo.modelId,
       profileId: boundInfo.profileId,
       effort: boundInfo.effort || '',
+      workflow: !!agentStatus?.workflowEnabled,
     };
   }
   const native = agentStatus?.nativeConfig || null;
@@ -444,6 +465,7 @@ function makeInitialDraft(
     modelId: native?.model || agentStatus?.selectedModel || '',
     profileId: null,
     effort: native?.effort || agentStatus?.selectedEffort || '',
+    workflow: !!agentStatus?.workflowEnabled,
   };
 }
 
@@ -451,7 +473,8 @@ function draftEqual(a: ConfigDraft, b: ConfigDraft): boolean {
   return a.kind === b.kind
     && (a.profileId || '') === (b.profileId || '')
     && a.modelId.trim() === b.modelId.trim()
-    && (a.effort || '') === (b.effort || '');
+    && (a.effort || '') === (b.effort || '')
+    && a.workflow === b.workflow;
 }
 
 /** Encode/decode the unified selection on the wire used by ModelSelect.
@@ -631,6 +654,14 @@ function AgentInlineConfig({
         }
       }
 
+      // Workflow orchestration is an agent-level toggle, orthogonal to the
+      // model/effort/provider binding above — sync it independently when it
+      // diverges from the saved state and the driver supports it.
+      if (agentStatus.capabilities?.workflow && draft.workflow !== !!agentStatus.workflowEnabled) {
+        const res = await api.updateRuntimeAgent({ agent: agentId, workflow: draft.workflow });
+        if (!res.ok) throw new Error(res.error || 'Failed to update agent');
+      }
+
       await Promise.resolve(onSaved());
       toast(copy.saved);
     } catch (e: any) {
@@ -686,6 +717,24 @@ function AgentInlineConfig({
           )}
         </div>
       </div>
+
+      {/* Workflow orchestration — orthogonal toggle, only for drivers that
+          advertise the capability (claude). Default OFF; enabling lets the
+          agent fan out multi-agent Workflows on large tasks. */}
+      {agentStatus.capabilities?.workflow && (
+        <div>
+          <Label className="!mb-1 text-[11px]">{copy.rowWorkflow}</Label>
+          <Select
+            value={draft.workflow ? 'on' : 'off'}
+            options={[
+              { value: 'off', label: copy.workflowOff },
+              { value: 'on', label: copy.workflowOn },
+            ]}
+            onChange={v => setDraft(d => ({ ...d, workflow: v === 'on' }))}
+          />
+          <div className="mt-1 text-[11px] leading-relaxed text-fg-5">{copy.workflowHint}</div>
+        </div>
+      )}
 
       {/* External-native (Hermes) hint when native is selected. */}
       {nativeReadOnly && (
@@ -822,6 +871,14 @@ function AgentRow({
               <span className="font-mono text-fg-3">{summary.modelText}</span>
               <span className="text-fg-6" aria-hidden="true">·</span>
               <span>{summary.effortText}</span>
+              {agent.capabilities?.workflow && (
+                <>
+                  <span className="text-fg-6" aria-hidden="true">·</span>
+                  {agent.workflowEnabled
+                    ? <Badge variant="accent">{copy.rowWorkflowChipOn}</Badge>
+                    : <span className="text-fg-5">{copy.rowWorkflowChipOff}</span>}
+                </>
+              )}
             </div>
           ) : tagline ? (
             <div className="mt-0.5 truncate text-[11px] text-fg-5">{tagline}</div>

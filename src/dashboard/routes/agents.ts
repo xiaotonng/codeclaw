@@ -152,6 +152,7 @@ async function buildAgentStatusResponse(config = loadUserConfig(), agentOptions:
         ...agentState,
         selectedModel: null,
         selectedEffort: null,
+        workflowEnabled: false,
         isDefault: false,
         models: [],
         usage: null,
@@ -252,6 +253,7 @@ async function buildAgentStatusResponse(config = loadUserConfig(), agentOptions:
       selectedEffort,
       nativeSelectedModel,
       nativeSelectedEffort,
+      workflowEnabled: runtime.getRuntimeWorkflowEnabled(agentId, config),
       isDefault: agentId === defaultAgent,
       models,
       usage,
@@ -417,6 +419,20 @@ app.post('/api/runtime-agent', async (c) => {
       if (targetAgent === 'hermes') nextConfig.hermesReasoningEffort = effort;
       if (botRef) botRef.setEffortForAgent(targetAgent, effort);
     }
+  }
+
+  // Workflow orchestration toggle — independent of model/effort (orthogonal
+  // axis), gated to drivers that advertise the capability.
+  if (typeof body?.workflow === 'boolean') {
+    if (!runtime.isAgent(targetAgent)) return c.json({ ok: false, error: 'Invalid agent' }, 400);
+    if (!getDriverCapabilities(targetAgent).workflow) {
+      return c.json({ ok: false, error: `${targetAgent} does not support workflow orchestration` }, 400);
+    }
+    const enabled = body.workflow as boolean;
+    runtime.runtimePrefs.workflow[targetAgent] = enabled;
+    runtime.setWorkflowEnv(targetAgent, enabled);
+    if (targetAgent === 'claude') nextConfig.claudeWorkflowEnabled = enabled;
+    if (botRef) botRef.setWorkflowEnabledForAgent(targetAgent, enabled);
   }
 
   saveUserConfig(nextConfig);

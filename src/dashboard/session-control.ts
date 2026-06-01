@@ -67,6 +67,11 @@ export interface QueueSessionTaskRequest {
   prompt: string;
   model?: string | null;
   effort?: string | null;
+  /**
+   * Per-send opt-in to Claude's multi-agent Workflow orchestration. Deliberate
+   * per-turn choice from the composer — NOT a persisted default. Defaults off.
+   */
+  workflow?: boolean;
   attachments?: string[];
   /**
    * When the user just switched agent from a live session, pass the source
@@ -165,6 +170,9 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     attachments,
     ...(modelId ? { modelId } : {}),
     ...(thinkingEffort ? { thinkingEffort } : {}),
+    // Always thread the per-send workflow choice (even when false) so the run
+    // explicitly reflects the composer toggle rather than any ambient default.
+    workflowEnabled: request.workflow === true,
     ...(handoverFrom ? { handoverFrom } : {}),
   });
 }

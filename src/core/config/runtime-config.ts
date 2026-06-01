@@ -24,6 +24,15 @@ function trimmed(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+/** Parse a boolean-ish string (env var / loose config). Empty → null (unset). */
+function parseBoolish(value: string): boolean | null {
+  const v = value.trim().toLowerCase();
+  if (!v) return null;
+  if (v === '1' || v === 'true' || v === 'on' || v === 'yes' || v === 'enabled') return true;
+  if (v === '0' || v === 'false' || v === 'off' || v === 'no' || v === 'disabled') return false;
+  return null;
+}
+
 export function agentModelEnv(agent: Agent, env: Record<string, string | undefined> = process.env): string {
   switch (agent) {
     case 'claude': return trimmed(env.CLAUDE_MODEL);
@@ -83,6 +92,43 @@ export function resolveAgentEffort(config: Partial<UserConfig> | Record<string, 
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow (multi-agent orchestration) toggle
+//
+// Orthogonal to effort: effort tunes how deeply a *single* agent reasons;
+// workflow grants the agent permission to author + run multi-agent Workflow
+// orchestrations (fan-out / pipeline / verify). Only agents whose driver
+// advertises `capabilities.workflow` honor it (claude today). Default OFF —
+// the claude driver hard-disables the Workflow tool unless this is true, so a
+// bare "workflow" keyword can never auto-spawn a fleet of sub-agents under the
+// bypassPermissions mode pikiclaw runs by default.
+// ---------------------------------------------------------------------------
+
+export function agentWorkflowEnv(agent: Agent, env: Record<string, string | undefined> = process.env): string {
+  switch (agent) {
+    case 'claude': return trimmed(env.CLAUDE_WORKFLOW);
+  }
+  return '';
+}
+
+export function resolveAgentWorkflowEnabled(config: Partial<UserConfig> | Record<string, any>, agent: Agent): boolean {
+  switch (agent) {
+    case 'claude': {
+      const raw = (config as Partial<UserConfig>).claudeWorkflowEnabled;
+      if (typeof raw === 'boolean') return raw;
+      const fromEnv = parseBoolish(agentWorkflowEnv('claude'));
+      return fromEnv ?? false;
+    }
+  }
+  return false;
+}
+
+export function setAgentWorkflowEnv(agent: Agent, value: boolean, env: NodeJS.ProcessEnv = process.env): void {
+  switch (agent) {
+    case 'claude': env.CLAUDE_WORKFLOW = value ? '1' : '0'; break;
+  }
 }
 
 export function setAgentModelEnv(agent: Agent, value: string, env: NodeJS.ProcessEnv = process.env): void {

@@ -114,6 +114,23 @@ describe('Claude TUI driver — startup-failure fallback contract', () => {
   }, 15_000);
 });
 
+describe('Claude TUI driver — terminal limit notices', () => {
+  it('detects Claude synthetic subscription/session limit notices', async () => {
+    const { detectClaudeTuiTerminalLimitNotice } = await import('../src/agent/drivers/claude-tui.ts');
+    const notice = detectClaudeTuiTerminalLimitNotice({
+      model: '<synthetic>',
+      content: [{ type: 'text', text: "You've hit your session limit · resets 9:40pm (Asia/Shanghai)" }],
+    });
+    expect(notice).toContain("You've hit your session limit");
+  });
+
+  it('detects screen-only limit text but ignores ordinary prose about rate limits', async () => {
+    const { detectClaudeTuiTerminalLimitNotice } = await import('../src/agent/drivers/claude-tui.ts');
+    expect(detectClaudeTuiTerminalLimitNotice('Usage limit reached. Please try again later.')).toContain('Usage limit reached');
+    expect(detectClaudeTuiTerminalLimitNotice('Please explain how rate limit handling works in this codebase.')).toBeNull();
+  });
+});
+
 describe('Claude TUI driver — chunked text streaming', () => {
   // The TUI driver replaces print-mode's per-token deltas with a simulated
   // stream: JSONL writes complete content blocks, the driver chunks them out
